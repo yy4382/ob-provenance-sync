@@ -5,11 +5,12 @@ import { agentIdSchema } from "@provenance/core";
 import { createMcpServer } from "./server";
 import { httpOps, localOps } from "./transport";
 
-const usage = `provenance-mcp --vault-path <dir> --agent <name> [--server <url> --vault <id> --token <token>]
+const usage = `provenance-mcp --vault-path <dir> [--agent <name>] [--server <url> --vault <id> --token <token>]
 
 Local MCP server for an Obsidian vault. Edits go through the running
 Obsidian plugin; when Obsidian is closed they go to the sync server.
-The token can also come from PROVENANCE_TOKEN.`;
+Edits are attributed to the name the MCP client reports (e.g. claude-code)
+unless --agent pins one. The token can also come from PROVENANCE_TOKEN.`;
 
 const { values } = parseArgs({
   options: {
@@ -23,9 +24,9 @@ const { values } = parseArgs({
 });
 
 const vaultPath = values["vault-path"];
-const agent = agentIdSchema.safeParse(values.agent?.includes(":") ? values.agent : `agent:${values.agent}`);
+const agent = values.agent ? agentIdSchema.safeParse(values.agent.includes(":") ? values.agent : `agent:${values.agent}`) : null;
 const token = values.token ?? process.env.PROVENANCE_TOKEN;
-if (values.help || !vaultPath || !values.agent || !agent.success) {
+if (values.help || !vaultPath || (agent && !agent.success)) {
   console.error(usage);
   process.exit(values.help ? 0 : 2);
 }
@@ -37,5 +38,5 @@ if (values.server && !(values.vault && token)) {
 const remote = values.server
   ? httpOps(`${values.server.replace(/\/$/, "")}/api/vaults/${encodeURIComponent(values.vault!)}/ops`, token!)
   : null;
-const server = createMcpServer({ ops: localOps({ vaultPath, remote }), agent: agent.data, mode: "full" });
+const server = createMcpServer({ ops: localOps({ vaultPath, remote }), agent: agent?.data ?? null, mode: "full" });
 await server.connect(new StdioServerTransport());

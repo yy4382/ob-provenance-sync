@@ -46,15 +46,30 @@ function render(res: OpResponse): CallToolResult {
   return { content: [{ type: "text", text }] };
 }
 
+/** The identity an MCP client announces in its handshake, e.g. "Claude Code" becomes agent:claude-code. */
+export function agentFromClientName(name: string | undefined): AgentId | null {
+  const slug = (name ?? "").toLowerCase().replace(/[^\w.@-]+/g, "-").replace(/^-+|-+$/g, "");
+  return slug ? `agent:${slug}` : null;
+}
+
 /**
- * Exposes vault ops as MCP tools for one agent identity. Limited mode is the
- * subset a server can serve without Obsidian; full mode adds the tools that
- * need Obsidian's metadata cache and file operations.
+ * Exposes vault ops as MCP tools. Limited mode is the subset a server can
+ * serve without Obsidian; full mode adds the tools that need Obsidian's
+ * metadata cache and file operations.
+ *
+ * Edits are attributed to `agent` when it is pinned, otherwise to the name
+ * the client gave in the MCP handshake, so several agents can share one
+ * server configuration and still be told apart.
  */
-export function createMcpServer(opts: { ops: OpsTransport; agent: AgentId; mode: Mode }): McpServer {
+export function createMcpServer(opts: { ops: OpsTransport; agent: AgentId | null; mode: Mode }): McpServer {
   const server = new McpServer({ name: "obsidian-provenance", version: "0.1.0" });
   const call = async (req: OpRequest) => render(await opts.ops(req));
-  const by = (w: z.infer<typeof why>, n?: string) => ({ agent: opts.agent, why: w, ...(n ? { note: n } : {}) });
+  const identity = () => opts.agent ?? agentFromClientName(server.server.getClientVersion()?.name);
+  const by = (w: z.infer<typeof why>, n?: string) => ({ agent: identity()!, why: w, ...(n ? { note: n } : {}) });
+  const write = async (req: OpRequest) => {
+    if (!identity()) return render({ ok: false, code: "invalid", message: "this MCP client sent no name; start the server with --agent <name>" });
+    return call(req);
+  };
 
   server.registerTool(
     "list_files",
@@ -92,7 +107,7 @@ export function createMcpServer(opts: { ops: OpsTransport; agent: AgentId; mode:
       },
     },
     (a) =>
-      call({
+      write({
         op: "edit",
         path: a.path,
         oldString: a.old_string,
@@ -107,7 +122,7 @@ export function createMcpServer(opts: { ops: OpsTransport; agent: AgentId; mode:
       description: "Append text to the end of a markdown file. Include any leading newline you need.",
       inputSchema: { path, text: z.string(), why, note },
     },
-    (a) => call({ op: "append", path: a.path, text: a.text, by: by(a.why, a.note) }),
+    (a) => write({ op: "append", path: a.path, text: a.text, by: by(a.why, a.note) }),
   );
   server.registerTool(
     "create_file",
@@ -115,7 +130,7 @@ export function createMcpServer(opts: { ops: OpsTransport; agent: AgentId; mode:
       description: "Create a new markdown file. Fails if the file already exists.",
       inputSchema: { path, content: z.string(), why, note },
     },
-    (a) => call({ op: "create", path: a.path, content: a.content, by: by(a.why, a.note) }),
+    (a) => write({ op: "create", path: a.path, content: a.content, by: by(a.why, a.note) }),
   );
 
   if (opts.mode === "limited") return server;

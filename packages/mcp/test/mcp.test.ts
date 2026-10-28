@@ -9,10 +9,10 @@ import type { OpRequest, OpResponse } from "@provenance/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { createMcpServer, httpOps, localOps, PLUGIN_ID, type OpsTransport } from "../src";
 
-async function connect(ops: OpsTransport, mode: "full" | "limited") {
+async function connect(ops: OpsTransport, mode: "full" | "limited", agent: `agent:${string}` | null = "agent:claude-code", clientName = "test") {
   const [a, b] = InMemoryTransport.createLinkedPair();
-  await createMcpServer({ ops, agent: "agent:claude-code", mode }).connect(a);
-  const client = new Client({ name: "test", version: "0" });
+  await createMcpServer({ ops, agent, mode }).connect(a);
+  const client = new Client({ name: clientName, version: "0" });
   await client.connect(b);
   return client;
 }
@@ -49,6 +49,16 @@ describe("MCP tools", () => {
     });
     expect(ok.content).toEqual([{ type: "text", text: "replaced 1 occurrence(s)" }]);
     expect(seen[0]).toMatchObject({ op: "edit", by: { agent: "agent:claude-code", why: "human-via-agent", note: "dictated" } });
+  });
+
+  it("names the agent after the MCP client unless the server pins an identity", async () => {
+    const seen: OpRequest[] = [];
+    const ops: OpsTransport = async (req) => (seen.push(req), { ok: true, result: { op: "append" } });
+    const args = { path: "a.md", text: "x", why: "agent" };
+    await (await connect(ops, "full", null, "Claude Code")).callTool({ name: "append_to_file", arguments: args });
+    await (await connect(ops, "full", null, "codex-mcp-client")).callTool({ name: "append_to_file", arguments: args });
+    await (await connect(ops, "full", "agent:andy", "codex-mcp-client")).callTool({ name: "append_to_file", arguments: args });
+    expect(seen.map((r) => r.op === "append" && r.by.agent)).toEqual(["agent:claude-code", "agent:codex-mcp-client", "agent:andy"]);
   });
 
   it("limited mode only offers the edit and read tools", async () => {
