@@ -8,7 +8,7 @@ export class ObsidianDisk implements Disk {
   constructor(private readonly app: App) {}
 
   /** The config folder's name is user-configurable, so ask Obsidian for it. */
-  isSynced(path: string): boolean {
+  accepts(path: string): boolean {
     return !path.startsWith(`${this.app.vault.configDir}/`);
   }
 
@@ -24,7 +24,7 @@ export class ObsidianDisk implements Disk {
   async list() {
     return this.app.vault
       .getFiles()
-      .filter((f) => this.isSynced(f.path))
+      .filter((f) => this.accepts(f.path))
       .map((f) => ({ path: f.path, binary: f.extension !== "md" }));
   }
 

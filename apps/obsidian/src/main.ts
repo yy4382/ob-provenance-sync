@@ -50,7 +50,7 @@ export default class ProvenancePlugin extends Plugin {
     this.addCommand({ id: "reconnect", name: "Reconnect sync", callback: () => void this.restartSync() });
 
     const forward = (fn: (engine: SyncEngine, file: TFile) => unknown) => (file: TAbstractFile) => {
-      if (this.engine && this.disk && file instanceof TFile && this.disk.isSynced(file.path)) void fn(this.engine, file);
+      if (this.engine && this.disk && file instanceof TFile && this.disk.accepts(file.path)) void fn(this.engine, file);
     };
     this.app.workspace.onLayoutReady(() => {
       this.registerEvent(this.app.vault.on("create", forward((e, f) => e.onCreate(f.path, f.extension !== "md"))));
@@ -58,7 +58,7 @@ export default class ProvenancePlugin extends Plugin {
       this.registerEvent(this.app.vault.on("delete", forward((e, f) => e.onDelete(f.path))));
       this.registerEvent(
         this.app.vault.on("rename", (file, oldPath) => {
-          if (this.engine && this.disk && file instanceof TFile && this.disk.isSynced(oldPath)) void this.engine.onRename(oldPath, file.path);
+          if (this.engine && this.disk && file instanceof TFile && this.disk.accepts(oldPath)) void this.engine.onRename(oldPath, file.path);
         }),
       );
       void this.restartSync();

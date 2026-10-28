@@ -31,8 +31,15 @@ export class MemoryDisk implements Disk {
   async list() {
     return [...this.files].map(([path, v]) => ({ path, binary: typeof v !== "string" }));
   }
+  /** Simulated latency of disk reads, to widen race windows. */
+  readDelay = 0;
+
+  accepts(path: string) {
+    return !path.startsWith(".obsidian/");
+  }
   async read(path: string) {
     const v = this.files.get(path);
+    if (this.readDelay) await new Promise((r) => setTimeout(r, this.readDelay));
     return typeof v === "string" ? v : null;
   }
   async readBinary(path: string) {
@@ -64,13 +71,19 @@ export class MemoryDisk implements Disk {
 /** Stands in for IndexedDB: survives engine restarts within one test. */
 export class MemoryStore {
   private readonly updates = new Map<string, Uint8Array[]>();
+  private readonly meta = new Map<string, unknown>();
   persist = (name: string, doc: Y.Doc): Persistence => {
     const list = this.updates.get(name) ?? [];
     this.updates.set(name, list);
     for (const u of list) Y.applyUpdate(doc, u);
     const onUpdate = (u: Uint8Array) => list.push(u);
     doc.on("update", onUpdate);
-    return { whenSynced: Promise.resolve(), destroy: () => doc.off("update", onUpdate) };
+    return {
+      whenSynced: Promise.resolve(),
+      destroy: () => doc.off("update", onUpdate),
+      get: async (key) => this.meta.get(`${name}:${key}`),
+      set: async (key, value) => void this.meta.set(`${name}:${key}`, value),
+    };
   };
 }
 

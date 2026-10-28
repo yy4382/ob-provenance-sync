@@ -1,4 +1,4 @@
-import { attribute, executeOp, humanProvenance, insertText } from "@provenance/core";
+import { agentProvenance, attribute, executeOp, humanProvenance, insertText } from "@provenance/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { SyncEngine } from "../src/sync/engine";
 import { eventually, MemoryDisk, MemoryStore, startServer, TOKEN } from "./harness";
@@ -135,4 +135,112 @@ describe("SyncEngine", () => {
     const local = await device("mac", disk, new MemoryStore(), false);
     expect(kindsOf(local.engine, "a.md")).toEqual([["Local only.", "unknown", ["mac"]]]);
   });
+
+  it("does not revert remote edits made while the device was off, however slow the disk", async () => {
+    const { device } = await setup();
+    const diskA = new MemoryDisk();
+    diskA.files.set("a.md", "Base.");
+    const a = await device("mac", diskA);
+    const b = await device("phone");
+    await eventually(() => expect(b.disk.files.get("a.md")).toBe("Base."));
+    b.engine.destroy();
+    b.disk.engine = null;
+
+    insertText(a.engine.fileAt("a.md")!.ytext, 5, " Remote.", agentProvenance("agent:x", "agent", null, "mac"));
+    b.disk.readDelay = 100;
+    await device("phone", b.disk, b.store);
+    await eventually(() => expect(b.disk.files.get("a.md")).toBe("Base. Remote."));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(a.engine.fileAt("a.md")!.ytext.toJSON()).toBe("Base. Remote.");
+  });
+
+  it("merges an external edit with a remote change that has not reached the disk yet", async () => {
+    const { device } = await setup();
+    const diskA = new MemoryDisk();
+    diskA.files.set("a.md", "Line one.\n");
+    const a = await device("mac", diskA);
+    const b = await device("phone");
+    await eventually(() => expect(b.disk.files.get("a.md")).toBe("Line one.\n"));
+
+    const fileB = b.engine.fileAt("a.md")!;
+    insertText(fileB.ytext, 0, "Remote first. ", agentProvenance("agent:x", "agent", null, "phone"));
+    await eventually(() => expect(a.engine.fileAt("a.md")!.ytext.toJSON()).toBe("Remote first. Line one.\n"));
+    a.disk.files.set("a.md", "Line one.\nVim line.\n");
+    await a.engine.onModify("a.md", false);
+    const merged = "Remote first. Line one.\nVim line.\n";
+    await eventually(() => expect(a.disk.files.get("a.md")).toBe(merged));
+    await eventually(() => expect(b.disk.files.get("a.md")).toBe(merged));
+  });
+
+  it("applies an external revert to content it wrote earlier", async () => {
+    const { device } = await setup();
+    const disk = new MemoryDisk();
+    disk.files.set("a.md", "v1");
+    const a = await device("mac", disk);
+    const file = a.engine.fileAt("a.md")!;
+    file.doc.transact(() => {
+      file.ytext.delete(0, 2);
+      insertText(file.ytext, 0, "v2", agentProvenance("agent:x", "agent", null, "mac"));
+    });
+    await a.engine.settle();
+    expect(disk.files.get("a.md")).toBe("v2");
+    disk.files.set("a.md", "v1");
+    await a.engine.onModify("a.md", false);
+    await a.engine.settle();
+    expect(file.ytext.toJSON()).toBe("v1");
+  });
+
+  it("opens a new empty note while the server is unreachable", async () => {
+    const { device, server } = await setup();
+    const store = new MemoryStore();
+    const disk = new MemoryDisk();
+    disk.files.set("x.md", "x");
+    const first = await device("mac", disk, store);
+    first.engine.destroy();
+    disk.engine = null;
+    const offline = new SyncEngine({
+      vault: "v",
+      author: "human:chris",
+      device: "mac",
+      disk,
+      persist: store.persist,
+      server: { url: "ws://127.0.0.1:1", token: TOKEN, blobs: server.blobs("v") },
+    });
+    disk.engine = offline;
+    cleanup.push(() => offline.destroy());
+    await offline.start();
+    await disk.write("Untitled.md", "");
+    await offline.settle();
+    const ready = await Promise.race([offline.fileAt("Untitled.md")!.ready.then(() => "ready"), sleep(1000).then(() => "hung")]);
+    expect(ready).toBe("ready");
+  });
+
+  it("propagates a delete made while Obsidian was closed instead of resurrecting the file", async () => {
+    const { device } = await setup();
+    const diskA = new MemoryDisk();
+    diskA.files.set("gone.md", "Delete me.");
+    diskA.files.set("keep.md", "Keep me.");
+    const a = await device("mac", diskA);
+    const b = await device("phone");
+    await eventually(() => expect(b.disk.files.get("gone.md")).toBe("Delete me."));
+
+    await a.engine.settle();
+    a.engine.destroy();
+    diskA.engine = null;
+    diskA.files.delete("gone.md");
+    await device("mac", diskA, a.store);
+    await eventually(() => expect(b.disk.files.has("gone.md")).toBe(false));
+    expect(diskA.files.has("gone.md")).toBe(false);
+  });
+
+  it("never writes remote entries into the config folder", async () => {
+    const { device } = await setup();
+    const a = await device("mac");
+    await a.engine.updateIndex((index) => index.set("evil" as never, { type: "markdown", path: ".obsidian/plugins/x/main.md" }));
+    await a.engine.settle();
+    expect([...a.disk.files.keys()]).toEqual([]);
+  });
 });
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+

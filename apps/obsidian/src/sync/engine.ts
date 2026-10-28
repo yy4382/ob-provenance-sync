@@ -18,6 +18,8 @@ import * as Y from "yjs";
 
 /** The vault's files as the engine sees them; Obsidian's vault API in the plugin, a Map in tests. */
 export interface Disk {
+  /** Whether a path belongs to the synced vault (the config folder doesn't). */
+  accepts(path: string): boolean;
   list(): Promise<Array<{ path: string; binary: boolean }>>;
   read(path: string): Promise<string | null>;
   write(path: string, text: string): Promise<void>;
@@ -32,9 +34,12 @@ export interface Blobs {
   get(hash: string): Promise<ArrayBuffer>;
 }
 
+/** Local storage for one document (IndexedDB in Obsidian), plus small per-document values. */
 export interface Persistence {
   whenSynced: Promise<unknown>;
   destroy(): unknown;
+  get(key: string): Promise<unknown>;
+  set(key: string, value: unknown): Promise<unknown>;
 }
 
 export interface EngineOptions {
@@ -53,33 +58,40 @@ export type SyncStatus = "offline" | "connecting" | "connected" | "local-only";
 /** Transaction origin for changes we read off disk, so they are not written straight back. */
 export const FROM_DISK = Symbol("from-disk");
 
-const ECHO_WINDOW = 20;
-
 export async function sha256(data: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", data);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+const BASE_KEY = "disk-base";
+const MIRROR_KEY = "on-disk";
+
 /**
- * One markdown file's CRDT replica. Disk writes are debounced and skipped
- * while an editor is bound, because then the editor owns saving. `recent`
- * remembers what we last put on disk so the modify events our own writes
- * cause are recognised as echoes instead of external edits.
+ * One markdown file's CRDT replica.
+ *
+ * `base` is the CRDT state the file on disk last matched, persisted next to
+ * the document. A disk change is applied as a three-way merge: replay
+ * diff(base, disk) on a fork taken at the base and merge the fork back, so
+ * remote changes that haven't reached the disk yet are kept rather than
+ * reverted. Disk writes are debounced and skipped while an editor is bound,
+ * because then the editor owns saving.
  */
 export class MarkdownFile {
   readonly doc = new Y.Doc({ gc: false });
   readonly ytext = this.doc.getText(TEXT_KEY);
   readonly ready: Promise<void>;
-  private readonly recent: string[] = [];
+  private base: { snapshot: Y.Snapshot; text: string } | null = null;
   private editors = 0;
   private writeTimer: ReturnType<typeof setTimeout> | null = null;
   private provider: HocuspocusProvider | null = null;
   private persistence: Persistence | null = null;
-  private hadLocal = false;
+  private destroyed = false;
 
   constructor(
     readonly id: FileId,
     private readonly engine: SyncEngine,
+    /** Created on this device, so there is nothing to fetch before it is usable. */
+    private readonly createdHere: boolean,
   ) {
     this.ytext.observe((_e, tr) => {
       if (tr.origin !== FROM_DISK) this.scheduleWrite();
@@ -96,49 +108,68 @@ export class MarkdownFile {
     const name = fileDocName(opts.vault, this.id);
     this.persistence = opts.persist?.(name, this.doc) ?? null;
     await this.persistence?.whenSynced;
-    this.hadLocal = Y.encodeStateVector(this.doc).length > 1;
+    const saved = await this.persistence?.get(BASE_KEY);
+    if (saved instanceof Uint8Array && this.base === null) {
+      const snapshot = Y.decodeSnapshot(saved);
+      this.base = { snapshot, text: Y.createDocFromSnapshot(this.doc, snapshot).getText(TEXT_KEY).toJSON() };
+    }
+    const known = Y.encodeStateVector(this.doc).length > 1;
+    if (this.destroyed) return;
     this.provider = this.engine.connect(name, this.doc);
-    if (!this.hadLocal && this.provider) await synced(this.provider);
+    if (!known && !this.createdHere && this.provider) await synced(this.provider);
+  }
+
+  private setBase(snapshot: Y.Snapshot, text: string) {
+    this.base = { snapshot, text };
+    void this.persistence?.set(BASE_KEY, Y.encodeSnapshot(snapshot));
   }
 
   /**
-   * With local history, whatever differs on disk happened while we weren't
-   * watching, so it goes in as an unknown edit and the CRDT merges it with
-   * remote changes. Without local history (a fresh device) the server's copy
-   * wins and a differing local file is kept as a conflict copy.
+   * Brings the file on disk and the CRDT together when the engine first
+   * places it. A fresh device (no base, content fetched from the server) keeps
+   * a differing local file as a conflict copy instead of merging it.
    */
   async reconcileDisk(): Promise<void> {
     const path = this.path;
-    if (path === undefined) return;
+    if (path === undefined || this.destroyed) return;
     const disk = await this.engine.opts.disk.read(path);
-    const text = this.ytext.toJSON();
-    if (disk === null || disk === text) {
-      if (disk === null) await this.writeNow();
-      return;
+    if (disk === null) return this.writeNow();
+    if (!this.base && !this.createdHere && this.ytext.length > 0 && disk !== this.ytext.toJSON()) {
+      await this.engine.createFromDisk(conflictPath(path, this.id), disk, true);
+      return this.writeNow();
     }
-    if (this.hadLocal || text === "") {
-      this.applyFromDisk(disk);
-      return;
-    }
-    await this.engine.createFromDisk(conflictPath(path, this.id), disk, true);
-    await this.writeNow();
+    this.applyDisk(disk);
   }
 
-  applyFromDisk(text: string): void {
-    this.remember(text);
-    this.doc.transact(() => setText(this.ytext, text, unknownProvenance(this.engine.opts.device)), FROM_DISK);
+  applyDisk(disk: string): void {
+    if (this.destroyed) return;
+    const current = this.ytext.toJSON();
+    if (disk === current) return this.setBase(Y.snapshot(this.doc), disk);
+    const base = this.base ?? { snapshot: Y.snapshot(this.doc), text: current };
+    if (disk !== base.text) {
+      const fork = Y.createDocFromSnapshot(this.doc, base.snapshot);
+      const before = Y.encodeStateVector(fork);
+      setText(fork.getText(TEXT_KEY), disk, unknownProvenance(this.engine.opts.device));
+      Y.applyUpdate(this.doc, Y.encodeStateAsUpdate(fork, before), FROM_DISK);
+      this.setBase(Y.snapshot(fork), disk);
+    }
+    if (this.ytext.toJSON() !== disk) this.scheduleWrite();
   }
 
-  /** An edit an external program made to this file. Echoes of our own writes are ignored. */
+  /**
+   * A modify event for this file. While an editor is bound, only the editor's
+   * own saves are expected here; they refresh the base. Anything else reaches
+   * us through the editor, which Obsidian reloads.
+   */
   async onDiskModified(): Promise<void> {
-    if (this.editors > 0 || !this.path) return;
+    if (!this.path) return;
     const disk = await this.engine.opts.disk.read(this.path);
-    if (disk === null) return;
-    if (this.recent.includes(disk)) {
-      if (disk !== this.ytext.toJSON()) this.scheduleWrite();
+    if (disk === null || this.destroyed) return;
+    if (this.editors > 0) {
+      if (disk === this.ytext.toJSON()) this.setBase(Y.snapshot(this.doc), disk);
       return;
     }
-    this.applyFromDisk(disk);
+    this.applyDisk(disk);
   }
 
   /** Returns a release function. While any editor is bound, the editor saves the file. */
@@ -161,13 +192,8 @@ export class MarkdownFile {
     return unknownProvenance(this.engine.opts.device);
   }
 
-  private remember(text: string) {
-    this.recent.push(text);
-    if (this.recent.length > ECHO_WINDOW) this.recent.shift();
-  }
-
   private scheduleWrite() {
-    if (this.editors > 0) return;
+    if (this.editors > 0 || this.destroyed) return;
     if (this.writeTimer) clearTimeout(this.writeTimer);
     this.writeTimer = setTimeout(() => {
       this.writeTimer = null;
@@ -177,11 +203,12 @@ export class MarkdownFile {
 
   async writeNow(): Promise<void> {
     const path = this.path;
-    if (path === undefined || this.editors > 0) return;
+    if (path === undefined || this.editors > 0 || this.destroyed) return;
     const text = this.ytext.toJSON();
-    if (this.recent.at(-1) === text) return;
-    this.remember(text);
+    if (this.base?.text === text) return;
+    const snapshot = Y.snapshot(this.doc);
     await this.engine.opts.disk.write(path, text);
+    this.setBase(snapshot, text);
   }
 
   async flush(): Promise<void> {
@@ -192,6 +219,7 @@ export class MarkdownFile {
   }
 
   destroy(): void {
+    this.destroyed = true;
     if (this.writeTimer) clearTimeout(this.writeTimer);
     this.provider?.destroy();
     this.persistence?.destroy();
@@ -210,7 +238,9 @@ function synced(provider: HocuspocusProvider): Promise<void> {
  * `onDisk` mirrors which file id currently sits at which path on disk. Every
  * disk operation the engine performs updates the mirror first, so the vault
  * events it triggers find nothing to do. `syncTree` is the single,
- * idempotent pass that moves the disk toward the index.
+ * idempotent pass that moves the disk toward the index. The mirror is also
+ * persisted, so a file deleted while Obsidian was closed is recognised as
+ * deleted on the next start rather than restored from the server.
  */
 export class SyncEngine implements VaultDocs {
   readonly vaultIndex: VaultIndex;
@@ -222,6 +252,7 @@ export class SyncEngine implements VaultDocs {
   private indexPersistence: Persistence | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private treeTimer: ReturnType<typeof setTimeout> | null = null;
+  private mirrorTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
 
   constructor(readonly opts: EngineOptions) {
@@ -286,7 +317,8 @@ export class SyncEngine implements VaultDocs {
     // every existing file would be uploaded again under a new id.
     if (!hadLocal && this.indexProvider) await synced(this.indexProvider);
 
-    await this.enqueue(() => this.scanDisk());
+    const lastSeen = ((await this.indexPersistence?.get(MIRROR_KEY)) ?? {}) as Record<string, string>;
+    await this.enqueue(() => this.scanDisk(lastSeen));
     this.vaultIndex.files.observe((_e, tr) => {
       if (tr.origin !== FROM_DISK) this.scheduleTree();
     });
@@ -294,7 +326,7 @@ export class SyncEngine implements VaultDocs {
     await this.enqueue(() => this.syncTree());
   }
 
-  private async scanDisk(): Promise<void> {
+  private async scanDisk(lastSeen: Record<string, string>): Promise<void> {
     for (const { path, binary } of await this.opts.disk.list()) {
       const id = this.vaultIndex.idOf(path);
       if (!id) {
@@ -307,6 +339,28 @@ export class SyncEngine implements VaultDocs {
         if (data) this.binaryHashes.set(id, await sha256(data));
       }
     }
+    const deleted = Object.keys(lastSeen).filter((id) => !this.onDisk.has(id as FileId) && this.vaultIndex.get(id as FileId));
+    if (deleted.length) {
+      this.vaultIndex.doc.transact(() => deleted.forEach((id) => this.vaultIndex.delete(id as FileId)), FROM_DISK);
+    }
+  }
+
+  /** Records which files are really on disk, for detecting deletions made while we weren't running. */
+  private saveMirror() {
+    if (this.mirrorTimer || !this.indexPersistence) return;
+    this.mirrorTimer = setTimeout(() => {
+      this.mirrorTimer = null;
+      void this.enqueue(() => this.writeMirror());
+    }, 1000);
+  }
+
+  private async writeMirror() {
+    const seen: Record<string, string> = {};
+    for (const { path } of await this.opts.disk.list()) {
+      const id = this.idOnDisk(path);
+      if (id) seen[id] = path;
+    }
+    await this.indexPersistence?.set(MIRROR_KEY, seen);
   }
 
   private scheduleTree() {
@@ -337,6 +391,7 @@ export class SyncEngine implements VaultDocs {
       await this.opts.disk.trash(path);
     }
     for (const [id, entry] of entries) {
+      if (!this.opts.disk.accepts(entry.path)) continue;
       const current = this.onDisk.get(id);
       if (current !== undefined && current !== entry.path) {
         if (this.idOnDisk(entry.path)) continue;
@@ -346,17 +401,18 @@ export class SyncEngine implements VaultDocs {
       if (entry.type === "markdown") {
         if (!this.files.has(id) || current === undefined) {
           this.onDisk.set(id, entry.path);
-          const file = this.openFile(id);
+          const file = this.openFile(id, false);
           void file.ready.then(() => this.enqueue(() => file.reconcileDisk()));
         }
       } else await this.syncBinary(id, entry);
     }
+    this.saveMirror();
   }
 
-  private openFile(id: FileId): MarkdownFile {
+  private openFile(id: FileId, createdHere: boolean): MarkdownFile {
     let file = this.files.get(id);
     if (!file) {
-      file = new MarkdownFile(id, this);
+      file = new MarkdownFile(id, this, createdHere);
       this.files.set(id, file);
     }
     return file;
@@ -373,8 +429,8 @@ export class SyncEngine implements VaultDocs {
   async createFromDisk(path: string, text: string, alsoWrite: boolean): Promise<MarkdownFile> {
     const id = newFileId();
     this.onDisk.set(id, path);
-    const file = this.openFile(id);
-    file.applyFromDisk(text);
+    const file = this.openFile(id, true);
+    file.applyDisk(text);
     this.vaultIndex.doc.transact(() => this.vaultIndex.set(id, { type: "markdown", path }), FROM_DISK);
     if (alsoWrite) await this.opts.disk.write(path, text);
     return file;
@@ -401,6 +457,7 @@ export class SyncEngine implements VaultDocs {
       if (!this.started || this.idOnDisk(path)) return;
       if (binary) return this.uploadBinary(path, undefined);
       await this.createFromDisk(path, (await this.opts.disk.read(path)) ?? "", false);
+      this.saveMirror();
     });
   }
 
@@ -419,6 +476,7 @@ export class SyncEngine implements VaultDocs {
       if (!this.started || !id) return;
       this.onDisk.set(id, to);
       this.vaultIndex.doc.transact(() => this.vaultIndex.rename(id, to), FROM_DISK);
+      this.saveMirror();
     });
   }
 
@@ -431,6 +489,7 @@ export class SyncEngine implements VaultDocs {
       this.files.delete(id);
       this.binaryHashes.delete(id);
       this.vaultIndex.doc.transact(() => this.vaultIndex.delete(id), FROM_DISK);
+      this.saveMirror();
     });
   }
 
@@ -442,34 +501,45 @@ export class SyncEngine implements VaultDocs {
   }
 
   async readText(id: FileId): Promise<Y.Text> {
-    const file = this.openFile(id);
+    const file = this.openFile(id, false);
     await file.ready;
     return file.ytext;
   }
 
   async updateText<T>(id: FileId, fn: (ytext: Y.Text) => T): Promise<T> {
-    const file = this.openFile(id);
+    // An id the index doesn't know yet is a file an agent is creating right now.
+    const file = this.openFile(id, !this.vaultIndex.get(id));
     await file.ready;
     let out!: T;
     file.doc.transact(() => (out = fn(file.ytext)));
     return out;
   }
 
-  /** Resolves once queued disk work and pending writes are done; for tests and shutdown. */
-  async settle(): Promise<void> {
+  /**
+   * Resolves once queued disk work and pending writes are done; for tests and
+   * shutdown. Files still waiting for the server (offline, fresh device) are
+   * not waited for longer than `wait` ms.
+   */
+  async settle(wait = 3000): Promise<void> {
     if (this.treeTimer) {
       clearTimeout(this.treeTimer);
       this.treeTimer = null;
       await this.enqueue(() => this.syncTree());
     }
-    await Promise.all([...this.files.values()].map((f) => f.ready));
+    await Promise.race([Promise.all([...this.files.values()].map((f) => f.ready)), new Promise((r) => setTimeout(r, wait))]);
     await this.enqueue(async () => {
       for (const f of this.files.values()) await f.flush();
+      if (this.mirrorTimer) {
+        clearTimeout(this.mirrorTimer);
+        this.mirrorTimer = null;
+        await this.writeMirror();
+      }
     });
   }
 
   destroy(): void {
     if (this.treeTimer) clearTimeout(this.treeTimer);
+    if (this.mirrorTimer) clearTimeout(this.mirrorTimer);
     for (const f of this.files.values()) f.destroy();
     this.files.clear();
     this.indexProvider?.destroy();
