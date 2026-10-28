@@ -1,4 +1,5 @@
-import { agentProvenance, attribute, executeOp, humanProvenance, insertText } from "@provenance/core";
+import { agentProvenance, attribute, executeOp, fileDocName, humanProvenance, insertText, TEXT_KEY } from "@provenance/core";
+import * as Y from "yjs";
 import { afterEach, describe, expect, it } from "vitest";
 import { SyncEngine } from "../src/sync/engine";
 import { eventually, MemoryDisk, MemoryStore, startServer, TOKEN } from "./harness";
@@ -240,7 +241,83 @@ describe("SyncEngine", () => {
     await a.engine.settle();
     expect([...a.disk.files.keys()]).toEqual([]);
   });
+
+  it("keeps typing single when the editor's save is read after another edit lands, then the app dies", async () => {
+    const { device } = await setup();
+    const disk = new MemoryDisk();
+    disk.files.set("a.md", "Base.");
+    const store = new MemoryStore();
+    const a = await device("mac", disk, store, false);
+    const file = a.engine.fileAt("a.md")!;
+    file.bindEditor();
+    insertText(file.ytext, 5, " typed", humanProvenance("human:chris", "mac"));
+    disk.files.set("a.md", "Base. typed");
+    const modified = a.engine.onModify("a.md", false);
+    insertText(file.ytext, 0, "X ", agentProvenance("agent:x", "agent", null, "mac"));
+    await modified;
+    a.engine.destroy();
+    disk.engine = null;
+    const b = await device("mac", disk, store, false);
+    expect(b.engine.fileAt("a.md")!.ytext.toJSON()).toBe("X Base. typed");
+  });
+
+  it("keeps typing single when the pane closes while its last save is being read", async () => {
+    const { device } = await setup();
+    const disk = new MemoryDisk();
+    disk.files.set("a.md", "Base.");
+    const a = await device("mac", disk, new MemoryStore(), false);
+    const file = a.engine.fileAt("a.md")!;
+    const release = file.bindEditor();
+    insertText(file.ytext, 5, " typed", humanProvenance("human:chris", "mac"));
+    disk.readDelay = 50;
+    disk.files.set("a.md", "Base. typed");
+    const modified = a.engine.onModify("a.md", false);
+    release();
+    insertText(file.ytext, 0, "X ", agentProvenance("agent:x", "agent", null, "mac"));
+    await modified;
+    disk.readDelay = 0;
+    await a.engine.settle();
+    expect(file.ytext.toJSON()).toBe("X Base. typed");
+  });
+
+  it("follows a remote rename that reaches the index while the disk is being scanned", async () => {
+    const { device } = await setup();
+    const diskA = new MemoryDisk();
+    diskA.files.set("p.md", "Old.");
+    const a = await device("mac", diskA);
+    const b = await device("phone");
+    await eventually(() => expect(b.disk.files.get("p.md")).toBe("Old."));
+    await a.engine.settle();
+    a.engine.destroy();
+    diskA.engine = null;
+
+    insertText(b.engine.fileAt("p.md")!.ytext, 4, " Phone edit.", humanProvenance("human:chris", "phone"));
+    await b.engine.updateIndex((index) => index.rename(index.idOf("p.md")!, "q.md"));
+    await eventually(() => expect(b.disk.files.get("q.md")).toBe("Old. Phone edit."));
+
+    const list = diskA.list.bind(diskA);
+    diskA.list = async () => (await sleep(500), list());
+    await device("mac", diskA, a.store);
+    await eventually(() => expect([...diskA.files]).toEqual([["q.md", "Old. Phone edit."]]));
+    expect([...b.disk.files]).toEqual([["q.md", "Old. Phone edit."]]);
+  });
+
+  it("ignores a persisted base that refers to updates the document never stored", async () => {
+    const { device } = await setup();
+    const disk = new MemoryDisk();
+    disk.files.set("a.md", "abc");
+    const store = new MemoryStore();
+    const a = await device("mac", disk, store, false);
+    const id = [...a.engine.files.keys()][0]!;
+    a.engine.destroy();
+    disk.engine = null;
+    const ahead = new Y.Doc({ gc: false });
+    ahead.getText(TEXT_KEY).insert(0, "unrelated");
+    await store.persist(fileDocName("v", id), new Y.Doc()).set("disk-base", Y.encodeSnapshot(Y.snapshot(ahead)));
+    disk.files.set("a.md", "abc!");
+    const b = await device("mac", disk, store, false);
+    expect(b.engine.fileAt("a.md")!.ytext.toJSON()).toBe("abc!");
+  });
 });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-

@@ -64,6 +64,17 @@ export async function sha256(data: ArrayBuffer): Promise<string> {
 }
 
 const BASE_KEY = "disk-base";
+const SAVED_STATES = 64;
+
+/** A snapshot is usable only if the document holds every update it refers to. */
+function textAt(doc: Y.Doc, snapshot: Y.Snapshot): string | null {
+  for (const [client, clock] of snapshot.sv) if (clock > Y.getState(doc.store, client)) return null;
+  try {
+    return Y.createDocFromSnapshot(doc, snapshot).getText(TEXT_KEY).toJSON();
+  } catch {
+    return null;
+  }
+}
 const MIRROR_KEY = "on-disk";
 
 /**
@@ -74,18 +85,21 @@ const MIRROR_KEY = "on-disk";
  * diff(base, disk) on a fork taken at the base and merge the fork back, so
  * remote changes that haven't reached the disk yet are kept rather than
  * reverted. Disk writes are debounced and skipped while an editor is bound,
- * because then the editor owns saving.
+ * because then the editor owns saving; meanwhile `editorStates` remembers
+ * the states the editor may save, so its saves still move the base forward.
  */
 export class MarkdownFile {
   readonly doc = new Y.Doc({ gc: false });
   readonly ytext = this.doc.getText(TEXT_KEY);
   readonly ready: Promise<void>;
   private base: { snapshot: Y.Snapshot; text: string } | null = null;
+  private readonly editorStates: Array<{ snapshot: Y.Snapshot; text: string }> = [];
   private editors = 0;
   private writeTimer: ReturnType<typeof setTimeout> | null = null;
   private provider: HocuspocusProvider | null = null;
   private persistence: Persistence | null = null;
   private destroyed = false;
+  private knownLocally = false;
 
   constructor(
     readonly id: FileId,
@@ -94,6 +108,7 @@ export class MarkdownFile {
     private readonly createdHere: boolean,
   ) {
     this.ytext.observe((_e, tr) => {
+      if (this.editors > 0) this.recordEditorState();
       if (tr.origin !== FROM_DISK) this.scheduleWrite();
     });
     this.ready = this.open();
@@ -110,31 +125,35 @@ export class MarkdownFile {
     await this.persistence?.whenSynced;
     const saved = await this.persistence?.get(BASE_KEY);
     if (saved instanceof Uint8Array && this.base === null) {
+      // The base and the updates are separate IndexedDB writes, so after a
+      // crash the base may name updates that were never stored.
       const snapshot = Y.decodeSnapshot(saved);
-      this.base = { snapshot, text: Y.createDocFromSnapshot(this.doc, snapshot).getText(TEXT_KEY).toJSON() };
+      const text = textAt(this.doc, snapshot);
+      if (text !== null) this.base = { snapshot, text };
     }
-    const known = Y.encodeStateVector(this.doc).length > 1;
+    this.knownLocally = Y.encodeStateVector(this.doc).length > 1;
     if (this.destroyed) return;
     this.provider = this.engine.connect(name, this.doc);
-    if (!known && !this.createdHere && this.provider) await synced(this.provider);
+    if (!this.knownLocally && !this.createdHere && this.provider) await synced(this.provider);
   }
 
   private setBase(snapshot: Y.Snapshot, text: string) {
+    if (this.destroyed) return;
     this.base = { snapshot, text };
     void this.persistence?.set(BASE_KEY, Y.encodeSnapshot(snapshot));
   }
 
   /**
    * Brings the file on disk and the CRDT together when the engine first
-   * places it. A fresh device (no base, content fetched from the server) keeps
-   * a differing local file as a conflict copy instead of merging it.
+   * places it. A fresh device (no local history, content fetched from the
+   * server) keeps a differing local file as a conflict copy instead of merging.
    */
   async reconcileDisk(): Promise<void> {
     const path = this.path;
     if (path === undefined || this.destroyed) return;
     const disk = await this.engine.opts.disk.read(path);
     if (disk === null) return this.writeNow();
-    if (!this.base && !this.createdHere && this.ytext.length > 0 && disk !== this.ytext.toJSON()) {
+    if (!this.knownLocally && !this.createdHere && this.ytext.length > 0 && disk !== this.ytext.toJSON()) {
       await this.engine.createFromDisk(conflictPath(path, this.id), disk, true);
       return this.writeNow();
     }
@@ -156,25 +175,34 @@ export class MarkdownFile {
     if (this.ytext.toJSON() !== disk) this.scheduleWrite();
   }
 
+  private recordEditorState() {
+    this.editorStates.push({ snapshot: Y.snapshot(this.doc), text: this.ytext.toJSON() });
+    if (this.editorStates.length > SAVED_STATES) this.editorStates.shift();
+  }
+
   /**
-   * A modify event for this file. While an editor is bound, only the editor's
-   * own saves are expected here; they refresh the base. Anything else reaches
-   * us through the editor, which Obsidian reloads.
+   * A modify event for this file. A save by an editor matches a state the
+   * editor held, possibly an older one if more edits landed since; that state
+   * becomes the base. While an editor is bound anything else reaches us
+   * through the editor, which Obsidian reloads.
    */
   async onDiskModified(): Promise<void> {
     if (!this.path) return;
     const disk = await this.engine.opts.disk.read(this.path);
     if (disk === null || this.destroyed) return;
-    if (this.editors > 0) {
-      if (disk === this.ytext.toJSON()) this.setBase(Y.snapshot(this.doc), disk);
+    const saved = [...this.editorStates].reverse().find((s) => s.text === disk);
+    if (saved) {
+      this.setBase(saved.snapshot, saved.text);
+      if (this.ytext.toJSON() !== disk) this.scheduleWrite();
       return;
     }
-    this.applyDisk(disk);
+    if (this.editors === 0) this.applyDisk(disk);
   }
 
   /** Returns a release function. While any editor is bound, the editor saves the file. */
   bindEditor(): () => void {
     this.editors++;
+    this.recordEditorState();
     let released = false;
     return () => {
       if (released) return;
@@ -326,22 +354,37 @@ export class SyncEngine implements VaultDocs {
     await this.enqueue(() => this.syncTree());
   }
 
+  /**
+   * Maps files on disk to ids. Paths go through the persisted mirror first,
+   * because the index may already carry a remote rename this disk hasn't
+   * seen. Mapping and deletion detection happen without awaiting, so the
+   * index can't change halfway through.
+   */
   private async scanDisk(lastSeen: Record<string, string>): Promise<void> {
-    for (const { path, binary } of await this.opts.disk.list()) {
-      const id = this.vaultIndex.idOf(path);
-      if (!id) {
-        await (binary ? this.uploadBinary(path, undefined) : this.createFromDisk(path, (await this.opts.disk.read(path)) ?? "", false));
-        continue;
-      }
-      this.onDisk.set(id, path);
-      if (binary) {
-        const data = await this.opts.disk.readBinary(path);
-        if (data) this.binaryHashes.set(id, await sha256(data));
-      }
+    const listed = await this.opts.disk.list();
+    const idAt = new Map(Object.entries(lastSeen).map(([id, path]) => [path, id as FileId]));
+    const unmapped: typeof listed = [];
+    for (const file of listed) {
+      const remembered = idAt.get(file.path);
+      const id = remembered && this.vaultIndex.get(remembered) ? remembered : this.vaultIndex.idOf(file.path);
+      if (id && !this.onDisk.has(id)) this.onDisk.set(id, file.path);
+      else unmapped.push(file);
     }
-    const deleted = Object.keys(lastSeen).filter((id) => !this.onDisk.has(id as FileId) && this.vaultIndex.get(id as FileId));
+    const present = new Set(listed.map((f) => f.path));
+    const deleted = Object.entries(lastSeen)
+      .filter(([id, path]) => !present.has(path) && !this.onDisk.has(id as FileId) && this.vaultIndex.get(id as FileId))
+      .map(([id]) => id as FileId);
     if (deleted.length) {
-      this.vaultIndex.doc.transact(() => deleted.forEach((id) => this.vaultIndex.delete(id as FileId)), FROM_DISK);
+      this.vaultIndex.doc.transact(() => deleted.forEach((id) => this.vaultIndex.delete(id)), FROM_DISK);
+    }
+
+    for (const { path, binary } of unmapped) {
+      await (binary ? this.uploadBinary(path, undefined) : this.createFromDisk(path, (await this.opts.disk.read(path)) ?? "", false));
+    }
+    for (const { path, binary } of listed) {
+      const id = binary ? this.idOnDisk(path) : undefined;
+      const data = id ? await this.opts.disk.readBinary(path) : null;
+      if (id && data) this.binaryHashes.set(id, await sha256(data));
     }
   }
 
@@ -526,7 +569,7 @@ export class SyncEngine implements VaultDocs {
       this.treeTimer = null;
       await this.enqueue(() => this.syncTree());
     }
-    await Promise.race([Promise.all([...this.files.values()].map((f) => f.ready)), new Promise((r) => setTimeout(r, wait))]);
+    await Promise.race([Promise.allSettled([...this.files.values()].map((f) => f.ready)), new Promise((r) => setTimeout(r, wait))]);
     await this.enqueue(async () => {
       for (const f of this.files.values()) await f.flush();
       if (this.mirrorTimer) {
