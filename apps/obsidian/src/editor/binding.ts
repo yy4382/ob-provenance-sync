@@ -154,16 +154,18 @@ const plugin = ViewPlugin.fromClass(
         // dispatch, possibly before this plugin has seen it there. Deferring
         // non-human changes lets the typing pane record the edit first, after
         // which the mirrored copy matches the CRDT and is dropped.
-        if (!own.every(isHumanEdit)) queueMicrotask(() => this.pushUnknown());
+        if (!own.every(isHumanEdit)) {
+          const text = u.state.doc.toString();
+          queueMicrotask(() => this.pushUnknown(file, text));
+        }
         else if (u.state.doc.toString() !== file.ytext.toJSON()) this.pushHuman(own, file);
       }
       if (u.docChanged || u.transactions.some((tr) => tr.effects.some((e) => e.is(refresh)))) this.computeDecorations();
     }
 
-    private pushUnknown() {
-      const file = this.file;
-      if (!file || !this.release) return;
-      const text = this.view.state.doc.toString();
+    /** Runs even if the pane has since switched files, so a reload is never dropped. */
+    private pushUnknown(file: MarkdownFile, text: string) {
+      if (this.file === file) text = this.view.state.doc.toString();
       if (text !== file.ytext.toJSON()) file.doc.transact(() => setText(file.ytext, text, file.unknown()), this);
     }
 
