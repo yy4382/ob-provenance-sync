@@ -5,10 +5,14 @@ import { agentIdSchema, agentProvenance, noteSchema, type SegmentKind } from "./
 import { EditError, insertText, replaceText } from "./text";
 import { isMarkdownPath, newFileId, type FileId, type VaultIndex } from "./vault";
 
+/** Only Obsidian's own normalized form, so one file can never be reached under two spellings. */
 const pathSchema = z
   .string()
   .min(1)
-  .refine((p) => !p.startsWith("/") && !p.split("/").includes(".."), "must be a vault-relative path");
+  .refine(
+    (p) => p === p.trim() && !p.includes("\\") && p.split("/").every((seg) => seg !== "" && seg !== "." && seg !== ".."),
+    "must be a normalized vault-relative path like folder/note.md",
+  );
 const markdownPath = pathSchema.refine(isMarkdownPath, "must be a .md file");
 
 const bySchema = z.object({

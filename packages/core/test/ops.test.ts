@@ -60,6 +60,9 @@ describe("handleOpRequest", () => {
     expect(
       await handleOpRequest(vault, { op: "append", path: "x.md", text: "t", by: { ...by, note: "two\nlines" } }),
     ).toMatchObject({ ok: false, code: "invalid" });
+    for (const path of ["a//b.md", "./a.md", "a\\b.md", "a/./b.md", " a.md"]) {
+      expect(await handleOpRequest(vault, { op: "create", path, content: "", by })).toMatchObject({ ok: false, code: "invalid" });
+    }
     expect(await handleOpRequest(vault, { op: "read", path: "missing.md" })).toMatchObject({ ok: false, code: "not-found" });
     expect(await handleOpRequest(vault, { op: "links", path: "a.md" })).toMatchObject({ ok: false, code: "unsupported" });
   });

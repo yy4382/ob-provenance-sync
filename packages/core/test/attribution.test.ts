@@ -101,6 +101,12 @@ describe("text edits", () => {
     ]);
   });
 
+  it("attributes a wholesale rewrite to its new author instead of keeping stray letters", () => {
+    const t = text(["I like my cats a lot.", me]);
+    replaceText(t, "I like my cats a lot.", "We adore our dogs here.", bot);
+    expect(kinds(t)).toEqual([["We adore our dogs here.", "agent"]]);
+  });
+
   it("replaceText refuses ambiguous or missing matches", () => {
     const t = text(["a b a", me]);
     expect(() => replaceText(t, "a", "c", bot)).toThrow(/2 places/);

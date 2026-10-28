@@ -14,7 +14,7 @@ export function insertText(ytext: Y.Text, index: number, text: string, by: Prove
  */
 export function rewriteRange(ytext: Y.Text, index: number, oldText: string, newText: string, by: Provenance): void {
   let pos = index;
-  for (const [op, chunk] of diff(oldText, newText)) {
+  for (const [op, chunk] of meaningfulDiff(oldText, newText)) {
     if (op === diff.EQUAL) pos += chunk.length;
     else if (op === diff.DELETE) ytext.delete(pos, chunk.length);
     else {
@@ -22,6 +22,24 @@ export function rewriteRange(ytext: Y.Text, index: number, oldText: string, newT
       pos += chunk.length;
     }
   }
+}
+
+/**
+ * A semantic diff where unchanged punctuation or spaces next to an edit count
+ * as rewritten too, so rewording a sentence doesn't leave the old author
+ * owning its full stop.
+ */
+function meaningfulDiff(oldText: string, newText: string): diff.Diff[] {
+  const ops = diff(oldText, newText, undefined, true);
+  // fast-diff never emits two equal chunks in a row, so with any edit every equal chunk borders one.
+  if (ops.length === 1) return ops;
+  return ops.flatMap((op): diff.Diff[] => {
+    if (op[0] !== diff.EQUAL || /[\p{L}\p{N}]/u.test(op[1])) return [op];
+    return [
+      [diff.DELETE, op[1]],
+      [diff.INSERT, op[1]],
+    ];
+  });
 }
 
 /** Makes `ytext` equal `next` with the smallest edit. Callers wrap this in a transaction. */
