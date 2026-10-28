@@ -129,6 +129,19 @@ describe("SyncEngine", () => {
     expect(conflict && b.disk.files.get(conflict)).toBe("Stale local copy.");
   });
 
+  it("adopts a fresh device's identical local copy without a conflict file", async () => {
+    const { device } = await setup();
+    const diskA = new MemoryDisk();
+    diskA.files.set("a.md", "Same everywhere.");
+    const a = await device("mac", diskA);
+    const diskB = new MemoryDisk();
+    diskB.files.set("a.md", "Same everywhere.");
+    const b = await device("phone", diskB);
+    expect([...b.disk.files]).toEqual([["a.md", "Same everywhere."]]);
+    expect(b.engine.vaultIndex.idOf("a.md")).toBe(a.engine.vaultIndex.idOf("a.md"));
+    expect(b.engine.vaultIndex.entries()).toHaveLength(1);
+  });
+
   it("works with no server configured", async () => {
     const { device } = await setup();
     const disk = new MemoryDisk();
