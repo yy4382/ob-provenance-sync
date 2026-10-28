@@ -23,12 +23,14 @@ const marks = {
 const primaries = new Map<MarkdownFile, Set<object>>();
 
 /**
- * Typing, pasting, undo and the like carry a CodeMirror user event and are
- * the human's. Changes without one come from Obsidian itself, most notably
- * reloading a file another program changed, so they are unknown.
+ * Typing, pasting, undo and Obsidian's own editing commands carry a
+ * CodeMirror user event and are the human's. Obsidian reloads a file another
+ * program changed with the "set" event, and other plugins editing through the
+ * Editor API carry none; neither was typed here, so both are unknown.
  */
 function provenanceFor(tr: Transaction, file: MarkdownFile): Provenance {
-  return tr.annotation(Transaction.userEvent) !== undefined ? file.human() : file.unknown();
+  const event = tr.annotation(Transaction.userEvent);
+  return event !== undefined && event !== "set" ? file.human() : file.unknown();
 }
 
 function deltaToChanges(delta: Y.YTextEvent["delta"]): ChangeSpec[] {
