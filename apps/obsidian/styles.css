@@ -28,6 +28,14 @@ body.prov-colors .prov-mixed {
   background-color: var(--prov-mixed);
 }
 
+.cm-tooltip:has(> .prov-tooltip) {
+  background-color: var(--background-secondary);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-s);
+}
+
 .prov-tooltip {
   padding: var(--size-4-2) var(--size-4-3);
   max-width: 360px;
