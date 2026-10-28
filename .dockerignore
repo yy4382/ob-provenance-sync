@@ -1,0 +1,5 @@
+**/node_modules
+**/dist
+.git
+test-vault
+apps/obsidian/main.js
