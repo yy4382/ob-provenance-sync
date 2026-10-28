@@ -7,6 +7,8 @@ import { defaultSettings, ProvenanceSettingTab, type ProvenanceSettings } from "
 import { SyncEngine, type SyncStatus } from "./sync/engine";
 import { httpBlobs, indexedDbPersistence, ObsidianDisk } from "./sync/obsidian";
 
+const LEGACY_TOKEN_SECRET = "provenance-sync-device-token";
+
 const STATUS_TEXT: Record<SyncStatus | "error", string> = {
   connected: "Provenance: synced",
   connecting: "Provenance: connecting",
@@ -27,7 +29,13 @@ export default class ProvenancePlugin extends Plugin {
   private statusEl: HTMLElement | null = null;
 
   async onload() {
-    this.settings = { ...defaultSettings(this.app), ...((await this.loadData()) as Partial<ProvenanceSettings> | null) };
+    const { token: legacyToken, ...saved } = ((await this.loadData()) ?? {}) as Partial<ProvenanceSettings> & { token?: string };
+    this.settings = { ...defaultSettings(this.app), ...saved };
+    if (legacyToken) {
+      // Older versions kept the token in data.json; move it into the keychain.
+      this.app.secretStorage.setSecret(LEGACY_TOKEN_SECRET, legacyToken);
+      this.settings.tokenSecret = LEGACY_TOKEN_SECRET;
+    }
     await this.saveSettings();
     this.addSettingTab(new ProvenanceSettingTab(this.app, this));
     this.registerEditorExtension(provenanceExtension(() => this.engine));
@@ -103,6 +111,7 @@ export default class ProvenancePlugin extends Plugin {
       return this.setStatus("error");
     }
     const base = s.serverUrl.replace(/\/+$/, "");
+    const token = s.tokenSecret ? this.app.secretStorage.getSecret(s.tokenSecret) : null;
     this.disk = new ObsidianDisk(this.app);
     const appId = (this.app as unknown as { appId?: string }).appId ?? this.app.vault.getName();
     const engine = new SyncEngine({
@@ -112,8 +121,8 @@ export default class ProvenancePlugin extends Plugin {
       disk: this.disk,
       persist: indexedDbPersistence(`provenance-sync/${appId}`),
       onStatus: (status) => this.setStatus(status),
-      ...(base && s.token
-        ? { server: { url: base.replace(/^http/, "ws"), token: s.token, blobs: httpBlobs(base, s.vaultId, s.token) } }
+      ...(base && token
+        ? { server: { url: base.replace(/^http/, "ws"), token, blobs: httpBlobs(base, s.vaultId, token) } }
         : {}),
     });
     this.engine = engine;

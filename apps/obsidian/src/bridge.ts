@@ -1,6 +1,5 @@
-import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { executeOp, handleOpRequest, OpError, type OpRequest, type OpResult } from "@provenance/core";
-import { prepareSimpleSearch, type App } from "obsidian";
+import { Platform, prepareSimpleSearch, type App } from "obsidian";
 import type { SyncEngine } from "./sync/engine";
 
 /**
@@ -59,8 +58,11 @@ function randomToken(): string {
  * reads; the file is removed on unload.
  */
 export async function startBridge(app: App, engine: SyncEngine, bridgeFile: string): Promise<() => Promise<void>> {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports -- desktop-only module, must not load on mobile
+  if (!Platform.isDesktop) throw new Error("the agent bridge needs the desktop app");
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, no-undef -- Obsidian provides require on desktop; loaded lazily so mobile never evaluates it
   const http = require("node:http") as typeof import("node:http");
+  type IncomingMessage = InstanceType<typeof http.IncomingMessage>;
+  type ServerResponse = InstanceType<typeof http.ServerResponse>;
   const token = randomToken();
 
   const handle = async (req: IncomingMessage, res: ServerResponse) => {
@@ -81,7 +83,7 @@ export async function startBridge(app: App, engine: SyncEngine, bridgeFile: stri
     reply(200, await handleOpRequest(engine, parsed, (op) => runFull(app, engine, op)));
   };
 
-  const server: Server = http.createServer((req, res) => {
+  const server = http.createServer((req, res) => {
     handle(req, res).catch((e: unknown) => {
       console.error("[provenance-sync] bridge", e);
       if (!res.headersSent) res.writeHead(500).end();
