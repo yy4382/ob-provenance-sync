@@ -318,6 +318,35 @@ describe("SyncEngine", () => {
     const b = await device("mac", disk, store, false);
     expect(b.engine.fileAt("a.md")!.ytext.toJSON()).toBe("abc!");
   });
+
+  it("recognises files renamed while Obsidian was closed and keeps their history", async () => {
+    const { device } = await setup();
+    const diskA = new MemoryDisk();
+    diskA.files.set("draft.md", "# Plan\nShip the plugin.\n");
+    diskA.files.set("img.png", new TextEncoder().encode("png").buffer as ArrayBuffer);
+    const a = await device("mac", diskA);
+    const b = await device("phone");
+    await eventually(() => expect(b.disk.files.get("draft.md")).toBe("# Plan\nShip the plugin.\n"));
+    await eventually(() => expect(b.disk.files.has("img.png")).toBe(true));
+    const id = a.engine.vaultIndex.idOf("draft.md");
+    await a.engine.settle();
+    a.engine.destroy();
+    diskA.engine = null;
+
+    insertText(b.engine.fileAt("draft.md")!.ytext, 0, "Phone first. ", humanProvenance("human:chris", "phone"));
+    await eventually(() => expect(b.disk.files.get("draft.md")).toBe("Phone first. # Plan\nShip the plugin.\n"));
+    diskA.files.delete("draft.md");
+    diskA.files.set("plans/plugin.md", "# Plan\nShip the plugin.\nRenamed in Finder.\n");
+    diskA.files.set("assets/img.png", diskA.files.get("img.png")!);
+    diskA.files.delete("img.png");
+
+    const a2 = await device("mac", diskA, a.store);
+    const merged = "Phone first. # Plan\nShip the plugin.\nRenamed in Finder.\n";
+    await eventually(() => expect(b.disk.files.get("plans/plugin.md")).toBe(merged));
+    await eventually(() => expect(diskA.files.get("plans/plugin.md")).toBe(merged));
+    expect(a2.engine.vaultIndex.idOf("plans/plugin.md")).toBe(id);
+    await eventually(() => expect([...b.disk.files.keys()].sort()).toEqual(["assets/img.png", "plans/plugin.md"]));
+  });
 });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

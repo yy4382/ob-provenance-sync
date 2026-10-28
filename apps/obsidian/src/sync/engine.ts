@@ -5,6 +5,7 @@ import {
   humanProvenance,
   indexDocName,
   newFileId,
+  pairRenames,
   setText,
   TEXT_KEY,
   unknownProvenance,
@@ -135,6 +136,11 @@ export class MarkdownFile {
     if (this.destroyed) return;
     this.provider = this.engine.connect(name, this.doc);
     if (!this.knownLocally && !this.createdHere && this.provider) await synced(this.provider);
+  }
+
+  /** The text this device last had on disk for the file. */
+  get diskText(): string {
+    return this.base?.text ?? this.ytext.toJSON();
   }
 
   private setBase(snapshot: Y.Snapshot, text: string) {
@@ -371,14 +377,21 @@ export class SyncEngine implements VaultDocs {
       else unmapped.push(file);
     }
     const present = new Set(listed.map((f) => f.path));
-    const deleted = Object.entries(lastSeen)
+    const vanished = Object.entries(lastSeen)
       .filter(([id, path]) => !present.has(path) && !this.onDisk.has(id as FileId) && this.vaultIndex.get(id as FileId))
       .map(([id]) => id as FileId);
-    if (deleted.length) {
-      this.vaultIndex.doc.transact(() => deleted.forEach((id) => this.vaultIndex.delete(id)), FROM_DISK);
-    }
 
-    for (const { path, binary } of unmapped) {
+    const renamed = await this.detectRenames(vanished, unmapped);
+    const deleted = vanished.filter((id) => !renamed.has(id));
+    if (renamed.size || deleted.length) {
+      this.vaultIndex.doc.transact(() => {
+        for (const [id, path] of renamed) this.vaultIndex.rename(id, path);
+        for (const id of deleted) this.vaultIndex.delete(id);
+      }, FROM_DISK);
+    }
+    const renamedTo = new Set(renamed.values());
+
+    for (const { path, binary } of unmapped.filter((f) => !renamedTo.has(f.path))) {
       await (binary ? this.uploadBinary(path, undefined) : this.createFromDisk(path, (await this.opts.disk.read(path)) ?? "", false));
     }
     for (const { path, binary } of listed) {
@@ -386,6 +399,51 @@ export class SyncEngine implements VaultDocs {
       const data = id ? await this.opts.disk.readBinary(path) : null;
       if (id && data) this.binaryHashes.set(id, await sha256(data));
     }
+  }
+
+  /**
+   * Files that vanished from their last-seen path while we weren't running,
+   * paired with files that appeared, so a rename made in a file manager keeps
+   * the file's id and history. Markdown pairs by content similarity, the way
+   * git detects renames; attachments by identical content hash.
+   */
+  private async detectRenames(vanished: FileId[], appeared: Array<{ path: string; binary: boolean }>): Promise<Map<FileId, string>> {
+    const renamed = new Map<FileId, string>();
+    if (!vanished.length || !appeared.length) return renamed;
+
+    const notes = vanished.filter((id) => this.vaultIndex.get(id)?.type === "markdown");
+    const opened = notes.map((id) => this.openFile(id, false));
+    await Promise.race([Promise.allSettled(opened.map((f) => f.ready)), new Promise((r) => setTimeout(r, 3000))]);
+    const appearedNotes = [];
+    for (const f of appeared.filter((f) => !f.binary)) appearedNotes.push({ key: f.path, text: (await this.opts.disk.read(f.path)) ?? "" });
+    for (const [id, path] of pairRenames(
+      opened.map((f) => ({ key: f.id, text: f.diskText })),
+      appearedNotes,
+    )) {
+      renamed.set(id, path);
+      this.onDisk.set(id, path);
+      const file = this.files.get(id)!;
+      void file.ready.then(() => this.enqueue(() => file.reconcileDisk()));
+    }
+    for (const file of opened) {
+      if (renamed.has(file.id)) continue;
+      file.destroy();
+      this.files.delete(file.id);
+    }
+
+    for (const f of appeared.filter((f) => f.binary)) {
+      const data = await this.opts.disk.readBinary(f.path);
+      const hash = data && (await sha256(data));
+      const id = vanished.find((id) => {
+        const entry = this.vaultIndex.get(id);
+        return !renamed.has(id) && entry?.type === "binary" && entry.hash === hash;
+      });
+      if (!id || !hash) continue;
+      renamed.set(id, f.path);
+      this.onDisk.set(id, f.path);
+      this.binaryHashes.set(id, hash);
+    }
+    return renamed;
   }
 
   /** Records which files are really on disk, for detecting deletions made while we weren't running. */
