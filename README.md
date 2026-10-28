@@ -36,13 +36,13 @@ It's practically impossible to force every change made to the vault to go throug
 
 ### 1. Run the sync server
 
+On a server that has Docker, with a domain pointing at it:
+
 ```sh
-cp apps/server/config.example.json config.json   # then replace every token with a long random string
-pnpm install && pnpm --filter @provenance/server build
-node apps/server/dist/server.js config.json
+curl -fsSL https://raw.githubusercontent.com/yy4382/ob-provenance-sync/main/deploy/install.sh | sh -s -- --domain sync.example.com
 ```
 
-Or use Docker: `docker build -f apps/server/Dockerfile -t provenance-server .`, then run it with a volume holding `config.json` mounted at `/data`. Put it behind a reverse proxy that terminates TLS.
+This starts the server and a Caddy proxy that gets an HTTPS certificate automatically. It then prints the server URL, a device token and an agent token. Without `--domain`, the server listens on plain HTTP at port 8787. Running the command again updates the server and keeps its config, which is in `~/provenance-sync/data/config.json`. The image is `ghcr.io/yy4382/ob-provenance-sync-server`.
 
 The config has two kinds of tokens:
 
@@ -51,11 +51,11 @@ The config has two kinds of tokens:
 
 ### 2. Install the Obsidian plugin
 
-Install it with [BRAT](https://community.obsidian.md/plugins/obsidian42-brat) from this repository. In the plugin's settings:
+In [BRAT](https://community.obsidian.md/plugins/obsidian42-brat), choose **Add beta plugin** and enter `yy4382/ob-provenance-sync`. In the plugin's settings:
 
 - **Your name**: Text you type is attributed to `human:<name>`.
 - **Device name**: Recorded with every change.
-- **Server URL**, **Device token**, **Vault ID**: The Vault ID must be the same on every device. Leave the server empty to track provenance on one device without syncing.
+- **Server URL**, **Device token**, **Vault ID**: The device token is kept in Obsidian's keychain. The Vault ID must be the same on every device. Leave the server empty to track provenance on one device without syncing.
 
 Sentences are colored by who wrote them:
 
@@ -73,14 +73,7 @@ Edits made to files outside Obsidian are never lost. When the plugin next sees t
 
 ### 3. Connect agents (MCP)
 
-**Local, full mode.** On the computer running Obsidian:
-
-```sh
-pnpm --filter @provenance/mcp build
-claude mcp add obsidian -- node /path/to/repo/packages/mcp/dist/cli.js \
-  --vault-path /path/to/vault --agent claude-code \
-  --server https://sync.example.com --vault my-vault --token <agent token>
-```
+**Local, full mode.** The MCP server ships inside the plugin. On the computer running Obsidian, open the plugin's settings and use **Copy Claude Code command** or **Copy MCP JSON config**. The copied command has this vault's path, the server and the device token filled in, and it needs Node.js 22 or later. Edits are attributed to the name each MCP client reports in its handshake, so several agents can share one configuration (`--agent <name>` pins a name instead).
 
 While Obsidian runs, edits go through the plugin. Full mode adds `rename_file`, `delete_file`, `get_links`, `get_backlinks` and `search`. When Obsidian is closed, writes go to the server instead. If the server is also unreachable, the agent is told the vault is unavailable.
 

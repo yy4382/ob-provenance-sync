@@ -62,7 +62,7 @@ export function agentFromClientName(name: string | undefined): AgentId | null {
  * server configuration and still be told apart.
  */
 export function createMcpServer(opts: { ops: OpsTransport; agent: AgentId | null; mode: Mode }): McpServer {
-  const server = new McpServer({ name: "obsidian-provenance", version: "0.1.0" });
+  const server = new McpServer({ name: "obsidian-provenance", version: "0.1.0-alpha.1" });
   const call = async (req: OpRequest) => render(await opts.ops(req));
   const identity = () => opts.agent ?? agentFromClientName(server.server.getClientVersion()?.name);
   const by = (w: z.infer<typeof why>, n?: string) => ({ agent: identity()!, why: w, ...(n ? { note: n } : {}) });
