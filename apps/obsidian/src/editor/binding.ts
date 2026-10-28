@@ -1,6 +1,7 @@
 import { Annotation, RangeSetBuilder, StateEffect, Transaction, type ChangeSpec, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, hoverTooltip, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
-import { attribute, insertText, setText, type Segment } from "@provenance/core";
+import { attribute, insertText, type Segment } from "@provenance/core";
+import diff from "fast-diff";
 import { editorInfoField } from "obsidian";
 import type * as Y from "yjs";
 import type { MarkdownFile, SyncEngine } from "../sync/engine";
@@ -16,34 +17,41 @@ const marks = {
 } as const;
 
 /**
- * Obsidian itself mirrors every edit between split panes of one file, as a
- * "set" transaction. So remote changes go into one pane per file (the first,
- * the primary), changes from a sibling pane are never re-applied, and a pane
- * only pushes to the CRDT when its text has actually diverged from it. That
- * way the pane where the edit happened records it, with its real author.
+ * Every pane showing a file pushes the edits made in it. Obsidian copies each
+ * edit into the file's other panes, and reloads a file another program
+ * changed, both as "set" transactions, and those are never pushed: copies
+ * are already in the CRDT, and the engine merges outside changes from disk.
+ * Changes from the CRDT go into one pane per file, the primary, which
+ * Obsidian then copies to the rest. The primary is the pane edited last:
+ * Obsidian copies edits between panes in a batch after a burst of typing,
+ * so any other pane may still be missing text that is already in the CRDT,
+ * and converging it would insert that text a second time.
  */
 const panes = new Map<MarkdownFile, Set<object>>();
 
+type EditKind = "human" | "unknown" | "copy";
+
 /**
  * Typing, pasting, undo and Obsidian's own editing commands carry a
- * CodeMirror user event and are the human's. Obsidian uses the "set" event
- * both to reload a file another program changed and to mirror an edit into
- * sibling panes; other plugins editing through the Editor API carry none.
+ * CodeMirror user event and are the human's. Other plugins editing through
+ * the Editor API carry none, so their changes are unknown.
  */
-function isHumanEdit(tr: Transaction): boolean {
+function kindOf(tr: Transaction): EditKind {
   const event = tr.annotation(Transaction.userEvent);
-  return event !== undefined && event !== "set";
+  if (event === "set") return "copy";
+  return event === undefined ? "unknown" : "human";
 }
 
-function deltaToChanges(delta: Y.YTextEvent["delta"]): ChangeSpec[] {
+/** Minimal CodeMirror changes that turn `from` into `to`. */
+function diffChanges(from: string, to: string): ChangeSpec[] {
   const changes: ChangeSpec[] = [];
   let pos = 0;
-  for (const op of delta) {
-    if (op.retain !== undefined) pos += op.retain;
-    else if (typeof op.insert === "string") changes.push({ from: pos, insert: op.insert });
-    else if (op.delete !== undefined) {
-      changes.push({ from: pos, to: pos + op.delete });
-      pos += op.delete;
+  for (const [op, chunk] of diff(from, to)) {
+    if (op === diff.EQUAL) pos += chunk.length;
+    else if (op === diff.INSERT) changes.push({ from: pos, insert: chunk });
+    else {
+      changes.push({ from: pos, to: pos + chunk.length });
+      pos += chunk.length;
     }
   }
   return changes;
@@ -94,15 +102,10 @@ const plugin = ViewPlugin.fromClass(
       });
     }
 
+    /** Makes the editor show the CRDT's text. Converging by diff makes repeats harmless. */
     private loadFromCrdt() {
-      const text = this.file!.ytext.toJSON();
-      if (this.view.state.doc.toString() !== text) {
-        // The CRDT already absorbed the disk state, so it is the newer copy.
-        this.view.dispatch({
-          changes: { from: 0, to: this.view.state.doc.length, insert: text },
-          annotations: [fromYjs.of(true), Transaction.addToHistory.of(false)],
-        });
-      }
+      const changes = diffChanges(this.view.state.doc.toString(), this.file!.ytext.toJSON());
+      if (changes.length) this.view.dispatch({ changes, annotations: [fromYjs.of(true), Transaction.addToHistory.of(false)] });
     }
 
     private detach() {
@@ -124,13 +127,8 @@ const plugin = ViewPlugin.fromClass(
       }
     }
 
-    private onYjs(event: Y.YTextEvent, tr: Y.Transaction) {
-      if (this.primary && this.release && !panes.get(this.file!)?.has(tr.origin as object)) {
-        const changes = deltaToChanges(event.delta);
-        if (changes.length) {
-          this.view.dispatch({ changes, annotations: [fromYjs.of(true), Transaction.addToHistory.of(false)] });
-        }
-      }
+    private onYjs(_event: Y.YTextEvent, tr: Y.Transaction) {
+      if (this.primary && this.release && !panes.get(this.file!)?.has(tr.origin as object)) this.loadFromCrdt();
       this.scheduleRefresh();
     }
 
@@ -149,30 +147,20 @@ const plugin = ViewPlugin.fromClass(
       const file = this.file;
       if (!file) return;
       const own = u.transactions.filter((tr) => tr.docChanged && !tr.annotation(fromYjs));
-      if (own.length && this.release) {
-        // Obsidian mirrors an edit into sibling panes during the typing pane's
-        // dispatch, possibly before this plugin has seen it there. Deferring
-        // non-human changes lets the typing pane record the edit first, after
-        // which the mirrored copy matches the CRDT and is dropped.
-        if (!own.every(isHumanEdit)) {
-          const text = u.state.doc.toString();
-          queueMicrotask(() => this.pushUnknown(file, text));
-        }
-        else if (u.state.doc.toString() !== file.ytext.toJSON()) this.pushHuman(own, file);
-      }
+      if (own.length && this.release) this.push(own, file);
       if (u.docChanged || u.transactions.some((tr) => tr.effects.some((e) => e.is(refresh)))) this.computeDecorations();
     }
 
-    /** Runs even if the pane has since switched files, so a reload is never dropped. */
-    private pushUnknown(file: MarkdownFile, text: string) {
-      if (this.file === file) text = this.view.state.doc.toString();
-      if (text !== file.ytext.toJSON()) file.doc.transact(() => setText(file.ytext, text, file.unknown()), this);
-    }
-
-    private pushHuman(transactions: readonly Transaction[], file: MarkdownFile) {
-      const by = file.human();
+    private push(transactions: readonly Transaction[], file: MarkdownFile) {
+      const set = panes.get(file);
+      if (set && set.values().next().value !== this) panes.set(file, new Set([this, ...set]));
       file.doc.transact(() => {
         for (const tr of transactions) {
+          const kind = kindOf(tr);
+          // Positions after a skipped copy no longer line up with the CRDT;
+          // such batches are rare, and the primary re-converges afterwards.
+          if (kind === "copy") break;
+          const by = kind === "human" ? file.human() : file.unknown();
           let adj = 0;
           tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
             const text = inserted.sliceString(0, inserted.length, "\n");

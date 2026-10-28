@@ -87,7 +87,8 @@ const MIRROR_KEY = "on-disk";
  * remote changes that haven't reached the disk yet are kept rather than
  * reverted. Disk writes are debounced and skipped while an editor is bound,
  * because then the editor owns saving; meanwhile `editorStates` remembers
- * the states the editor may save, so its saves still move the base forward.
+ * the states the editor may save, so its saves are told apart from other
+ * programs' edits and still move the base forward.
  */
 export class MarkdownFile {
   readonly doc = new Y.Doc({ gc: false });
@@ -189,8 +190,8 @@ export class MarkdownFile {
   /**
    * A modify event for this file. A save by an editor matches a state the
    * editor held, possibly an older one if more edits landed since; that state
-   * becomes the base. While an editor is bound anything else reaches us
-   * through the editor, which Obsidian reloads.
+   * becomes the base. Anything else is another program's edit and is merged,
+   * whether or not the file is open (the editor ignores Obsidian's reload).
    */
   async onDiskModified(): Promise<void> {
     if (!this.path) return;
@@ -202,7 +203,7 @@ export class MarkdownFile {
       if (this.ytext.toJSON() !== disk) this.scheduleWrite();
       return;
     }
-    if (this.editors === 0) this.applyDisk(disk);
+    this.applyDisk(disk);
   }
 
   /** Returns a release function. While any editor is bound, the editor saves the file. */
