@@ -1,0 +1,31 @@
+{
+  "name": "@provenance/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "provenance-server": "dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc -p . && node build.mjs",
+    "start": "node dist/server.js",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@hocuspocus/provider": "^4.7.1",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@types/node": "^26.6.5",
+    "esbuild": "0.25.5",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5",
+    "ws": "^8.22.0"
+  },
+  "dependencies": {
+    "@hocuspocus/extension-database": "^4.7.1",
+    "@hocuspocus/server": "^4.7.1",
+    "@provenance/core": "workspace:*",
+    "@provenance/mcp": "workspace:*",
+    "yjs": "^13.6.33",
+    "zod": "^4.6.7"
+  }
+}

@@ -223,6 +223,9 @@ importers:
       '@hocuspocus/provider':
         specifier: ^4.7.1
         version: 4.7.1(y-protocols@1.0.7(yjs@13.6.33))(yjs@13.6.33)
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.32.2
+        version: 1.32.2(supports-color@7.2.0)(zod@4.6.7)
       '@types/node':
         specifier: ^26.6.5
         version: 26.6.5

@@ -1,0 +1,10 @@
+{
+  "port": 8787,
+  "dataDir": "./data",
+  "tokens": [
+    { "role": "device", "name": "macbook", "token": "replace-with-a-long-random-string-1" },
+    { "role": "device", "name": "phone", "token": "replace-with-a-long-random-string-2" },
+    { "role": "agent", "name": "andy", "agent": "agent:andy", "token": "replace-with-a-long-random-string-3" },
+    { "role": "agent", "name": "session-agents", "token": "replace-with-a-long-random-string-4" }
+  ]
+}
