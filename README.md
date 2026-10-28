@@ -94,4 +94,7 @@ Every write tool requires `why`. Use `agent` when the agent wrote the content it
 pnpm install
 pnpm build && pnpm lint && pnpm test
 pnpm vault:install   # build the plugin into test-vault/ to try it in Obsidian
+pnpm e2e             # end-to-end test in a real Obsidian (set OBSIDIAN_BIN off macOS)
 ```
+
+`pnpm e2e` launches a separate Obsidian instance with its own profile. It works on a temporary copy of `test-vault`, so it never opens your own vaults.
