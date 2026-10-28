@@ -16,11 +16,13 @@ const marks = {
 } as const;
 
 /**
- * Only one editor per file talks to Yjs; Obsidian already mirrors a file
- * between split panes, so binding every pane would apply each change twice.
- * The other panes only render decorations.
+ * Obsidian itself mirrors every edit between split panes of one file, as a
+ * "set" transaction. So remote changes go into one pane per file (the first,
+ * the primary), changes from a sibling pane are never re-applied, and a pane
+ * only pushes to the CRDT when its text has actually diverged from it. That
+ * way the pane where the edit happened records it, with its real author.
  */
-const primaries = new Map<MarkdownFile, Set<object>>();
+const panes = new Map<MarkdownFile, Set<object>>();
 
 /**
  * Typing, pasting, undo and Obsidian's own editing commands carry a
@@ -56,7 +58,7 @@ const plugin = ViewPlugin.fromClass(
     segments: Segment[] = [];
     file: MarkdownFile | null = null;
     private path: string | null = null;
-    private release: (() => void) | null = null;
+    release: (() => void) | null = null;
     private readonly observer = (event: Y.YTextEvent, tr: Y.Transaction) => this.onYjs(event, tr);
 
     constructor(readonly view: EditorView) {
@@ -64,7 +66,7 @@ const plugin = ViewPlugin.fromClass(
     }
 
     get primary(): boolean {
-      return this.file !== null && primaries.get(this.file)?.values().next().value === this;
+      return this.file !== null && panes.get(this.file)?.values().next().value === this;
     }
 
     private currentPath(): string | null {
@@ -80,21 +82,20 @@ const plugin = ViewPlugin.fromClass(
       this.path = path;
       if (!file) return;
       this.file = file;
-      let set = primaries.get(file);
-      if (!set) primaries.set(file, (set = new Set()));
+      let set = panes.get(file);
+      if (!set) panes.set(file, (set = new Set()));
       set.add(this);
       file.ytext.observe(this.observer);
       void file.ready.then(() => {
         if (this.file !== file) return;
-        if (this.primary) this.becomePrimary();
+        this.release = file.bindEditor();
+        if (this.primary) this.loadFromCrdt();
         this.scheduleRefresh();
       });
     }
 
-    private becomePrimary() {
-      const file = this.file!;
-      this.release = file.bindEditor();
-      const text = file.ytext.toJSON();
+    private loadFromCrdt() {
+      const text = this.file!.ytext.toJSON();
       if (this.view.state.doc.toString() !== text) {
         // The CRDT already absorbed the disk state, so it is the newer copy.
         this.view.dispatch({
@@ -109,19 +110,22 @@ const plugin = ViewPlugin.fromClass(
       if (!file) return;
       file.ytext.unobserve(this.observer);
       const wasPrimary = this.primary;
-      const set = primaries.get(file)!;
+      const set = panes.get(file)!;
       set.delete(this);
       this.release?.();
       this.release = null;
       this.file = null;
       this.segments = [];
       this.decorations = Decoration.none;
-      if (set.size === 0) primaries.delete(file);
-      else if (wasPrimary) (set.values().next().value as { becomePrimary(): void }).becomePrimary();
+      if (set.size === 0) panes.delete(file);
+      else if (wasPrimary) {
+        const next = set.values().next().value as { release: unknown; loadFromCrdt(): void };
+        if (next.release) next.loadFromCrdt();
+      }
     }
 
     private onYjs(event: Y.YTextEvent, tr: Y.Transaction) {
-      if (tr.origin !== this && this.primary && this.release) {
+      if (this.primary && this.release && !panes.get(this.file!)?.has(tr.origin as object)) {
         const changes = deltaToChanges(event.delta);
         if (changes.length) {
           this.view.dispatch({ changes, annotations: [fromYjs.of(true), Transaction.addToHistory.of(false)] });
@@ -144,7 +148,7 @@ const plugin = ViewPlugin.fromClass(
       this.attach();
       const file = this.file;
       if (!file) return;
-      if (u.docChanged && this.primary && this.release) {
+      if (u.docChanged && this.release && u.state.doc.toString() !== file.ytext.toJSON()) {
         file.doc.transact(() => {
           for (const tr of u.transactions) {
             if (!tr.docChanged || tr.annotation(fromYjs)) continue;
