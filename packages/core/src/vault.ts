@@ -1,0 +1,85 @@
+import * as Y from "yjs";
+
+export type FileId = string & { readonly __brand: "FileId" };
+
+export type FileEntry =
+  | { type: "markdown"; path: string }
+  | { type: "binary"; path: string; hash: string; size: number; mtime: number };
+
+export const TEXT_KEY = "content";
+
+export const indexDocName = (vault: string) => `${vault}/index`;
+export const fileDocName = (vault: string, id: FileId) => `${vault}/md/${id}`;
+
+export function parseDocName(name: string): { vault: string; id: FileId | null } | null {
+  const md = /^(.+)\/md\/([\w-]+)$/.exec(name);
+  if (md) return { vault: md[1]!, id: md[2] as FileId };
+  const index = /^(.+)\/index$/.exec(name);
+  return index ? { vault: index[1]!, id: null } : null;
+}
+
+export function newFileId(): FileId {
+  return crypto.randomUUID() as FileId;
+}
+
+export const isMarkdownPath = (path: string) => path.endsWith(".md");
+
+/**
+ * The vault-level document: a map from stable file id to its current path, so
+ * renames keep history. Concurrent creates of the same path can leave two ids
+ * claiming one path; the smallest id wins and the rest are reported as
+ * conflicts for the caller to move aside.
+ */
+export class VaultIndex {
+  readonly files: Y.Map<FileEntry>;
+
+  constructor(readonly doc: Y.Doc) {
+    this.files = doc.getMap<FileEntry>("files");
+  }
+
+  get(id: FileId): FileEntry | undefined {
+    return this.files.get(id);
+  }
+
+  idOf(path: string): FileId | undefined {
+    let found: FileId | undefined;
+    for (const [id, entry] of this.files) {
+      if (entry.path === path && (found === undefined || id < found)) found = id as FileId;
+    }
+    return found;
+  }
+
+  entries(): Array<[FileId, FileEntry]> {
+    return [...this.files.entries()] as Array<[FileId, FileEntry]>;
+  }
+
+  set(id: FileId, entry: FileEntry): void {
+    this.files.set(id, entry);
+  }
+
+  rename(id: FileId, path: string): void {
+    const entry = this.files.get(id);
+    if (entry && entry.path !== path) this.files.set(id, { ...entry, path });
+  }
+
+  delete(id: FileId): void {
+    this.files.delete(id);
+  }
+
+  /** Ids that lost a path collision, with the path they claim. */
+  conflicts(): Array<[FileId, FileEntry]> {
+    const winners = new Map<string, FileId>();
+    for (const [id, entry] of this.entries()) {
+      const prev = winners.get(entry.path);
+      if (prev === undefined || id < prev) winners.set(entry.path, id);
+    }
+    return this.entries().filter(([id, entry]) => winners.get(entry.path) !== id);
+  }
+}
+
+export function conflictPath(path: string, id: FileId): string {
+  const dot = path.lastIndexOf(".");
+  const stem = dot > path.lastIndexOf("/") ? path.slice(0, dot) : path;
+  const ext = dot > path.lastIndexOf("/") ? path.slice(dot) : "";
+  return `${stem} (conflict ${id.slice(0, 8)})${ext}`;
+}
