@@ -1,6 +1,6 @@
 import { Annotation, RangeSetBuilder, StateEffect, Transaction, type ChangeSpec, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, hoverTooltip, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
-import { attribute, insertText, type Provenance, type Segment } from "@provenance/core";
+import { attribute, insertText, setText, type Segment } from "@provenance/core";
 import { editorInfoField } from "obsidian";
 import type * as Y from "yjs";
 import type { MarkdownFile, SyncEngine } from "../sync/engine";
@@ -26,13 +26,13 @@ const panes = new Map<MarkdownFile, Set<object>>();
 
 /**
  * Typing, pasting, undo and Obsidian's own editing commands carry a
- * CodeMirror user event and are the human's. Obsidian reloads a file another
- * program changed with the "set" event, and other plugins editing through the
- * Editor API carry none; neither was typed here, so both are unknown.
+ * CodeMirror user event and are the human's. Obsidian uses the "set" event
+ * both to reload a file another program changed and to mirror an edit into
+ * sibling panes; other plugins editing through the Editor API carry none.
  */
-function provenanceFor(tr: Transaction, file: MarkdownFile): Provenance {
+function isHumanEdit(tr: Transaction): boolean {
   const event = tr.annotation(Transaction.userEvent);
-  return event !== undefined && event !== "set" ? file.human() : file.unknown();
+  return event !== undefined && event !== "set";
 }
 
 function deltaToChanges(delta: Y.YTextEvent["delta"]): ChangeSpec[] {
@@ -148,22 +148,38 @@ const plugin = ViewPlugin.fromClass(
       this.attach();
       const file = this.file;
       if (!file) return;
-      if (u.docChanged && this.release && u.state.doc.toString() !== file.ytext.toJSON()) {
-        file.doc.transact(() => {
-          for (const tr of u.transactions) {
-            if (!tr.docChanged || tr.annotation(fromYjs)) continue;
-            const by = provenanceFor(tr, file);
-            let adj = 0;
-            tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
-              const text = inserted.sliceString(0, inserted.length, "\n");
-              if (toA > fromA) file.ytext.delete(fromA + adj, toA - fromA);
-              insertText(file.ytext, fromA + adj, text, by);
-              adj += text.length - (toA - fromA);
-            });
-          }
-        }, this);
+      const own = u.transactions.filter((tr) => tr.docChanged && !tr.annotation(fromYjs));
+      if (own.length && this.release) {
+        // Obsidian mirrors an edit into sibling panes during the typing pane's
+        // dispatch, possibly before this plugin has seen it there. Deferring
+        // non-human changes lets the typing pane record the edit first, after
+        // which the mirrored copy matches the CRDT and is dropped.
+        if (!own.every(isHumanEdit)) queueMicrotask(() => this.pushUnknown());
+        else if (u.state.doc.toString() !== file.ytext.toJSON()) this.pushHuman(own, file);
       }
       if (u.docChanged || u.transactions.some((tr) => tr.effects.some((e) => e.is(refresh)))) this.computeDecorations();
+    }
+
+    private pushUnknown() {
+      const file = this.file;
+      if (!file || !this.release) return;
+      const text = this.view.state.doc.toString();
+      if (text !== file.ytext.toJSON()) file.doc.transact(() => setText(file.ytext, text, file.unknown()), this);
+    }
+
+    private pushHuman(transactions: readonly Transaction[], file: MarkdownFile) {
+      const by = file.human();
+      file.doc.transact(() => {
+        for (const tr of transactions) {
+          let adj = 0;
+          tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+            const text = inserted.sliceString(0, inserted.length, "\n");
+            if (toA > fromA) file.ytext.delete(fromA + adj, toA - fromA);
+            insertText(file.ytext, fromA + adj, text, by);
+            adj += text.length - (toA - fromA);
+          });
+        }
+      }, this);
     }
 
     private computeDecorations() {
