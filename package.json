@@ -6,6 +6,7 @@
     "dev": "pnpm --filter ./apps/obsidian dev",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
-    "lint": "pnpm -r lint"
+    "lint": "pnpm -r lint",
+    "vault:install": "pnpm --filter @provenance/obsidian build && node scripts/install-test-vault.mjs"
   }
 }
