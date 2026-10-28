@@ -1,4 +1,5 @@
-import { Platform, PluginSettingTab, type App, type SettingDefinitionItem } from "obsidian";
+import { Notice, Platform, PluginSettingTab, type App, type SettingDefinitionItem } from "obsidian";
+import { claudeCodeCommand, mcpJsonConfig, type LocalMcpCommand } from "./mcp-cli";
 import type ProvenancePlugin from "./main";
 
 export interface ProvenanceSettings {
@@ -91,9 +92,27 @@ export class ProvenanceSettingTab extends PluginSettingTab {
             visible: Platform.isDesktopApp,
             control: { type: "toggle", key: "enableBridge" },
           },
+          {
+            name: "Copy Claude Code command",
+            desc: "Adds this vault's MCP server to Claude Code. Needs Node.js 22 or later. Agents are named after the MCP client they use.",
+            visible: Platform.isDesktopApp,
+            action: () => this.copy((cmd) => claudeCodeCommand(cmd)),
+          },
+          {
+            name: "Copy MCP JSON config",
+            desc: "The same server as an mcpServers entry, for clients configured by file.",
+            visible: Platform.isDesktopApp,
+            action: () => this.copy((cmd) => mcpJsonConfig(cmd)),
+          },
         ],
       },
     ];
+  }
+
+  private copy(format: (cmd: LocalMcpCommand) => string) {
+    const cmd = this.plugin.mcpCommand();
+    if (!cmd) return void new Notice("Still preparing the agent server; try again in a moment.");
+    void navigator.clipboard.writeText(format(cmd)).then(() => new Notice("Copied. It contains your device token, so keep it private."));
   }
 
   async setControlValue(key: string, value: unknown): Promise<void> {

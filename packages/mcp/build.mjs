@@ -7,5 +7,6 @@ await esbuild.build({
   format: "esm",
   target: "node22",
   outfile: "dist/cli.js",
+  minify: true,
   banner: { js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);" },
 });

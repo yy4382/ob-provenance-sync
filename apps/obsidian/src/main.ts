@@ -2,6 +2,7 @@ import { humanId } from "@provenance/core";
 import { MarkdownView, Notice, Platform, Plugin, TAbstractFile, TFile } from "obsidian";
 import type { EditorView } from "@codemirror/view";
 import { startBridge } from "./bridge";
+import { installMcpCli, localMcpCommand, type LocalMcpCommand } from "./mcp-cli";
 import { provenanceExtension, renderProvenance, segmentAt } from "./editor/binding";
 import { defaultSettings, ProvenanceSettingTab, type ProvenanceSettings } from "./settings";
 import { SyncEngine, type SyncStatus } from "./sync/engine";
@@ -27,6 +28,7 @@ export default class ProvenancePlugin extends Plugin {
   private disk: ObsidianDisk | null = null;
   private stopBridge: (() => Promise<void>) | null = null;
   private statusEl: HTMLElement | null = null;
+  private mcpCliPath: string | null = null;
 
   async onload() {
     const { token: legacyToken, ...saved } = ((await this.loadData()) ?? {}) as Partial<ProvenanceSettings> & { token?: string };
@@ -70,11 +72,25 @@ export default class ProvenancePlugin extends Plugin {
         }),
       );
       void this.restartSync();
+      if (Platform.isDesktopApp) {
+        installMcpCli(this.app, this.manifest.dir!)
+          .then((path) => (this.mcpCliPath = path))
+          .catch((e: unknown) => console.error("[provenance-sync] could not install the MCP server", e));
+      }
     });
   }
 
   onunload() {
     void this.stopSync();
+  }
+
+  /** How an agent on this computer starts the local MCP server, with this vault's paths and server filled in. */
+  mcpCommand(): LocalMcpCommand | null {
+    if (!this.mcpCliPath) return null;
+    const s = this.settings;
+    const token = s.tokenSecret ? this.app.secretStorage.getSecret(s.tokenSecret) : null;
+    const url = s.serverUrl.replace(/\/+$/, "");
+    return localMcpCommand(this.app, this.mcpCliPath, url && token ? { url, vault: s.vaultId, token } : null);
   }
 
   async saveSettings() {

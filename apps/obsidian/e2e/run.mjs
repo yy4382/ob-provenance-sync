@@ -163,15 +163,12 @@ async function opsCall(body) {
   return res.json();
 }
 
+/** The command the plugin's settings hand out for local agents, with its embedded MCP server. */
+let mcpCommand = null;
+
 async function mcpCall(name, args) {
-  const client = new Client({ name: "e2e", version: "0" });
-  const cli = join(repo, "packages/mcp/dist/cli.js");
-  await client.connect(
-    new StdioClientTransport({
-      command: process.execPath,
-      args: [cli, "--vault-path", vault, "--agent", "e2e-agent", "--server", `http://127.0.0.1:${serverPort}`, "--vault", "e2e", "--token", AGENT_TOKEN],
-    }),
-  );
+  const client = new Client({ name: "e2e client", version: "0" });
+  await client.connect(new StdioClientTransport({ ...mcpCommand, env: { ...process.env, ...mcpCommand.env } }));
   try {
     return await client.callTool({ name, arguments: args });
   } finally {
@@ -231,6 +228,8 @@ try {
   });
   check("another program's edit to an open file is unknown", JSON.stringify(external) === '["unknown"]', JSON.stringify(external));
 
+  mcpCommand = await eventually(() => cdp.eval(`return app.plugins.plugins["provenance-sync"].mcpCommand()`));
+  check("settings offer a local MCP command", mcpCommand?.args.includes(vault) && mcpCommand.args[0].endsWith("provenance-mcp.mjs"), JSON.stringify(mcpCommand));
   const edit = await mcpCall("append_to_file", { path: "Projects/Roadmap.md", text: "- AgentBridge line.\n", why: "agent", note: "e2e note" });
   check("local MCP edits through the plugin bridge", !edit.isError, JSON.stringify(edit.content));
   const links = await mcpCall("get_backlinks", { path: "Welcome.md" });
@@ -251,7 +250,7 @@ try {
   await cdp.hover(box[0], box[1]);
   await cdp.hover(box[0] + 2, box[1]);
   const tooltip = await eventually(() => cdp.eval(`return document.querySelector(".prov-tooltip")?.innerText`), 3000);
-  check("hover shows the agent and its note", !!tooltip?.includes("agent:e2e-agent") && tooltip.includes("e2e note"), JSON.stringify(tooltip));
+  check("hover shows the agent and its note", !!tooltip?.includes("agent:e2e-client") && tooltip.includes("e2e note"), JSON.stringify(tooltip));
 
   await cdp.eval(`await app.plugins.plugins["provenance-sync"].engine.settle(); return true`);
   await sleep(1500);
@@ -262,7 +261,8 @@ try {
   writeFileSync(join(vault, "Projects/Renamed.md"), readFileSync(roadmap, "utf8") + "OfflineEdit line.\n");
   unlinkSync(roadmap);
   unlinkSync(join(vault, "Welcome.md"));
-  await opsCall({ op: "append", path: "Projects/Roadmap.md", text: "- WhileClosed line.\n", by: { agent: "agent:andy", why: "agent" } });
+  const fallback = await mcpCall("append_to_file", { path: "Projects/Roadmap.md", text: "- WhileClosed line.\n", why: "agent" });
+  check("with Obsidian closed, local MCP falls back to the server", !fallback.isError, JSON.stringify(fallback.content));
 
   cdp = await openObsidian().catch(async () => {
     // Welcome.md is gone, so the readiness probe above can't use it.

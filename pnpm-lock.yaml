@@ -196,6 +196,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.2
         version: 1.32.2(supports-color@7.2.0)(zod@4.6.7)
+      '@provenance/mcp':
+        specifier: workspace:*
+        version: link:../../packages/mcp
       '@types/node':
         specifier: ^22.20.5
         version: 22.20.5
