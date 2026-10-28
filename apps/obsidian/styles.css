@@ -1,8 +1,72 @@
-/*
+body {
+  --prov-human: rgba(64, 160, 96, 0.16);
+  --prov-via-agent: rgba(48, 170, 170, 0.18);
+  --prov-agent: rgba(140, 90, 220, 0.18);
+  --prov-mixed: rgba(230, 140, 40, 0.2);
+}
 
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
+.theme-dark {
+  --prov-human: rgba(90, 200, 120, 0.14);
+  --prov-via-agent: rgba(70, 200, 200, 0.16);
+  --prov-agent: rgba(170, 120, 255, 0.2);
+  --prov-mixed: rgba(255, 160, 60, 0.18);
+}
 
-If your plugin does not need CSS, delete this file.
+body.prov-colors .prov-human {
+  background-color: var(--prov-human);
+}
 
-*/
+body.prov-colors .prov-via-agent {
+  background-color: var(--prov-via-agent);
+}
+
+body.prov-colors .prov-agent {
+  background-color: var(--prov-agent);
+}
+
+body.prov-colors .prov-mixed {
+  background-color: var(--prov-mixed);
+}
+
+.prov-tooltip {
+  padding: var(--size-4-2) var(--size-4-3);
+  max-width: 360px;
+  font-size: var(--font-ui-small);
+}
+
+.prov-tooltip-kind {
+  font-weight: var(--font-semibold);
+  margin-bottom: var(--size-4-1);
+  padding-left: var(--size-4-2);
+  border-left: 3px solid var(--text-faint);
+}
+
+.prov-kind-human { border-left-color: rgb(64, 160, 96); }
+.prov-kind-via-agent { border-left-color: rgb(48, 170, 170); }
+.prov-kind-agent { border-left-color: rgb(140, 90, 220); }
+.prov-kind-mixed { border-left-color: rgb(230, 140, 40); }
+
+.prov-tooltip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--size-4-2);
+  align-items: baseline;
+}
+
+.prov-tooltip-author {
+  font-family: var(--font-monospace);
+}
+
+.prov-tooltip-why {
+  color: var(--text-accent);
+}
+
+.prov-tooltip-meta {
+  color: var(--text-muted);
+}
+
+.prov-tooltip-note {
+  color: var(--text-normal);
+  font-style: italic;
+  margin: 0 0 var(--size-4-1) var(--size-4-2);
+}

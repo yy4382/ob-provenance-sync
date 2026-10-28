@@ -111,7 +111,7 @@ export class MarkdownFile {
     const path = this.path;
     if (path === undefined) return;
     const disk = await this.engine.opts.disk.read(path);
-    const text = this.ytext.toString();
+    const text = this.ytext.toJSON();
     if (disk === null || disk === text) {
       if (disk === null) await this.writeNow();
       return;
@@ -135,7 +135,7 @@ export class MarkdownFile {
     const disk = await this.engine.opts.disk.read(this.path);
     if (disk === null) return;
     if (this.recent.includes(disk)) {
-      if (disk !== this.ytext.toString()) this.scheduleWrite();
+      if (disk !== this.ytext.toJSON()) this.scheduleWrite();
       return;
     }
     this.applyFromDisk(disk);
@@ -178,7 +178,7 @@ export class MarkdownFile {
   async writeNow(): Promise<void> {
     const path = this.path;
     if (path === undefined || this.editors > 0) return;
-    const text = this.ytext.toString();
+    const text = this.ytext.toJSON();
     if (this.recent.at(-1) === text) return;
     this.remember(text);
     await this.engine.opts.disk.write(path, text);

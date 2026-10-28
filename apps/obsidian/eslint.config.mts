@@ -13,6 +13,8 @@ export default defineConfig(
     "package.json",
     "package-lock.json",
     "tsconfig.json",
+    "test",
+    "vitest.config.ts",
   ]),
   {
     languageOptions: {
@@ -29,4 +31,9 @@ export default defineConfig(
     },
   },
   ...obsidianmd.configs.recommended,
+  {
+    // The engine is DOM-free and also runs under Node in tests; its timers belong to no window.
+    files: ["src/sync/engine.ts"],
+    rules: { "obsidianmd/prefer-window-timers": "off" },
+  },
 );

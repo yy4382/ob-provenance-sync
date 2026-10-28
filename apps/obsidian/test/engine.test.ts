@@ -31,7 +31,7 @@ async function setup() {
 
 const kindsOf = (engine: SyncEngine, path: string) => {
   const file = engine.fileAt(path)!;
-  const text = file.ytext.toString();
+  const text = file.ytext.toJSON();
   return attribute(file.ytext).map((s) => [text.slice(s.from, s.to), s.kind, s.contributors.map((c) => c.device)]);
 };
 
@@ -44,7 +44,7 @@ describe("SyncEngine", () => {
     const a = await device("mac", diskA);
     const b = await device("phone");
     await eventually(() => expect(b.disk.files.get("notes/a.md")).toBe("Already here."));
-    await eventually(() => expect(new TextDecoder().decode(b.disk.files.get("img.png") as ArrayBuffer)).toBe("png"));
+    await eventually(async () => expect(new TextDecoder().decode(await b.disk.readBinary("img.png") ?? undefined)).toBe("png"));
     expect(kindsOf(a.engine, "notes/a.md")).toEqual([["Already here.", "unknown", ["mac"]]]);
   });
 
