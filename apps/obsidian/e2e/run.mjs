@@ -56,6 +56,9 @@ mkdirSync(join(vault, "Bulk"));
 for (let i = 0; i < 150; i++) writeFileSync(join(vault, "Bulk", `n${i}.md`), `Bulk note ${i}.\n`);
 writeFileSync(join(vault, "Projects/Roadmap (conflict 0a0b0c0d).md"), readFileSync(join(vault, "Projects/Roadmap.md")));
 writeFileSync(join(vault, "Projects/Roadmap (conflict 1a1b1c1d).md"), readFileSync(join(vault, "Projects/Roadmap.md"), "utf8").replace(/\n/g, "\r\n"));
+// Copies whose original is gone, one of them empty: restoring both used to fail on the second.
+writeFileSync(join(vault, "Lost (conflict 2a2b2c2d).md"), "");
+writeFileSync(join(vault, "Lost (conflict 3a3b3c3d) (conflict 4a4b4c4d).md"), "Survivor.\n");
 const pluginDir = join(vault, ".obsidian/plugins/provenance-sync");
 mkdirSync(pluginDir, { recursive: true });
 for (const f of ["main.js", "manifest.json", "styles.css"]) cpSync(join(repo, "apps/obsidian", f), join(pluginDir, f));
@@ -235,12 +238,16 @@ try {
   await eventually(() => cdp.eval(`return document.querySelector(".status-bar")?.innerText.includes("Provenance: synced")`));
 
   await cdp.eval(`app.commands.executeCommandById("provenance-sync:resolve-conflicts"); return true`);
-  const modal = await eventually(() => cdp.eval(`const t = document.querySelector(".modal")?.innerText; return t?.includes("Delete 1 copy identical") ? t : undefined`));
-  check("the conflict resolver sorts copies by how they differ", !!modal?.includes("differs only in line endings"), JSON.stringify(modal));
+  const modal = await eventually(() => cdp.eval(`const t = document.querySelector(".modal")?.innerText; return t?.includes("Apply all") ? t : undefined`));
+  check("the conflict resolver finds every copy safe to resolve", !!modal?.includes("4 copies: 3 can be resolved safely, 1 wait"), JSON.stringify(modal));
   await cdp.shot("conflicts");
-  await cdp.eval(`for (const s of document.querySelectorAll(".modal .setting-item")) if (/^(Delete|Restore)/.test(s.innerText)) { s.querySelector("button").click(); await new Promise(r => setTimeout(r, 1500)); } return true`);
-  const left = await eventually(() => cdp.eval(`const t = document.querySelector(".modal")?.innerText; return t?.includes("no conflict copies") ? t : undefined`));
-  check("bulk actions resolve copies that add nothing", !!left && !existsSync(join(vault, "Projects/Roadmap (conflict 0a0b0c0d).md")), JSON.stringify(left));
+  await cdp.eval(`[...document.querySelectorAll(".modal button")].find(b => b.innerText === "Apply all").click(); return true`);
+  const left = await eventually(() => cdp.eval(`const t = document.querySelector(".modal")?.innerText; return t?.includes("no conflict copies") ? t : undefined`), 15000);
+  check(
+    "apply all resolves copies that add nothing and restores the fullest orphan",
+    !!left && !existsSync(join(vault, "Projects/Roadmap (conflict 0a0b0c0d).md")) && readFileSync(join(vault, "Lost.md"), "utf8") === "Survivor.\n",
+    JSON.stringify(left),
+  );
   await cdp.eval(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); return true`);
 
   await cdp.eval(`const f = app.vault.getFileByPath("Welcome.md"); await app.workspace.getLeaf(false).openFile(f);
@@ -308,7 +315,7 @@ try {
   });
   const files = await eventually(async () => {
     const r = await opsCall({ op: "list" });
-    const notes = r.result.files.filter((f) => !f.startsWith("Bulk/"));
+    const notes = r.result.files.filter((f) => !f.startsWith("Bulk/") && f !== "Lost.md");
     return notes.join(",") === "Projects/Renamed.md" ? notes : undefined;
   }, 15000);
   check("an offline delete stays deleted and an offline rename keeps the file", !!files, JSON.stringify((await opsCall({ op: "list" })).result));
