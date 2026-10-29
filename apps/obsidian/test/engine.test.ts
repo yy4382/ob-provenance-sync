@@ -359,6 +359,84 @@ describe("SyncEngine", () => {
     expect(a2.engine.vaultIndex.idOf("plans/plugin.md")).toBe(id);
     await eventually(() => expect([...b.disk.files.keys()].sort()).toEqual(["assets/img.png", "plans/plugin.md"]));
   });
+
+  it("settles the same note created on two devices at once into one file", async () => {
+    const { device } = await setup();
+    const a = await device("mac");
+    const b = await device("phone");
+    void a.disk.write("x.md", "Same words.");
+    void b.disk.write("x.md", "Same words.");
+    await sleep(500);
+    await Promise.all([a.engine.settle(), b.engine.settle()]);
+    expect([...a.disk.files]).toEqual([["x.md", "Same words."]]);
+    expect([...b.disk.files]).toEqual([["x.md", "Same words."]]);
+    expect(a.engine.vaultIndex.entries()).toHaveLength(1);
+  });
+
+  it("keeps one stable conflict copy when two devices create a note differently", async () => {
+    const { device } = await setup();
+    const a = await device("mac");
+    const b = await device("phone");
+    void a.disk.write("x.md", "From the mac.");
+    void b.disk.write("x.md", "From the phone.");
+    await sleep(500);
+    await Promise.all([a.engine.settle(), b.engine.settle()]);
+    const names = [...a.disk.files.keys()].sort();
+    expect(names).toHaveLength(2);
+    expect(names[0]).toMatch(/^x \(conflict [0-9a-f]{8}\)\.md$/);
+    expect([...a.disk.files.values()].sort()).toEqual(["From the mac.", "From the phone."]);
+    await sleep(300);
+    expect([...a.disk.files.keys()].sort()).toEqual(names);
+    await eventually(() => expect([...b.disk.files.keys()].sort()).toEqual(names));
+  });
+
+  it("adopts the same vault on two devices that start syncing together", async () => {
+    const { server } = await setup();
+    const vault = () => {
+      const disk = new MemoryDisk();
+      for (let i = 0; i < 20; i++) disk.files.set(`n${i}.md`, i % 2 ? `Note ${i}.` : "");
+      return disk;
+    };
+    const devices = ["mac", "phone"].map((name) => {
+      const disk = vault();
+      const engine = new SyncEngine({ vault: "v", author: "human:chris", device: name, disk, persist: new MemoryStore().persist, server: { url: server.ws, token: TOKEN, blobs: server.blobs("v") } });
+      disk.engine = engine;
+      cleanup.push(() => engine.destroy());
+      return { engine, disk };
+    });
+    await Promise.all(devices.map((d) => d.engine.start()));
+    await sleep(500);
+    for (const d of devices) await d.engine.settle();
+    for (const { disk } of devices) expect([...disk.files.keys()].filter((p) => p.includes("conflict"))).toEqual([]);
+    expect(devices[0]!.engine.vaultIndex.entries()).toHaveLength(20);
+  });
+
+  it("keeps a note created where a deleted one was when both reach another device together", async () => {
+    const { device } = await setup();
+    const diskA = new MemoryDisk();
+    diskA.files.set("p.md", "Old.");
+    const a = await device("mac", diskA);
+    const b = await device("phone");
+    await eventually(() => expect(b.disk.files.get("p.md")).toBe("Old."));
+    await a.disk.trash("p.md");
+    await a.disk.write("p.md", "New.");
+    await eventually(() => expect(b.disk.files.get("p.md")).toBe("New."));
+    await sleep(300);
+    await Promise.all([a.engine.settle(), b.engine.settle()]);
+    expect(a.engine.vaultIndex.entries().map(([, e]) => e.path)).toEqual(["p.md"]);
+    expect([...a.disk.files]).toEqual([["p.md", "New."]]);
+  });
+
+  it("stays connected with more notes than the server lets wait for authentication by default", async () => {
+    const { device } = await setup();
+    const disk = new MemoryDisk();
+    for (let i = 0; i < 150; i++) disk.files.set(`n${i}.md`, `Note ${i}.`);
+    const statuses: string[] = [];
+    const a = await device("mac", disk);
+    (a.engine.opts as { onStatus?: (s: string) => void }).onStatus = (s) => statuses.push(s);
+    await sleep(1500);
+    expect(statuses).toEqual([]);
+  });
 });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

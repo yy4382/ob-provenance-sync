@@ -74,3 +74,22 @@ export function replaceText(
   for (const hit of hits.reverse()) rewriteRange(ytext, hit, oldString, newString, by);
   return hits.length;
 }
+
+/**
+ * How two versions of a file differ, from least to most meaningful: only in
+ * line endings, only in characters that don't show (byte-order marks,
+ * zero-width and non-breaking spaces, Unicode normalisation), only in
+ * whitespace, or in visible content.
+ */
+export type Difference = "identical" | "line-endings" | "invisible" | "whitespace" | "content";
+
+const lineEndings = (s: string) => s.replace(/\r\n?/g, "\n");
+const invisibles = (s: string) => lineEndings(s).normalize("NFC").replace(/[\uFEFF\u200B-\u200D\u2060]/g, "").replace(/\u00A0/g, " ");
+const whitespace = (s: string) => invisibles(s).replace(/\s+/g, "");
+
+export function difference(a: string, b: string): Difference {
+  if (a === b) return "identical";
+  if (lineEndings(a) === lineEndings(b)) return "line-endings";
+  if (invisibles(a) === invisibles(b)) return "invisible";
+  return whitespace(a) === whitespace(b) ? "whitespace" : "content";
+}

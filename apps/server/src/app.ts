@@ -61,6 +61,9 @@ export function createApp(config: Config) {
     port: config.port,
     quiet: true,
     stopOnSignals: false,
+    // A device opens one document per note on a single socket, all at once on
+    // start; the default of 100 resets the socket of any larger vault.
+    maxPendingDocuments: 100_000,
     // History is the point of this project, so never discard deleted content.
     yDocOptions: { gc: false, gcFilter: () => false },
     extensions: [

@@ -77,9 +77,19 @@ export class VaultIndex {
   }
 }
 
+const CONFLICT_SUFFIX = / \(conflict [0-9a-f]{8}\)/g;
+
+/** Where a file loses a path collision. A copy of a copy names only its own id, so suffixes never pile up. */
 export function conflictPath(path: string, id: FileId): string {
-  const dot = path.lastIndexOf(".");
-  const stem = dot > path.lastIndexOf("/") ? path.slice(0, dot) : path;
-  const ext = dot > path.lastIndexOf("/") ? path.slice(dot) : "";
+  const original = conflictOriginal(path) ?? path;
+  const dot = original.lastIndexOf(".");
+  const stem = dot > original.lastIndexOf("/") ? original.slice(0, dot) : original;
+  const ext = dot > original.lastIndexOf("/") ? original.slice(dot) : "";
   return `${stem} (conflict ${id.slice(0, 8)})${ext}`;
+}
+
+/** The path a conflict copy was made from, or null if `path` isn't a conflict copy. */
+export function conflictOriginal(path: string): string | null {
+  const original = path.replace(CONFLICT_SUFFIX, "");
+  return original === path ? null : original;
 }

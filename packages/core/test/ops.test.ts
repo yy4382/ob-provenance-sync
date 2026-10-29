@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { handleOpRequest, TEXT_KEY, VaultIndex, type FileId, type VaultDocs } from "../src";
+import { conflictOriginal, conflictPath, difference, handleOpRequest, TEXT_KEY, VaultIndex, type FileId, type VaultDocs } from "../src";
 
 function memoryVault(): VaultDocs & { files: Map<FileId, Y.Doc> } {
   const index = new VaultIndex(new Y.Doc());
@@ -87,5 +87,23 @@ describe("VaultIndex conflicts", () => {
     const index = new VaultIndex(a);
     expect(index.idOf("Untitled.md")).toBe("aaa");
     expect(index.conflicts().map(([id]) => id)).toEqual(["bbb"]);
+  });
+});
+
+describe("conflict copies", () => {
+  it("names only the newest id when a conflict copy conflicts again", () => {
+    const once = conflictPath("dir/a.b.md", "11111111-x" as FileId);
+    expect(once).toBe("dir/a.b (conflict 11111111).md");
+    expect(conflictPath(once, "22222222-x" as FileId)).toBe("dir/a.b (conflict 22222222).md");
+    expect(conflictOriginal("a (conflict 11111111) (conflict 22222222).md")).toBe("a.md");
+    expect(conflictOriginal("a.md")).toBeNull();
+  });
+
+  it("tells differences that don't show from real ones", () => {
+    expect(difference("a\nb", "a\nb")).toBe("identical");
+    expect(difference("a\nb", "a\r\nb")).toBe("line-endings");
+    expect(difference("﻿a b", "a b")).toBe("invisible");
+    expect(difference("a b\n", "a  b")).toBe("whitespace");
+    expect(difference("a", "b")).toBe("content");
   });
 });

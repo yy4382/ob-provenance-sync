@@ -28,6 +28,10 @@ export class ObsidianDisk implements Disk {
       .map((f) => ({ path: f.path, binary: f.extension !== "md" }));
   }
 
+  async exists(path: string) {
+    return this.file(path) !== null;
+  }
+
   async read(path: string) {
     const f = this.file(path);
     return f ? this.app.vault.read(f) : null;

@@ -1,6 +1,7 @@
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import {
   conflictPath,
+  difference,
   fileDocName,
   humanProvenance,
   indexDocName,
@@ -22,6 +23,7 @@ export interface Disk {
   /** Whether a path belongs to the synced vault (the config folder doesn't). */
   accepts(path: string): boolean;
   list(): Promise<Array<{ path: string; binary: boolean }>>;
+  exists(path: string): Promise<boolean>;
   read(path: string): Promise<string | null>;
   write(path: string, text: string): Promise<void>;
   /** Writes `text` only if the file still holds `expected`, as one step. Resolves to whether it wrote. */
@@ -54,9 +56,17 @@ export interface EngineOptions {
   server?: { url: string; token: string; blobs: Blobs; WebSocketPolyfill?: unknown };
   persist?: (name: string, doc: Y.Doc) => Persistence;
   onStatus?: (status: SyncStatus) => void;
+  onEvent?: (event: SyncEvent) => void;
 }
 
 export type SyncStatus = "offline" | "connecting" | "connected" | "local-only";
+
+/** Something the engine did or ran into that the user may want to know about. */
+export interface SyncEvent {
+  level: "info" | "warn" | "error";
+  message: string;
+  path?: string;
+}
 
 /** Transaction origin for changes we read off disk, so they are not written straight back. */
 export const FROM_DISK = Symbol("from-disk");
@@ -169,7 +179,9 @@ export class MarkdownFile {
     const disk = await this.engine.opts.disk.read(path);
     if (disk === null) return this.writeNow(null);
     if (!this.knownLocally && !this.createdHere && this.ytext.length > 0 && disk !== this.ytext.toJSON()) {
-      await this.engine.createFromDisk(conflictPath(path, this.id), disk, true);
+      const copy = conflictPath(path, this.id);
+      this.engine.log("warn", `Kept this device's copy as ${copy}: it differs from the synced version (${difference(disk, this.ytext.toJSON())})`, path);
+      await this.engine.createFromDisk(copy, disk, true);
       return this.writeNow(disk);
     }
     this.applyDisk(disk);
@@ -312,6 +324,8 @@ export class MarkdownFile {
   }
 }
 
+const echoKey = (op: "rename" | "delete", ...paths: string[]) => [op, ...paths].join("\0");
+
 function synced(provider: HocuspocusProvider): Promise<void> {
   if (provider.isSynced) return Promise.resolve();
   return new Promise((resolve) => provider.on("synced", () => resolve()));
@@ -337,6 +351,10 @@ export class SyncEngine implements VaultDocs {
   private indexPersistence: Persistence | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private treeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Path-collision losers whose content is being compared with the winner's. */
+  private readonly settling = new Set<FileId>();
+  /** Vault events our own renames and deletions will cause, keyed by echoKey. */
+  private readonly echoes = new Set<string>();
   private mirrorTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
 
@@ -355,8 +373,15 @@ export class SyncEngine implements VaultDocs {
   /** Serialises disk-touching work so passes never interleave. */
   enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.queue.then(fn, fn);
-    this.queue = run.catch((e) => console.error("[provenance-sync]", e));
+    this.queue = run.catch((e) => {
+      console.error("[provenance-sync]", e);
+      this.log("error", e instanceof Error ? e.message : String(e));
+    });
     return run;
+  }
+
+  log(level: SyncEvent["level"], message: string, path?: string): void {
+    this.opts.onEvent?.({ level, message, ...(path === undefined ? {} : { path }) });
   }
 
   connect(name: string, document: Y.Doc): HocuspocusProvider | null {
@@ -387,8 +412,12 @@ export class SyncEngine implements VaultDocs {
         url: opts.server.url,
         ...(opts.server.WebSocketPolyfill ? { WebSocketPolyfill: opts.server.WebSocketPolyfill } : {}),
       });
-      this.socket.on("status", ({ status }: { status: string }) =>
-        opts.onStatus?.(status === "connected" ? "connected" : status === "connecting" ? "connecting" : "offline"),
+      this.socket.on("status", ({ status }: { status: string }) => {
+        opts.onStatus?.(status === "connected" ? "connected" : status === "connecting" ? "connecting" : "offline");
+        if (status === "connected") this.log("info", `Connected to ${opts.server!.url}`);
+      });
+      this.socket.on("disconnect", ({ event }: { event?: { code?: number; reason?: string } }) =>
+        this.log("warn", `Disconnected from the server (code ${event?.code ?? "?"}${event?.reason ? `, ${event.reason}` : ""})`),
       );
     } else opts.onStatus?.("local-only");
 
@@ -398,6 +427,9 @@ export class SyncEngine implements VaultDocs {
     await this.indexPersistence?.whenSynced;
     const hadLocal = Y.encodeStateVector(indexDoc).length > 1;
     this.indexProvider = this.connect(name, indexDoc);
+    this.indexProvider?.on("authenticationFailed", ({ reason }: { reason: string }) =>
+      this.log("error", `The server rejected this device's token for vault "${opts.vault}" (${reason})`),
+    );
     // A fresh device must learn the server's file ids before scanning, or
     // every existing file would be uploaded again under a new id.
     if (!hadLocal && this.indexProvider) await synced(this.indexProvider);
@@ -441,8 +473,10 @@ export class SyncEngine implements VaultDocs {
       }, FROM_DISK);
     }
     const renamedTo = new Set(renamed.values());
+    const added = unmapped.filter((f) => !renamedTo.has(f.path));
+    this.log("info", `Found ${listed.length} files: ${added.length} new, ${renamed.size} renamed and ${deleted.length} deleted since the last run`);
 
-    for (const { path, binary } of unmapped.filter((f) => !renamedTo.has(f.path))) {
+    for (const { path, binary } of added) {
       await (binary ? this.uploadBinary(path, undefined) : this.createFromDisk(path, (await this.opts.disk.read(path)) ?? "", false));
     }
     for (const { path, binary } of listed) {
@@ -524,15 +558,17 @@ export class SyncEngine implements VaultDocs {
   }
 
   /** Moves the disk toward the index: renames, deletions, new files, changed attachments. */
+  /**
+   * Moves the disk toward the index: renames, deletions, new files, changed
+   * attachments. Losers of a path collision stay put until settleCollision
+   * decides them, and nothing is placed at a path another file holds.
+   */
   private async syncTree(): Promise<void> {
     const index = this.vaultIndex;
-    const conflicts = index.conflicts();
-    if (conflicts.length) {
-      index.doc.transact(() => {
-        for (const [id, entry] of conflicts) index.rename(id, conflictPath(entry.path, id));
-      });
-    }
+    const losers = new Set(index.conflicts().map(([id]) => id));
+    for (const id of losers) void this.settleCollision(id);
     const entries = new Map(index.entries());
+    const done = { added: 0, moved: 0, deleted: 0 };
 
     for (const [id, path] of [...this.onDisk]) {
       if (entries.has(id)) continue;
@@ -540,25 +576,96 @@ export class SyncEngine implements VaultDocs {
       this.files.get(id)?.destroy();
       this.files.delete(id);
       this.binaryHashes.delete(id);
-      await this.opts.disk.trash(path);
+      await this.expectEcho(echoKey("delete", path), () => this.opts.disk.trash(path));
+      done.deleted++;
     }
     for (const [id, entry] of entries) {
-      if (!this.opts.disk.accepts(entry.path)) continue;
+      if (losers.has(id) || !this.opts.disk.accepts(entry.path)) continue;
+      const holder = this.idOnDisk(entry.path);
+      if (holder !== undefined && holder !== id) continue;
       const current = this.onDisk.get(id);
       if (current !== undefined && current !== entry.path) {
-        if (this.idOnDisk(entry.path)) continue;
         this.onDisk.set(id, entry.path);
-        await this.opts.disk.rename(current, entry.path);
+        await this.expectEcho(echoKey("rename", current, entry.path), () => this.opts.disk.rename(current, entry.path));
+        done.moved++;
       }
       if (entry.type === "markdown") {
         if (!this.files.has(id) || current === undefined) {
           this.onDisk.set(id, entry.path);
           const file = this.openFile(id, false);
           void file.ready.then(() => this.enqueue(() => file.reconcileDisk()));
+          if (current === undefined) done.added++;
         }
-      } else await this.syncBinary(id, entry);
+      } else if (await this.syncBinary(id, entry)) done.added++;
+    }
+    if (done.added || done.moved || done.deleted) {
+      this.log("info", `Applied from the index: ${done.added} new or changed, ${done.moved} moved, ${done.deleted} deleted`);
     }
     this.saveMirror();
+  }
+
+  /**
+   * Two devices created a file at the same path, and the smallest id keeps
+   * it. If both hold the same content, the loser is dropped and the winner
+   * takes over its file on disk; otherwise the loser moves to a conflict copy.
+   */
+  private async settleCollision(loser: FileId): Promise<void> {
+    if (this.settling.has(loser)) return;
+    this.settling.add(loser);
+    try {
+      const winnerOf = () => {
+        const entry = this.vaultIndex.get(loser);
+        const winner = entry && this.vaultIndex.idOf(entry.path);
+        return winner === loser ? undefined : winner;
+      };
+      const winner = winnerOf();
+      if (!winner) return;
+      const same = await this.sameContent(loser, winner);
+      await this.enqueue(async () => {
+        const entry = this.vaultIndex.get(loser);
+        if (!entry || winnerOf() !== winner) return;
+        if (same) await this.dropDuplicate(loser, winner);
+        else {
+          const copy = conflictPath(entry.path, loser);
+          this.log("warn", `Two devices created ${entry.path} with different content; moved one to ${copy}`, entry.path);
+          this.vaultIndex.doc.transact(() => this.vaultIndex.rename(loser, copy));
+        }
+        await this.syncTree();
+      });
+    } finally {
+      this.settling.delete(loser);
+    }
+  }
+
+  private async sameContent(a: FileId, b: FileId): Promise<boolean> {
+    const ea = this.vaultIndex.get(a);
+    const eb = this.vaultIndex.get(b);
+    if (ea?.type !== "markdown" || eb?.type !== "markdown") return ea?.type === "binary" && eb?.type === "binary" && ea.hash === eb.hash;
+    const [fa, fb] = [this.openFile(a, false), this.openFile(b, false)];
+    await Promise.all([fa.ready, fb.ready]);
+    return fa.ytext.toJSON() === fb.ytext.toJSON();
+  }
+
+  private async dropDuplicate(loser: FileId, winner: FileId): Promise<void> {
+    const path = this.onDisk.get(loser);
+    this.files.get(loser)?.destroy();
+    this.files.delete(loser);
+    // If the winner isn't on disk yet, it takes over the loser's file; otherwise the next pass trashes that file.
+    if (path !== undefined && !this.onDisk.has(winner)) {
+      this.onDisk.delete(loser);
+      this.onDisk.set(winner, path);
+      const entry = this.vaultIndex.get(winner)!;
+      if (entry.type === "binary") this.binaryHashes.set(winner, entry.hash);
+      else {
+        const file = this.openFile(winner, false);
+        const text = await this.opts.disk.read(path);
+        if (text === null) await file.writeNow(null);
+        else file.applyDisk(text);
+      }
+    }
+    this.binaryHashes.delete(loser);
+    this.vaultIndex.doc.transact(() => this.vaultIndex.delete(loser), FROM_DISK);
+    this.log("info", `Merged two identical copies of ${this.vaultIndex.get(winner)!.path} created on different devices`);
   }
 
   private openFile(id: FileId, createdHere: boolean): MarkdownFile {
@@ -570,12 +677,27 @@ export class SyncEngine implements VaultDocs {
     return file;
   }
 
-  private async syncBinary(id: FileId, entry: Extract<FileEntry, { type: "binary" }>) {
-    if (this.binaryHashes.get(id) === entry.hash || !this.opts.server) return;
+  /** Runs our own rename or deletion of a file that exists, noting the vault event it will cause. */
+  private async expectEcho(key: string, op: () => Promise<void>): Promise<void> {
+    const path = key.split("\0")[1]!;
+    if (!(await this.opts.disk.exists(path))) return;
+    this.echoes.add(key);
+    try {
+      await op();
+    } catch (e) {
+      this.echoes.delete(key);
+      throw e;
+    }
+  }
+
+  /** Resolves to whether it wrote the attachment. */
+  private async syncBinary(id: FileId, entry: Extract<FileEntry, { type: "binary" }>): Promise<boolean> {
+    if (this.binaryHashes.get(id) === entry.hash || !this.opts.server) return false;
     const data = await this.opts.server.blobs.get(entry.hash);
     this.onDisk.set(id, entry.path);
     this.binaryHashes.set(id, entry.hash);
     await this.opts.disk.writeBinary(entry.path, data);
+    return true;
   }
 
   async createFromDisk(path: string, text: string, alsoWrite: boolean): Promise<MarkdownFile> {
@@ -602,7 +724,10 @@ export class SyncEngine implements VaultDocs {
     this.vaultIndex.doc.transact(() => this.vaultIndex.set(id, entry), FROM_DISK);
   }
 
-  // Vault events from the host. Each is a no-op when it is the echo of our own disk operation.
+  // Vault events from the host. Each is a no-op when it is the echo of our own
+  // disk operation. A rename or delete echo runs after the pass that caused
+  // it, which may already have put another file at that path, so those are
+  // recognised from `echoes` rather than by which id the path maps to now.
 
   onCreate(path: string, binary: boolean): Promise<void> {
     return this.enqueue(async () => {
@@ -625,7 +750,7 @@ export class SyncEngine implements VaultDocs {
   onRename(from: string, to: string): Promise<void> {
     return this.enqueue(async () => {
       const id = this.idOnDisk(from);
-      if (!this.started || !id) return;
+      if (this.echoes.delete(echoKey("rename", from, to)) || !this.started || !id) return;
       this.onDisk.set(id, to);
       this.vaultIndex.doc.transact(() => this.vaultIndex.rename(id, to), FROM_DISK);
       this.saveMirror();
@@ -641,7 +766,7 @@ export class SyncEngine implements VaultDocs {
   onDelete(path: string): Promise<void> {
     return this.enqueue(async () => {
       const id = this.idOnDisk(path);
-      if (!this.started || !id) return;
+      if (this.echoes.delete(echoKey("delete", path)) || !this.started || !id) return;
       this.onDisk.delete(id);
       this.files.get(id)?.destroy();
       this.files.delete(id);

@@ -37,6 +37,9 @@ export class MemoryDisk implements Disk {
   accepts(path: string) {
     return !path.startsWith(".obsidian/");
   }
+  async exists(path: string) {
+    return this.files.has(path);
+  }
   async read(path: string) {
     const v = this.files.get(path);
     if (this.readDelay) await new Promise((r) => setTimeout(r, this.readDelay));
