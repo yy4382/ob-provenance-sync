@@ -28,7 +28,7 @@ VaultTree.tla:
 
 ## Does my change touch this?
 
-Both models were last confirmed to describe the code at **c6c426e** (sync commit).
+Both models were last confirmed to describe the code at **f61fea1** (sync commit).
 
 | Code | MarkdownFile.tla |
 | --- | --- |
@@ -45,16 +45,16 @@ Both models were last confirmed to describe the code at **c6c426e** (sync commit
 
 | Code | VaultTree.tla |
 | --- | --- |
-| `start` (waits for the index), `scanDisk`, `untouchedSince`, `detectRenames` | `Start`, `Scan` |
-| `settle`, `writeMirror` on close | `Stop` |
+| `start` (waits for the index), `scanDisk`, `untouchedSince`, `detectRenames`; `main.ts` `startSync` | `Start`, `Scan` |
+| `settle`, `writeMirror` on close; `main.ts` `stopSync`, also when another sync tool is enabled | `Stop` |
 | `onCreate`, `onRename`, `onDelete` (with their stale-event checks), `retryTree` | `OnCreate`, `OnRename`, `OnDelete`, `Notify` |
 | `scheduleTree`, `syncTree` (trash, move, place, park, `treeIncomplete`), `changedHere` | `TreeTimer`, `TreeStart`, `TTrash`, `TPlace`, `TPark`, `TEnd` |
 | `MarkdownFile.reconcileDisk` (vacant placement, fresh-device conflict copy, `applyDisk`) | `Reconcile`, `Merge` |
 | `settleCollision`, `sameContent`, `dropDuplicate` | `Settle` |
-| `createFromDisk`; `VaultIndex.idOf`, `conflicts`; core `conflictPath` | `Create`, `IdOf`, `LosersOf`, `ConflictPath` |
-| `conflict-plan.ts` `applyPlan` (trash a copy, rename it back) | `UDelete`, `URename` |
+| `createFromDisk`; `VaultIndex.idOf`, `conflicts`; core `conflictPath` (`repairedConflictPath` never applies: model paths carry one suffix) | `Create`, `IdOf`, `LosersOf`, `ConflictPath` |
+| `conflict-plan.ts` `applyPlan` (trash a copy, rename it back; never a blank copy onto a missing original) | `UDelete`, `URename` |
 
-Run `git diff <sync commit> -- apps/obsidian/src/sync apps/obsidian/src/editor/binding.ts apps/obsidian/src/main.ts packages/core/src/vault.ts`. If a hunk touches a row above, the model may no longer describe the code: update it (below) before you trust a result.
+Run `git diff <sync commit> -- apps/obsidian/src/sync apps/obsidian/src/editor/binding.ts apps/obsidian/src/main.ts apps/obsidian/src/conflict-plan.ts packages/core/src/vault.ts`. If a hunk touches a row above, the model may no longer describe the code: update it (below) before you trust a result.
 
 ## Run it
 
@@ -120,4 +120,4 @@ MarkdownFile.tla: every interleaving for one note, words `a` (initial), one remo
 
 VaultTree.tla: two devices, three ids, two note names and their conflict copies, up to two user actions (create, rename, delete, or an outside edit while a device is off) and two clean closes (about 1.1M distinct states); with one user action all three rules hold. Assumptions: the server relays index changes at once; a starting device sees the server's index before its scan; users act only between steps of a tree pass, not during its awaits; `settleCollision`'s content check and its change are one step; text is a set of tokens and `applyDisk` is a three-way merge on sets; files are markdown.
 
-Not covered: crashes (a stale mirror; `scanDisk`'s `movedAway` handles one case), offline starts (the scan reads a stale index), binaries, remote text edits racing tree moves, `SyncEngine.check`'s repairs, several panes on one note, the server and network, and the MCP bridge.
+Not covered: notes whose content never reached the server (no document state; `writeNow` refuses to place them and `onCreate` adopts a file put at their path; every model note has state, so these branches never fire), tested in `engine.test.ts` instead; crashes (a stale mirror; `scanDisk`'s `movedAway` handles one case), offline starts (the scan reads a stale index), binaries, remote text edits racing tree moves, `SyncEngine.check`'s repairs, several panes on one note, the server and network, and the MCP bridge.

@@ -16,7 +16,7 @@
 (* their races are MarkdownFile.tla's business.                            *)
 (*                                                                         *)
 (* Each device runs one FIFO queue of tasks, like SyncEngine.enqueue      *)
-(* (engine.ts:389): vault events, tree passes, reconcileDisk calls and    *)
+(* (engine.ts:408): vault events, tree passes, reconcileDisk calls and    *)
 (* settleCollision calls. The server is not modelled: an index change on  *)
 (* a running device reaches every running device at once, and a starting  *)
 (* device sees the server's index before it scans (start() waits for it). *)
