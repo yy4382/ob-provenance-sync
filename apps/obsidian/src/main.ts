@@ -1,4 +1,4 @@
-import { humanId, reattribute, REATTRIBUTABLE } from "@provenance/core";
+import { errorMessage, humanId, reattribute, REATTRIBUTABLE } from "@provenance/core";
 import { MarkdownView, Notice, Platform, Plugin, TAbstractFile, TFile, type App, type Editor } from "obsidian";
 import type { EditorView } from "@codemirror/view";
 import { around } from "monkey-around";
@@ -10,7 +10,7 @@ import { provenanceExtension, renderProvenance, segmentAt } from "./editor/bindi
 import { ReattributeModal, type Attribution, type Reattribution } from "./reattribute";
 import { defaultSettings, ProvenanceSettingTab, type ProvenanceSettings } from "./settings";
 import { SyncEngine, type SyncStatus } from "./sync/engine";
-import { httpBlobs, indexedDbPersistence, ObsidianDisk } from "./sync/obsidian";
+import { httpBlobs, indexedDbPersistence, isSyncedPath, ObsidianDisk } from "./sync/obsidian";
 
 const CHECK_EVERY = 10 * 60_000;
 const OTHER_SYNC_CHECK_EVERY = 5_000;
@@ -164,7 +164,7 @@ export default class ProvenancePlugin extends Plugin {
     try {
       problems = await this.engine.check();
     } catch (e) {
-      return void new Notice(`Sync check failed: ${e instanceof Error ? e.message : String(e)}`);
+      return void new Notice(`Sync check failed: ${errorMessage(e)}`);
     }
     new Notice(problems ? `Sync check found ${problems} problems and repaired what it could. The sync event log has the details.` : "Sync check: every file matches the index.");
   }
@@ -210,13 +210,13 @@ export default class ProvenancePlugin extends Plugin {
   }
 
   resolveConflicts() {
-    new ConflictsModal(this.app, (path) => new ObsidianDisk(this.app).accepts(path), () => this.engine).open();
+    new ConflictsModal(this.app, (path) => isSyncedPath(this.app, path), () => this.engine).open();
   }
 
   /** What the event log view shows above the events, so the user can check the settings in effect. */
   syncSummary(): Array<[string, string]> {
     const s = this.settings;
-    const token = s.tokenSecret ? this.app.secretStorage.getSecret(s.tokenSecret) : null;
+    const { token } = this.serverSettings();
     return [
       ["Status", STATUS_TEXT[this.status].replace("Provenance: ", "")],
       ["Server", s.serverUrl || "none (this device only)"],
@@ -231,10 +231,14 @@ export default class ProvenancePlugin extends Plugin {
   /** How an agent on this computer starts the local MCP server, with this vault's paths and server filled in. */
   mcpCommand(): LocalMcpCommand | null {
     if (!this.mcpCliPath) return null;
+    const { url, token } = this.serverSettings();
+    return localMcpCommand(this.app, this.mcpCliPath, url && token ? { url, vault: this.settings.vaultId, token } : null);
+  }
+
+  /** The server URL without a trailing slash ("" if none), and the device token from the keychain. */
+  private serverSettings(): { url: string; token: string | null } {
     const s = this.settings;
-    const token = s.tokenSecret ? this.app.secretStorage.getSecret(s.tokenSecret) : null;
-    const url = s.serverUrl.replace(/\/+$/, "");
-    return localMcpCommand(this.app, this.mcpCliPath, url && token ? { url, vault: s.vaultId, token } : null);
+    return { url: s.serverUrl.replace(/\/+$/, ""), token: s.tokenSecret ? this.app.secretStorage.getSecret(s.tokenSecret) : null };
   }
 
   async saveSettings() {
@@ -295,8 +299,7 @@ export default class ProvenancePlugin extends Plugin {
       new Notice(`Provenance sync: ${message}`);
       return this.setStatus("error");
     }
-    const base = s.serverUrl.replace(/\/+$/, "");
-    const token = s.tokenSecret ? this.app.secretStorage.getSecret(s.tokenSecret) : null;
+    const { url: base, token } = this.serverSettings();
     if (base && !token) this.log.add({ level: "warn", message: "A server is set but there is no device token, so sync stays on this device." });
     this.log.add({ level: "info", message: `Starting sync of vault "${s.vaultId}" as ${s.deviceName}${base && token ? ` with ${base}` : ", this device only"}` });
     this.disk = new ObsidianDisk(this.app);
@@ -318,7 +321,7 @@ export default class ProvenancePlugin extends Plugin {
       await engine.start();
     } catch (e) {
       console.error("[provenance-sync] start failed", e);
-      const message = `Sync failed to start: ${e instanceof Error ? e.message : String(e)}`;
+      const message = `Sync failed to start: ${errorMessage(e)}`;
       this.log.add({ level: "error", message });
       new Notice(`Provenance ${message}`);
       return this.setStatus("error");

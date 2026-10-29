@@ -4,6 +4,7 @@ import {
   agentProvenance,
   conflictPath,
   difference,
+  errorMessage,
   fileDocName,
   hasState,
   humanProvenance,
@@ -79,6 +80,13 @@ export interface SyncEvent {
 
 /** Transaction origin for changes we read off disk, so they are not written straight back. */
 export const FROM_DISK = Symbol("from-disk");
+
+/** How long a start or scan waits for a document still loading before going on without it. */
+const OPEN_WAIT = 3000;
+
+function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([promise, new Promise<T>((r) => setTimeout(() => r(fallback), ms))]);
+}
 
 export async function sha256(data: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", data);
@@ -464,7 +472,7 @@ export class SyncEngine implements VaultDocs {
     const run = this.queue.then(fn, fn);
     this.queue = run.catch((e) => {
       console.error("[provenance-sync]", e);
-      this.log("error", e instanceof Error ? e.message : String(e));
+      this.log("error", errorMessage(e));
     });
     return run;
   }
@@ -523,7 +531,7 @@ export class SyncEngine implements VaultDocs {
     // device waits a little too, so the scan sees what was deleted elsewhere
     // while it was off rather than taking the files for edits made here.
     if (!hadLocal && this.indexProvider) await synced(this.indexProvider);
-    else if (this.indexProvider) await Promise.race([synced(this.indexProvider), new Promise((r) => setTimeout(r, 3000))]);
+    else if (this.indexProvider) await within(synced(this.indexProvider), OPEN_WAIT, undefined);
 
     const lastSeen = ((await this.indexPersistence?.get(MIRROR_KEY)) ?? {}) as Record<string, string>;
     await this.enqueue(() => this.scanDisk(lastSeen));
@@ -599,9 +607,7 @@ export class SyncEngine implements VaultDocs {
     for (const id of deleted) this.log("debug", `Deleted ${short(id)} while sync was off`, lastSeen[id]);
     for (const { path } of added) this.log("debug", "Added while sync was off", path);
 
-    for (const { path, binary } of added) {
-      await (binary ? this.uploadBinary(path, undefined) : this.createFromDisk(path, (await this.opts.disk.read(path)) ?? "", false));
-    }
+    for (const { path, binary } of added) await this.addFromDisk(path, binary);
     for (const { path, binary } of listed) {
       const id = binary ? this.onDisk.idAt(path) : undefined;
       const data = id ? await this.opts.disk.readBinary(path) : null;
@@ -624,11 +630,8 @@ export class SyncEngine implements VaultDocs {
         untouched.add(path);
         continue;
       }
-      const file = this.openFile(id, false);
-      const ready = await Promise.race([file.ready.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 3000))]);
-      if (ready && (await this.opts.disk.read(path)) === file.diskText) untouched.add(path);
-      file.destroy();
-      this.files.delete(id);
+      const text = await this.peekDiskText(id);
+      if (text !== null && (await this.opts.disk.read(path)) === text) untouched.add(path);
     }
     return untouched;
   }
@@ -643,11 +646,8 @@ export class SyncEngine implements VaultDocs {
     if (!ids.length || !paths.length) return found;
     const texts = new Map<string, FileId>();
     for (const id of ids) {
-      const file = this.openFile(id, false);
-      const ready = await Promise.race([file.ready.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 3000))]);
-      if (ready) texts.set(file.diskText, id);
-      file.destroy();
-      this.files.delete(id);
+      const text = await this.peekDiskText(id);
+      if (text !== null) texts.set(text, id);
     }
     for (const path of paths) {
       const id = texts.get((await this.opts.disk.read(path)) ?? "");
@@ -668,7 +668,7 @@ export class SyncEngine implements VaultDocs {
 
     const notes = vanished.filter((id) => this.vaultIndex.get(id)?.type === "markdown");
     const opened = notes.map((id) => this.openFile(id, false));
-    await Promise.race([Promise.allSettled(opened.map((f) => f.ready)), new Promise((r) => setTimeout(r, 3000))]);
+    await within(Promise.allSettled(opened.map((f) => f.ready)), OPEN_WAIT, []);
     const appearedNotes = [];
     for (const f of appeared.filter((f) => !f.binary)) appearedNotes.push({ key: f.path, text: (await this.opts.disk.read(f.path)) ?? "" });
     for (const [id, path] of pairRenames(
@@ -680,11 +680,7 @@ export class SyncEngine implements VaultDocs {
       const file = this.files.get(id)!;
       void file.ready.then(() => this.enqueue(() => file.reconcileDisk()));
     }
-    for (const file of opened) {
-      if (renamed.has(file.id)) continue;
-      file.destroy();
-      this.files.delete(file.id);
-    }
+    for (const file of opened) if (!renamed.has(file.id)) this.closeFile(file.id);
 
     for (const f of appeared.filter((f) => f.binary)) {
       const data = await this.opts.disk.readBinary(f.path);
@@ -763,15 +759,11 @@ export class SyncEngine implements VaultDocs {
     for (const [id, path] of [...this.onDisk]) {
       if (entries.has(id)) continue;
       const changed = await this.changedHere(id, path);
-      this.onDisk.delete(id);
-      this.files.get(id)?.destroy();
-      this.files.delete(id);
-      this.binaryHashes.delete(id);
+      this.forget(id);
       if (changed) {
         // Edited or replaced here, maybe with its events still queued: keep it, as a new file.
         this.log("warn", `Kept as a new file: another device deleted ${short(id)}, but the file here changed since`, path);
-        if (isMarkdownPath(path)) await this.createFromDisk(path, (await this.opts.disk.read(path)) ?? "", false);
-        else await this.uploadBinary(path, undefined);
+        await this.addFromDisk(path, !isMarkdownPath(path));
         continue;
       }
       this.log("debug", `Moving to the trash: another device deleted ${short(id)}`, path);
@@ -901,8 +893,7 @@ export class SyncEngine implements VaultDocs {
       const kept = this.openFile(winner, false);
       kept.doc.transact(() => adoptText(kept.ytext, dropped.ytext, true));
     }
-    dropped?.destroy();
-    this.files.delete(loser);
+    this.closeFile(loser);
     // If the winner isn't on disk yet, it takes over the loser's file; otherwise the next pass trashes that file.
     if (path !== undefined && !this.onDisk.has(winner)) {
       this.onDisk.delete(loser);
@@ -928,6 +919,27 @@ export class SyncEngine implements VaultDocs {
       this.files.set(id, file);
     }
     return file;
+  }
+
+  private closeFile(id: FileId): void {
+    this.files.get(id)?.destroy();
+    this.files.delete(id);
+  }
+
+  /** The text this device last had on disk for a note it doesn't keep open, or null if the note didn't load in time. */
+  private async peekDiskText(id: FileId): Promise<string | null> {
+    const file = this.openFile(id, false);
+    const ready = await within(file.ready.then(() => true), OPEN_WAIT, false);
+    const text = ready ? file.diskText : null;
+    this.closeFile(id);
+    return text;
+  }
+
+  /** Drops everything this device knows about `id` being on disk. */
+  private forget(id: FileId): void {
+    this.onDisk.delete(id);
+    this.closeFile(id);
+    this.binaryHashes.delete(id);
   }
 
   /** Runs our own rename or deletion of a file that exists, noting the vault event it will cause. */
@@ -963,6 +975,12 @@ export class SyncEngine implements VaultDocs {
     this.vaultIndex.doc.transact(() => this.vaultIndex.set(id, { type: "markdown", path }), FROM_DISK);
     if (alsoWrite) await this.opts.disk.write(path, text);
     return file;
+  }
+
+  /** Starts syncing a file found on disk under a new id. */
+  private async addFromDisk(path: string, binary: boolean): Promise<void> {
+    if (binary) return this.uploadBinary(path, undefined);
+    await this.createFromDisk(path, (await this.opts.disk.read(path)) ?? "", false);
   }
 
   private async uploadBinary(path: string, known: FileId | undefined): Promise<void> {
@@ -1003,8 +1021,7 @@ export class SyncEngine implements VaultDocs {
         const entry = id && this.vaultIndex.get(id);
         if (!id) {
           problem("this file isn't synced; adding it", path);
-          if (binary) await this.uploadBinary(path, undefined);
-          else await this.createFromDisk(path, (await disk.read(path)) ?? "", false);
+          await this.addFromDisk(path, binary);
         } else if (!entry) problem(`${short(id)} was deleted elsewhere but is still here`, path);
         else if (entry.path !== path && !losers.has(id)) problem(`${short(id)} should be at ${entry.path}`, path);
         else if (entry.type === "binary") {
@@ -1068,7 +1085,7 @@ export class SyncEngine implements VaultDocs {
       if (!this.started || this.onDisk.idAt(path) || !(await this.opts.disk.exists(path))) return;
       this.log("debug", "Created here", path);
       if (binary) return this.uploadBinary(path, undefined);
-      await this.createFromDisk(path, (await this.opts.disk.read(path)) ?? "", false);
+      await this.addFromDisk(path, false);
       this.saveMirror();
     });
   }
@@ -1094,7 +1111,7 @@ export class SyncEngine implements VaultDocs {
         if (this.onDisk.idAt(to) || !this.opts.disk.accepts(to) || !(await this.opts.disk.exists(to))) return;
         this.log("debug", `Renamed here from ${from}, which wasn't synced; adding it`, to);
         if (!isMarkdownPath(to)) return this.uploadBinary(to, undefined);
-        await this.createFromDisk(to, (await this.opts.disk.read(to)) ?? "", false);
+        await this.addFromDisk(to, false);
         return this.saveMirror();
       }
       // Stale: a tree pass queued before the rename moved the note back to `from`.
@@ -1122,10 +1139,7 @@ export class SyncEngine implements VaultDocs {
       // Stale: the engine has since put this very note there, e.g. a remote rename to this path.
       if ((await this.opts.disk.exists(path)) && !(await this.changedHere(id, path))) return;
       this.log("debug", `Deleted ${short(id)} here`, path);
-      this.onDisk.delete(id);
-      this.files.get(id)?.destroy();
-      this.files.delete(id);
-      this.binaryHashes.delete(id);
+      this.forget(id);
       this.vaultIndex.doc.transact(() => this.vaultIndex.delete(id), FROM_DISK);
       this.saveMirror();
     });
@@ -1186,13 +1200,13 @@ export class SyncEngine implements VaultDocs {
    * shutdown. Files still waiting for the server (offline, fresh device) are
    * not waited for longer than `wait` ms.
    */
-  async settle(wait = 3000): Promise<void> {
+  async settle(wait = OPEN_WAIT): Promise<void> {
     if (this.treeTimer) {
       clearTimeout(this.treeTimer);
       this.treeTimer = null;
       await this.enqueue(() => this.syncTree());
     }
-    await Promise.race([Promise.allSettled([...this.files.values()].map((f) => f.ready)), new Promise((r) => setTimeout(r, wait))]);
+    await within(Promise.allSettled([...this.files.values()].map((f) => f.ready)), wait, []);
     await this.enqueue(async () => {
       for (const f of this.files.values()) await f.flush();
       if (this.mirrorTimer) {

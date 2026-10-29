@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { agentIdSchema, type AgentId } from "@provenance/core";
+import { agentIdSchema, parseAgentName, type AgentId } from "@provenance/core";
 import { z } from "zod";
 
 const tokenSchema = z.discriminatedUnion("role", [
@@ -38,7 +38,5 @@ export function credentialFor(config: Config, token: string | undefined | null):
 
 export function agentFor(cred: Credential, requested: string | null): AgentId | null {
   if (cred.role !== "agent") return null;
-  if (cred.agent) return cred.agent;
-  const parsed = agentIdSchema.safeParse(requested?.includes(":") ? requested : `agent:${requested ?? ""}`);
-  return parsed.success ? parsed.data : null;
+  return cred.agent ?? parseAgentName(requested);
 }

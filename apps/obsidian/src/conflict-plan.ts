@@ -1,4 +1,4 @@
-import { conflictOriginal, difference } from "@provenance/core";
+import { conflictOriginal, difference, errorMessage } from "@provenance/core";
 
 /** A note's text, or an attachment's SHA-256, which is all two attachments are compared by. */
 export type Content = string | { hash: string };
@@ -121,7 +121,7 @@ export async function resolveSafe(files: ConflictFiles, kinds: ReadonlySet<Verdi
         resolved++;
       } catch (e) {
         skip.add(plan.copy);
-        failed.push([plan.copy, e instanceof Error ? e.message : String(e)]);
+        failed.push([plan.copy, errorMessage(e)]);
       }
     }
   }

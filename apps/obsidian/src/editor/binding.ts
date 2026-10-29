@@ -27,7 +27,7 @@ const marks = {
  * so any other pane may still be missing text that is already in the CRDT,
  * and converging it would insert that text a second time.
  */
-const panes = new Map<MarkdownFile, Set<object>>();
+const panes = new Map<MarkdownFile, Set<ProvenanceView>>();
 
 type EditKind = "human" | "unknown" | "copy";
 
@@ -60,145 +60,144 @@ function diffChanges(from: string, to: string): ChangeSpec[] {
 let currentEngine: () => SyncEngine | null = () => null;
 const engine = () => currentEngine();
 
-const plugin = ViewPlugin.fromClass(
-  class {
-    decorations: DecorationSet = Decoration.none;
-    segments: Segment[] = [];
-    file: MarkdownFile | null = null;
-    private path: string | null = null;
-    release: (() => void) | null = null;
-    /** Identifies the current attachment, so a binding that resolves after the pane moved on is released. */
-    private attached: object | null = null;
-    private readonly observer = (event: Y.YTextEvent, tr: Y.Transaction) => this.onYjs(event, tr);
+class ProvenanceView {
+  decorations: DecorationSet = Decoration.none;
+  segments: Segment[] = [];
+  file: MarkdownFile | null = null;
+  private path: string | null = null;
+  release: (() => void) | null = null;
+  /** Identifies the current attachment, so a binding that resolves after the pane moved on is released. */
+  private attached: object | null = null;
+  private readonly observer = (event: Y.YTextEvent, tr: Y.Transaction) => this.onYjs(event, tr);
 
-    constructor(readonly view: EditorView) {
-      this.attach();
+  constructor(readonly view: EditorView) {
+    this.attach();
+  }
+
+  get primary(): boolean {
+    return this.file !== null && panes.get(this.file)?.values().next().value === this;
+  }
+
+  private currentPath(): string | null {
+    return this.view.state.field(editorInfoField, false)?.file?.path ?? null;
+  }
+
+  /** Editors are reused when a pane opens another file, so this runs on every update. */
+  private attach() {
+    const path = this.currentPath();
+    const file = path ? (engine()?.fileAt(path) ?? null) : null;
+    if (path === this.path && file === this.file) return;
+    this.detach();
+    this.path = path;
+    if (!file) return;
+    this.file = file;
+    let set = panes.get(file);
+    if (!set) panes.set(file, (set = new Set()));
+    set.add(this);
+    file.ytext.observe(this.observer);
+    const attached = (this.attached = {});
+    const current = () => (this.attached === attached ? this.view.state.doc.toString() : null);
+    void file.ready
+      .then(() => file.bindEditor(current))
+      .then((release) => {
+        if (this.attached !== attached) return release();
+        this.release = release;
+        if (this.primary) this.loadFromCrdt();
+        this.scheduleRefresh();
+      });
+  }
+
+  /** Makes the editor show the CRDT's text. Converging by diff makes repeats harmless. */
+  private loadFromCrdt() {
+    const changes = diffChanges(this.view.state.doc.toString(), this.file!.ytext.toJSON());
+    if (changes.length) this.view.dispatch({ changes, annotations: [fromYjs.of(true), Transaction.addToHistory.of(false)] });
+  }
+
+  private detach() {
+    const file = this.file;
+    if (!file) return;
+    file.ytext.unobserve(this.observer);
+    const wasPrimary = this.primary;
+    const set = panes.get(file)!;
+    set.delete(this);
+    this.release?.();
+    this.release = null;
+    this.attached = null;
+    this.file = null;
+    this.segments = [];
+    this.decorations = Decoration.none;
+    if (set.size === 0) panes.delete(file);
+    else if (wasPrimary) {
+      const next = set.values().next().value!;
+      if (next.release) next.loadFromCrdt();
     }
+  }
 
-    get primary(): boolean {
-      return this.file !== null && panes.get(this.file)?.values().next().value === this;
-    }
+  private onYjs(_event: Y.YTextEvent, tr: Y.Transaction) {
+    if (this.primary && this.release && !panes.get(this.file!)?.has(tr.origin as ProvenanceView)) this.loadFromCrdt();
+    this.scheduleRefresh();
+  }
 
-    private currentPath(): string | null {
-      return this.view.state.field(editorInfoField, false)?.file?.path ?? null;
-    }
+  private refreshQueued = false;
+  private scheduleRefresh() {
+    if (this.refreshQueued) return;
+    this.refreshQueued = true;
+    queueMicrotask(() => {
+      this.refreshQueued = false;
+      if (this.file) this.view.dispatch({ effects: refresh.of(null) });
+    });
+  }
 
-    /** Editors are reused when a pane opens another file, so this runs on every update. */
-    private attach() {
-      const path = this.currentPath();
-      const file = path ? (engine()?.fileAt(path) ?? null) : null;
-      if (path === this.path && file === this.file) return;
-      this.detach();
-      this.path = path;
-      if (!file) return;
-      this.file = file;
-      let set = panes.get(file);
-      if (!set) panes.set(file, (set = new Set()));
-      set.add(this);
-      file.ytext.observe(this.observer);
-      const attached = (this.attached = {});
-      const current = () => (this.attached === attached ? this.view.state.doc.toString() : null);
-      void file.ready
-        .then(() => file.bindEditor(current))
-        .then((release) => {
-          if (this.attached !== attached) return release();
-          this.release = release;
-          if (this.primary) this.loadFromCrdt();
-          this.scheduleRefresh();
+  update(u: ViewUpdate) {
+    this.attach();
+    const file = this.file;
+    if (!file) return;
+    const own = u.transactions.filter((tr) => tr.docChanged && !tr.annotation(fromYjs));
+    if (own.length && this.release) this.push(own, file);
+    if (u.docChanged || u.transactions.some((tr) => tr.effects.some((e) => e.is(refresh)))) this.computeDecorations();
+  }
+
+  private push(transactions: readonly Transaction[], file: MarkdownFile) {
+    const set = panes.get(file);
+    if (set && set.values().next().value !== this) panes.set(file, new Set([this, ...set]));
+    file.doc.transact(() => {
+      for (const tr of transactions) {
+        const kind = kindOf(tr);
+        // Positions after a skipped copy no longer line up with the CRDT;
+        // such batches are rare, and the primary re-converges afterwards.
+        if (kind === "copy") break;
+        const by = kind === "human" ? file.human() : file.unknown();
+        let adj = 0;
+        tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+          const text = inserted.sliceString(0, inserted.length, "\n");
+          if (toA > fromA) file.ytext.delete(fromA + adj, toA - fromA);
+          insertText(file.ytext, fromA + adj, text, by);
+          adj += text.length - (toA - fromA);
         });
-    }
+      }
+    }, this);
+  }
 
-    /** Makes the editor show the CRDT's text. Converging by diff makes repeats harmless. */
-    private loadFromCrdt() {
-      const changes = diffChanges(this.view.state.doc.toString(), this.file!.ytext.toJSON());
-      if (changes.length) this.view.dispatch({ changes, annotations: [fromYjs.of(true), Transaction.addToHistory.of(false)] });
-    }
-
-    private detach() {
-      const file = this.file;
-      if (!file) return;
-      file.ytext.unobserve(this.observer);
-      const wasPrimary = this.primary;
-      const set = panes.get(file)!;
-      set.delete(this);
-      this.release?.();
-      this.release = null;
-      this.attached = null;
-      this.file = null;
+  private computeDecorations() {
+    const file = this.file;
+    const doc = this.view.state.doc;
+    if (!file || file.ytext.length !== doc.length) {
       this.segments = [];
       this.decorations = Decoration.none;
-      if (set.size === 0) panes.delete(file);
-      else if (wasPrimary) {
-        const next = set.values().next().value as { release: unknown; loadFromCrdt(): void };
-        if (next.release) next.loadFromCrdt();
-      }
+      return;
     }
+    this.segments = attribute(file.ytext);
+    const builder = new RangeSetBuilder<Decoration>();
+    for (const s of this.segments) if (s.kind !== "unknown") builder.add(s.from, s.to, marks[s.kind]);
+    this.decorations = builder.finish();
+  }
 
-    private onYjs(_event: Y.YTextEvent, tr: Y.Transaction) {
-      if (this.primary && this.release && !panes.get(this.file!)?.has(tr.origin as object)) this.loadFromCrdt();
-      this.scheduleRefresh();
-    }
+  destroy() {
+    this.detach();
+  }
+}
 
-    private refreshQueued = false;
-    private scheduleRefresh() {
-      if (this.refreshQueued) return;
-      this.refreshQueued = true;
-      queueMicrotask(() => {
-        this.refreshQueued = false;
-        if (this.file) this.view.dispatch({ effects: refresh.of(null) });
-      });
-    }
-
-    update(u: ViewUpdate) {
-      this.attach();
-      const file = this.file;
-      if (!file) return;
-      const own = u.transactions.filter((tr) => tr.docChanged && !tr.annotation(fromYjs));
-      if (own.length && this.release) this.push(own, file);
-      if (u.docChanged || u.transactions.some((tr) => tr.effects.some((e) => e.is(refresh)))) this.computeDecorations();
-    }
-
-    private push(transactions: readonly Transaction[], file: MarkdownFile) {
-      const set = panes.get(file);
-      if (set && set.values().next().value !== this) panes.set(file, new Set([this, ...set]));
-      file.doc.transact(() => {
-        for (const tr of transactions) {
-          const kind = kindOf(tr);
-          // Positions after a skipped copy no longer line up with the CRDT;
-          // such batches are rare, and the primary re-converges afterwards.
-          if (kind === "copy") break;
-          const by = kind === "human" ? file.human() : file.unknown();
-          let adj = 0;
-          tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
-            const text = inserted.sliceString(0, inserted.length, "\n");
-            if (toA > fromA) file.ytext.delete(fromA + adj, toA - fromA);
-            insertText(file.ytext, fromA + adj, text, by);
-            adj += text.length - (toA - fromA);
-          });
-        }
-      }, this);
-    }
-
-    private computeDecorations() {
-      const file = this.file;
-      const doc = this.view.state.doc;
-      if (!file || file.ytext.length !== doc.length) {
-        this.segments = [];
-        this.decorations = Decoration.none;
-        return;
-      }
-      this.segments = attribute(file.ytext);
-      const builder = new RangeSetBuilder<Decoration>();
-      for (const s of this.segments) if (s.kind !== "unknown") builder.add(s.from, s.to, marks[s.kind]);
-      this.decorations = builder.finish();
-    }
-
-    destroy() {
-      this.detach();
-    }
-  },
-  { decorations: (v) => v.decorations },
-);
+const plugin = ViewPlugin.fromClass(ProvenanceView, { decorations: (v) => v.decorations });
 
 export function segmentAt(view: EditorView, pos: number): Segment | null {
   return view.plugin(plugin)?.segments.find((s) => s.from <= pos && pos <= s.to) ?? null;

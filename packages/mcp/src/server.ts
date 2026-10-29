@@ -1,7 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { NOTE_MAX_LENGTH, type AgentId, type OpRequest, type OpResponse } from "@provenance/core";
+import { NOTE_MAX_LENGTH, slug, type AgentId, type OpRequest, type OpResponse } from "@provenance/core";
 import { z } from "zod";
+import pkg from "../package.json" with { type: "json" };
 
 export type OpsTransport = (req: OpRequest) => Promise<OpResponse>;
 export type Mode = "full" | "limited";
@@ -47,9 +48,9 @@ function render(res: OpResponse): CallToolResult {
 }
 
 /** The identity an MCP client announces in its handshake, e.g. "Claude Code" becomes agent:claude-code. */
-export function agentFromClientName(name: string | undefined): AgentId | null {
-  const slug = (name ?? "").toLowerCase().replace(/[^\w.@-]+/g, "-").replace(/^-+|-+$/g, "");
-  return slug ? `agent:${slug}` : null;
+export function agentFromClientName(client: string | undefined): AgentId | null {
+  const name = slug(client ?? "");
+  return name ? `agent:${name}` : null;
 }
 
 /**
@@ -62,7 +63,7 @@ export function agentFromClientName(name: string | undefined): AgentId | null {
  * server configuration and still be told apart.
  */
 export function createMcpServer(opts: { ops: OpsTransport; agent: AgentId | null; mode: Mode }): McpServer {
-  const server = new McpServer({ name: "obsidian-provenance", version: "0.1.0-alpha.8" });
+  const server = new McpServer({ name: "obsidian-provenance", version: pkg.version });
   const call = async (req: OpRequest) => render(await opts.ops(req));
   const identity = () => opts.agent ?? agentFromClientName(server.server.getClientVersion()?.name);
   const by = (w: z.infer<typeof why>, n?: string) => ({ agent: identity()!, why: w, ...(n ? { note: n } : {}) });

@@ -1,4 +1,4 @@
-import { conflictOriginal } from "@provenance/core";
+import { conflictOriginal, errorMessage } from "@provenance/core";
 import { Modal, Notice, Setting, TFile, type App } from "obsidian";
 import { planConflicts, resolveSafe, SAFE, type ConflictFiles, type Content, type CopyInfo, type Verdict } from "./conflict-plan";
 import { sha256, type SyncEngine } from "./sync/engine";
@@ -163,7 +163,7 @@ export class ConflictsModal extends Modal {
     try {
       await fn();
     } catch (e) {
-      new Notice(`Could not resolve: ${e instanceof Error ? e.message : String(e)}`);
+      new Notice(`Could not resolve: ${errorMessage(e)}`);
     }
     await this.render();
   }

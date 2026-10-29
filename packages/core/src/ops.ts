@@ -90,6 +90,9 @@ async function requireId(docs: VaultDocs, path: string): Promise<FileId> {
   return id;
 }
 
+const byOf = (req: Extract<OpRequest, { by: unknown }>, docs: VaultDocs) =>
+  agentProvenance(req.by.agent, req.by.why, req.by.note ?? null, docs.device);
+
 export async function executeOp(docs: VaultDocs, req: OpRequest): Promise<OpResult> {
   switch (req.op) {
     case "list": {
@@ -112,7 +115,7 @@ export async function executeOp(docs: VaultDocs, req: OpRequest): Promise<OpResu
       return { op: "read", content, sentences };
     }
     case "edit": {
-      const by = agentProvenance(req.by.agent, req.by.why, req.by.note ?? null, docs.device);
+      const by = byOf(req, docs);
       const id = await requireId(docs, req.path);
       try {
         const replaced = await docs.updateText(id, (t) => replaceText(t, req.oldString, req.newString, by, req.replaceAll));
@@ -123,13 +126,13 @@ export async function executeOp(docs: VaultDocs, req: OpRequest): Promise<OpResu
       }
     }
     case "append": {
-      const by = agentProvenance(req.by.agent, req.by.why, req.by.note ?? null, docs.device);
+      const by = byOf(req, docs);
       await docs.updateText(await requireId(docs, req.path), (t) => insertText(t, t.length, req.text, by));
       return { op: "append" };
     }
     case "create": {
       if ((await docs.index()).idOf(req.path)) throw new OpError("exists", `file already exists: ${req.path}`);
-      const by = agentProvenance(req.by.agent, req.by.why, req.by.note ?? null, docs.device);
+      const by = byOf(req, docs);
       const id = newFileId();
       await docs.updateText(id, (t) => {
         markNote(t.doc!);
@@ -168,6 +171,10 @@ export async function handleOpRequest(
     return { ok: true, result: await run(parsed.data) };
   } catch (e) {
     if (e instanceof OpError) return { ok: false, code: e.code, message: e.message };
-    return { ok: false, code: "unavailable", message: e instanceof Error ? e.message : String(e) };
+    return { ok: false, code: "unavailable", message: errorMessage(e) };
   }
+}
+
+export function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }

@@ -1,4 +1,4 @@
-import { agentIdSchema, NOTE_MAX_LENGTH, noteSchema, type AgentId, type AgentWhy, type HumanId, type REATTRIBUTABLE, type Why } from "@provenance/core";
+import { NOTE_MAX_LENGTH, noteSchema, parseAgentName, type AgentId, type AgentWhy, type HumanId, type REATTRIBUTABLE, type Why } from "@provenance/core";
 import { Modal, Notice, Setting, type App } from "obsidian";
 
 export type Reattribution = keyof typeof REATTRIBUTABLE;
@@ -71,11 +71,11 @@ export class ReattributeModal extends Modal {
       this.close();
       return this.onSubmit({ why: "human-typed" });
     }
-    const agent = agentIdSchema.safeParse(`agent:${this.agentName}`);
-    if (!agent.success) return void new Notice("An agent name may only contain letters, digits, '.', '@', '_' and '-'.");
+    const agent = parseAgentName(this.agentName);
+    if (!agent) return void new Notice("An agent name may only contain letters, digits, '.', '@', '_' and '-'.");
     const note = noteSchema.safeParse(this.note.trim());
     if (!note.success) return void new Notice(`The note must be one line of at most ${NOTE_MAX_LENGTH} characters.`);
     this.close();
-    this.onSubmit({ why: this.why, agent: agent.data, note: note.data || null });
+    this.onSubmit({ why: this.why, agent, note: note.data || null });
   }
 }

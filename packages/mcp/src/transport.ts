@@ -1,6 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { FULL_ONLY_OPS, type OpResponse } from "@provenance/core";
+import { errorMessage, FULL_ONLY_OPS, type OpResponse } from "@provenance/core";
 import { z } from "zod";
 import type { OpsTransport } from "./server";
 
@@ -20,7 +20,7 @@ export function httpOps(url: string, token: string): OpsTransport {
         signal: AbortSignal.timeout(15_000),
       });
     } catch (e) {
-      throw new Unreachable(`${url}: ${e instanceof Error ? e.message : String(e)}`);
+      throw new Unreachable(`${url}: ${errorMessage(e)}`);
     }
     if (res.status === 401) return { ok: false, code: "unavailable", message: `${url} rejected the token` };
     try {

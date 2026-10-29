@@ -33,6 +33,17 @@ export const noteSchema = z
   .max(NOTE_MAX_LENGTH)
   .refine((s) => !s.includes("\n"), "must be a single line");
 
+/** An agent's id from `name` or `agent:name`, or null if it isn't a valid one. */
+export function parseAgentName(raw: string | null | undefined): AgentId | null {
+  const parsed = agentIdSchema.safeParse(raw?.includes(":") ? raw : `agent:${raw ?? ""}`);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Lowercases `s` into the characters an author name allows; "" if none are left. */
+export function slug(s: string): string {
+  return s.toLowerCase().replace(/[^\w.@-]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
 export function humanId(name: string): HumanId {
   if (!NAME.test(name)) throw new Error(`invalid human name: ${name}`);
   return `human:${name}`;

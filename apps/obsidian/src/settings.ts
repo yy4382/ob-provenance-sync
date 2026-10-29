@@ -1,3 +1,4 @@
+import { slug } from "@provenance/core";
 import { Notice, Platform, PluginSettingTab, type App, type SettingDefinitionItem } from "obsidian";
 import { claudeCodeCommand, mcpJsonConfig, type LocalMcpCommand } from "./mcp-cli";
 import type ProvenancePlugin from "./main";
@@ -17,12 +18,11 @@ export interface ProvenanceSettings {
 }
 
 export function defaultSettings(app: App): ProvenanceSettings {
-  const slug = (s: string) => s.toLowerCase().replace(/[^\w.@-]+/g, "-").replace(/^-|-$/g, "") || "vault";
   const suffix = Math.random().toString(36).slice(2, 6);
   return {
     serverUrl: "",
     tokenSecret: "",
-    vaultId: slug(app.vault.getName()),
+    vaultId: slug(app.vault.getName()) || "vault",
     humanName: "me",
     deviceName: `${Platform.isMobile ? "mobile" : "desktop"}-${suffix}`,
     showColors: true,

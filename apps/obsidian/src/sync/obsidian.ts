@@ -3,13 +3,17 @@ import { IndexeddbPersistence } from "y-indexeddb";
 import type * as Y from "yjs";
 import type { Blobs, Disk, Persistence } from "./engine";
 
+/** Whether a path belongs to the synced vault. The config folder's name is user-configurable, so ask Obsidian for it. */
+export function isSyncedPath(app: App, path: string): boolean {
+  return !path.startsWith(`${app.vault.configDir}/`);
+}
+
 /** The vault through Obsidian's API, so every write is seen by open views and other plugins. */
 export class ObsidianDisk implements Disk {
   constructor(private readonly app: App) {}
 
-  /** The config folder's name is user-configurable, so ask Obsidian for it. */
   accepts(path: string): boolean {
-    return !path.startsWith(`${this.app.vault.configDir}/`);
+    return isSyncedPath(this.app, path);
   }
 
   private file(path: string): TFile | null {
