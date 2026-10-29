@@ -1,6 +1,7 @@
 import { conflictOriginal } from "@provenance/core";
 import { Modal, Notice, Setting, TFile, type App } from "obsidian";
-import { planConflicts, resolveSafe, SAFE, type ConflictFiles, type CopyInfo, type Verdict } from "./conflict-plan";
+import { planConflicts, resolveSafe, SAFE, type ConflictFiles, type Content, type CopyInfo, type Verdict } from "./conflict-plan";
+import { sha256 } from "./sync/engine";
 
 function vaultFiles(app: App, accepts: (path: string) => boolean): ConflictFiles {
   const file = (path: string) => {
@@ -8,17 +9,19 @@ function vaultFiles(app: App, accepts: (path: string) => boolean): ConflictFiles
     if (!f) throw new Error(`${path} no longer exists`);
     return f;
   };
+  const content = async (f: TFile): Promise<Content> =>
+    f.extension === "md" ? app.vault.read(f) : { hash: await sha256(await app.vault.readBinary(f)) };
   return {
     async scan() {
       const copies: CopyInfo[] = [];
-      const originals = new Map<string, string | null | undefined>();
+      const originals = new Map<string, Content | undefined>();
       for (const f of app.vault.getFiles()) {
         const original = conflictOriginal(f.path);
         if (original === null || !accepts(f.path)) continue;
-        copies.push({ path: f.path, text: f.extension === "md" ? await app.vault.read(f) : null, mtime: f.stat.mtime });
+        copies.push({ path: f.path, content: await content(f), mtime: f.stat.mtime });
         if (originals.has(original)) continue;
         const o = app.vault.getFileByPath(original);
-        originals.set(original, o ? (o.extension === "md" ? await app.vault.read(o) : null) : undefined);
+        originals.set(original, o ? await content(o) : undefined);
       }
       return { copies, originals };
     },

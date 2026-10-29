@@ -1,9 +1,11 @@
 import { conflictOriginal, difference } from "@provenance/core";
 
+/** A note's text, or an attachment's SHA-256, which is all two attachments are compared by. */
+export type Content = string | { hash: string };
+
 export interface CopyInfo {
   path: string;
-  /** Null for attachments. */
-  text: string | null;
+  content: Content;
   mtime: number;
 }
 
@@ -28,16 +30,16 @@ export interface Plan {
   verdict: Verdict;
 }
 
-const blank = (text: string | null) => text !== null && text.trim() === "";
+const blank = (content: Content) => typeof content === "string" && content.trim() === "";
+const size = (content: Content) => (typeof content === "string" ? content.trim().length : 0);
 
 /**
  * Decides every conflict copy given what is at each original path
- * (`originals.get(path)`: the text, null for an attachment, undefined if
- * nothing is there). When the original is missing or blank, only one copy
+ * (`originals.get(path)`, undefined if nothing is there). When the original is missing or blank, only one copy
  * per original may replace it, the one with the most content and then the
  * newest; its siblings wait, so they never overwrite each other.
  */
-export function planConflicts(copies: CopyInfo[], originals: Map<string, string | null | undefined>): Plan[] {
+export function planConflicts(copies: CopyInfo[], originals: Map<string, Content | undefined>): Plan[] {
   const groups = new Map<string, CopyInfo[]>();
   for (const copy of copies) {
     const original = conflictOriginal(copy.path);
@@ -46,22 +48,23 @@ export function planConflicts(copies: CopyInfo[], originals: Map<string, string 
   }
   const plans: Plan[] = [];
   for (const [original, group] of groups) {
-    const text = originals.get(original);
+    const content = originals.get(original);
     const plan = (copy: CopyInfo, verdict: Verdict) => plans.push({ copy: copy.path, original, verdict });
-    if (text === undefined || blank(text)) {
-      const candidates = text === undefined ? group : group.filter((c) => !blank(c.text));
-      const leader = [...candidates].sort((a, b) => (b.text?.trim().length ?? 0) - (a.text?.trim().length ?? 0) || b.mtime - a.mtime)[0];
+    if (content === undefined || blank(content)) {
+      const candidates = content === undefined ? group : group.filter((c) => !blank(c.content));
+      const leader = [...candidates].sort((a, b) => size(b.content) - size(a.content) || b.mtime - a.mtime)[0];
       for (const copy of group) {
-        if (copy === leader) plan(copy, text === undefined ? "orphan" : copy.text === null ? "different" : "original-empty");
-        else if (text !== undefined && blank(copy.text)) plan(copy, "same");
+        if (copy === leader) plan(copy, content === undefined ? "orphan" : typeof copy.content === "string" ? "original-empty" : "different");
+        else if (content !== undefined && blank(copy.content)) plan(copy, "same");
         else plan(copy, "waiting");
       }
       continue;
     }
     for (const copy of group) {
-      if (text === null || copy.text === null) plan(copy, "different");
-      else if (difference(text, copy.text) !== "content") plan(copy, "same");
-      else plan(copy, blank(copy.text) ? "copy-empty" : "different");
+      if (typeof content !== "string" || typeof copy.content !== "string") {
+        plan(copy, typeof content !== "string" && typeof copy.content !== "string" && content.hash === copy.content.hash ? "same" : "different");
+      } else if (difference(content, copy.content) !== "content") plan(copy, "same");
+      else plan(copy, blank(copy.content) ? "copy-empty" : "different");
     }
   }
   return plans.sort((a, b) => a.copy.localeCompare(b.copy));
@@ -69,7 +72,7 @@ export function planConflicts(copies: CopyInfo[], originals: Map<string, string 
 
 /** The few file operations resolving needs; Obsidian's vault in the plugin, a Map in tests. */
 export interface ConflictFiles {
-  scan(): Promise<{ copies: CopyInfo[]; originals: Map<string, string | null | undefined> }>;
+  scan(): Promise<{ copies: CopyInfo[]; originals: Map<string, Content | undefined> }>;
   trash(path: string): Promise<void>;
   rename(from: string, to: string): Promise<void>;
   /** Puts the copy's content into the original, then trashes the copy. */

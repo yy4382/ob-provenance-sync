@@ -1,12 +1,12 @@
 import { expect, it } from "vitest";
-import { planConflicts, resolveSafe, type ConflictFiles } from "../src/conflict-plan";
+import { planConflicts, resolveSafe, type ConflictFiles, type Content } from "../src/conflict-plan";
 
 /** A vault of text files with mtimes, as conflict resolving sees it. */
 function vault(files: Record<string, string>) {
   const disk = new Map(Object.entries(files).map(([p, t], i) => [p, { text: t, mtime: i }]));
   const ops: ConflictFiles = {
     async scan() {
-      const copies = [...disk].filter(([p]) => p.includes(" (conflict ")).map(([path, f]) => ({ path, text: f.text, mtime: f.mtime }));
+      const copies = [...disk].filter(([p]) => p.includes(" (conflict ")).map(([path, f]) => ({ path, content: f.text, mtime: f.mtime }));
       const originals = new Map([...disk].map(([p, f]) => [p, f.text] as [string, string]));
       return { copies, originals };
     },
@@ -47,17 +47,24 @@ it("fills a blank original from the copy with content, and only from one", async
   expect(texts()).toEqual({ "n.md": "Much longer text.", "n (conflict 11111111).md": "Short." });
 });
 
-it("drops blank copies and copies that differ only in ways that don't show", () => {
+it("drops blank copies, attachments with the same bytes, and copies that differ only in ways that don't show", () => {
   const plans = planConflicts(
     [
-      { path: "x (conflict 11111111).md", text: "", mtime: 0 },
-      { path: "x (conflict 22222222).md", text: "Text\r\n", mtime: 0 },
-      { path: "x (conflict 33333333).md", text: "Other", mtime: 0 },
-      { path: "img (conflict 44444444).png", text: null, mtime: 0 },
+      { path: "x (conflict 11111111).md", content: "", mtime: 0 },
+      { path: "x (conflict 22222222).md", content: "Text\r\n", mtime: 0 },
+      { path: "x (conflict 33333333).md", content: "Other", mtime: 0 },
+      { path: "img (conflict 44444444).png", content: { hash: "aa" }, mtime: 0 },
+      { path: "img (conflict 55555555).png", content: { hash: "bb" }, mtime: 0 },
     ],
-    new Map<string, string | null>([["x.md", "Text\n"], ["img.png", null]]),
+    new Map<string, Content>([["x.md", "Text\n"], ["img.png", { hash: "aa" }]]),
   );
-  expect(plans.map((p) => p.verdict)).toEqual(["different", "copy-empty", "same", "different"]);
+  expect(plans.map((p) => [p.copy, p.verdict])).toEqual([
+    ["img (conflict 44444444).png", "same"],
+    ["img (conflict 55555555).png", "different"],
+    ["x (conflict 11111111).md", "copy-empty"],
+    ["x (conflict 22222222).md", "same"],
+    ["x (conflict 33333333).md", "different"],
+  ]);
 });
 
 it("keeps going past a copy that fails", async () => {

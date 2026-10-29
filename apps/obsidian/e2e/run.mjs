@@ -59,6 +59,9 @@ writeFileSync(join(vault, "Projects/Roadmap (conflict 1a1b1c1d).md"), readFileSy
 // Copies whose original is gone, one of them empty: restoring both used to fail on the second.
 writeFileSync(join(vault, "Lost (conflict 2a2b2c2d).md"), "");
 writeFileSync(join(vault, "Lost (conflict 3a3b3c3d) (conflict 4a4b4c4d).md"), "Survivor.\n");
+const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==", "base64");
+writeFileSync(join(vault, "pixel.png"), pixel);
+writeFileSync(join(vault, "pixel (conflict 5a5b5c5d).png"), pixel);
 const pluginDir = join(vault, ".obsidian/plugins/provenance-sync");
 mkdirSync(pluginDir, { recursive: true });
 for (const f of ["main.js", "manifest.json", "styles.css"]) cpSync(join(repo, "apps/obsidian", f), join(pluginDir, f));
@@ -239,13 +242,13 @@ try {
 
   await cdp.eval(`app.commands.executeCommandById("provenance-sync:resolve-conflicts"); return true`);
   const modal = await eventually(() => cdp.eval(`const t = document.querySelector(".modal")?.innerText; return t?.includes("Apply all") ? t : undefined`));
-  check("the conflict resolver finds every copy safe to resolve", !!modal?.includes("4 copies: 3 can be resolved safely, 1 wait"), JSON.stringify(modal));
+  check("the conflict resolver finds every copy safe to resolve", !!modal?.includes("5 copies: 4 can be resolved safely, 1 wait"), JSON.stringify(modal));
   await cdp.shot("conflicts");
   await cdp.eval(`[...document.querySelectorAll(".modal button")].find(b => b.innerText === "Apply all").click(); return true`);
   const left = await eventually(() => cdp.eval(`const t = document.querySelector(".modal")?.innerText; return t?.includes("no conflict copies") ? t : undefined`), 15000);
   check(
     "apply all resolves copies that add nothing and restores the fullest orphan",
-    !!left && !existsSync(join(vault, "Projects/Roadmap (conflict 0a0b0c0d).md")) && readFileSync(join(vault, "Lost.md"), "utf8") === "Survivor.\n",
+    !!left && !existsSync(join(vault, "Projects/Roadmap (conflict 0a0b0c0d).md")) && readFileSync(join(vault, "Lost.md"), "utf8") === "Survivor.\n" && !existsSync(join(vault, "pixel (conflict 5a5b5c5d).png")),
     JSON.stringify(left),
   );
   await cdp.eval(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); return true`);
@@ -315,7 +318,7 @@ try {
   });
   const files = await eventually(async () => {
     const r = await opsCall({ op: "list" });
-    const notes = r.result.files.filter((f) => !f.startsWith("Bulk/") && f !== "Lost.md");
+    const notes = r.result.files.filter((f) => !f.startsWith("Bulk/") && f !== "Lost.md" && f !== "pixel.png");
     return notes.join(",") === "Projects/Renamed.md" ? notes : undefined;
   }, 15000);
   check("an offline delete stays deleted and an offline rename keeps the file", !!files, JSON.stringify((await opsCall({ op: "list" })).result));
