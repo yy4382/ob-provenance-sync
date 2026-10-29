@@ -1,7 +1,7 @@
 {
   "id": "provenance-sync",
   "name": "Provenance Sync",
-  "version": "0.1.0-alpha.4",
+  "version": "0.1.0-alpha.5",
   "minAppVersion": "1.14.4",
   "description": "Track whether a human or an agent wrote each sentence, and sync the vault through a CRDT server.",
   "author": "Chris Yang",
