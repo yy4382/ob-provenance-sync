@@ -354,6 +354,53 @@ export class MarkdownFile {
   }
 }
 
+/** Which id sits at which path on disk, looked up either way. */
+class DiskMirror {
+  private readonly pathOf = new Map<FileId, string>();
+  private readonly idsAt = new Map<string, Set<FileId>>();
+
+  get(id: FileId): string | undefined {
+    return this.pathOf.get(id);
+  }
+
+  has(id: FileId): boolean {
+    return this.pathOf.has(id);
+  }
+
+  idAt(path: string): FileId | undefined {
+    const ids = this.idsAt.get(path);
+    if (!ids || ids.size < 2) return ids?.values().next().value;
+    // Two ids at one path, as when a tree pass places a note where a queued rename event then puts
+    // another: the id mirrored first answers.
+    for (const [id, p] of this.pathOf) if (p === path) return id;
+    return undefined;
+  }
+
+  set(id: FileId, path: string): void {
+    this.unlink(id);
+    this.pathOf.set(id, path);
+    const ids = this.idsAt.get(path);
+    if (ids) ids.add(id);
+    else this.idsAt.set(path, new Set([id]));
+  }
+
+  delete(id: FileId): void {
+    this.unlink(id);
+    this.pathOf.delete(id);
+  }
+
+  private unlink(id: FileId) {
+    const path = this.pathOf.get(id);
+    const ids = path === undefined ? undefined : this.idsAt.get(path);
+    ids?.delete(id);
+    if (ids?.size === 0) this.idsAt.delete(path!);
+  }
+
+  [Symbol.iterator]() {
+    return this.pathOf.entries();
+  }
+}
+
 const short = (id: FileId) => id.slice(0, 8);
 
 const echoKey = (op: "rename" | "delete", ...paths: string[]) => [op, ...paths].join("\0");
@@ -376,7 +423,7 @@ function synced(provider: HocuspocusProvider): Promise<void> {
 export class SyncEngine implements VaultDocs {
   readonly vaultIndex: VaultIndex;
   readonly files = new Map<FileId, MarkdownFile>();
-  private readonly onDisk = new Map<FileId, string>();
+  private readonly onDisk = new DiskMirror();
   private readonly binaryHashes = new Map<FileId, string>();
   private socket: HocuspocusProviderWebsocket | null = null;
   private indexProvider: HocuspocusProvider | null = null;
@@ -429,13 +476,8 @@ export class SyncEngine implements VaultDocs {
     return this.onDisk.get(id) ?? this.vaultIndex.get(id)?.path;
   }
 
-  private idOnDisk(path: string): FileId | undefined {
-    for (const [id, p] of this.onDisk) if (p === path) return id;
-    return undefined;
-  }
-
   fileAt(path: string): MarkdownFile | undefined {
-    const id = this.idOnDisk(path);
+    const id = this.onDisk.idAt(path);
     return id ? this.files.get(id) : undefined;
   }
 
@@ -553,7 +595,7 @@ export class SyncEngine implements VaultDocs {
       await (binary ? this.uploadBinary(path, undefined) : this.createFromDisk(path, (await this.opts.disk.read(path)) ?? "", false));
     }
     for (const { path, binary } of listed) {
-      const id = binary ? this.idOnDisk(path) : undefined;
+      const id = binary ? this.onDisk.idAt(path) : undefined;
       const data = id ? await this.opts.disk.readBinary(path) : null;
       if (id && data) this.binaryHashes.set(id, await sha256(data));
     }
@@ -663,7 +705,7 @@ export class SyncEngine implements VaultDocs {
   private async writeMirror() {
     const seen: Record<string, string> = {};
     for (const { path } of await this.opts.disk.list()) {
-      const id = this.idOnDisk(path);
+      const id = this.onDisk.idAt(path);
       if (id) seen[id] = path;
     }
     await this.indexPersistence?.set(MIRROR_KEY, seen);
@@ -733,7 +775,7 @@ export class SyncEngine implements VaultDocs {
       const blocked: Array<[FileId, string, FileId]> = [];
       for (const [id, entry] of entries) {
         if (losers.has(id) || !this.opts.disk.accepts(entry.path)) continue;
-        const holder = this.idOnDisk(entry.path);
+        const holder = this.onDisk.idAt(entry.path);
         if (holder !== undefined && holder !== id) {
           blocked.push([id, entry.path, holder]);
           continue;
@@ -943,7 +985,7 @@ export class SyncEngine implements VaultDocs {
         this.log("warn", `Check: ${message}`, path);
       };
       for (const { path, binary } of listed) {
-        const id = this.idOnDisk(path);
+        const id = this.onDisk.idAt(path);
         const entry = id && this.vaultIndex.get(id);
         if (!id) {
           problem("this file isn't synced; adding it", path);
@@ -1009,7 +1051,7 @@ export class SyncEngine implements VaultDocs {
       const held = this.fileAt(path);
       if (this.started && held?.loaded && !hasState(held.doc)) return held.reconcileDisk();
       // Gone already: the rename or deletion queued after this event deals with it.
-      if (!this.started || this.idOnDisk(path) || !(await this.opts.disk.exists(path))) return;
+      if (!this.started || this.onDisk.idAt(path) || !(await this.opts.disk.exists(path))) return;
       this.log("debug", "Created here", path);
       if (binary) return this.uploadBinary(path, undefined);
       await this.createFromDisk(path, (await this.opts.disk.read(path)) ?? "", false);
@@ -1020,7 +1062,7 @@ export class SyncEngine implements VaultDocs {
   onModify(path: string, binary: boolean): Promise<void> {
     return this.enqueue(async () => {
       this.retryTree();
-      const id = this.idOnDisk(path);
+      const id = this.onDisk.idAt(path);
       if (!this.started || !id) return;
       if (binary) return this.uploadBinary(path, id);
       await this.files.get(id)?.onDiskModified();
@@ -1030,12 +1072,12 @@ export class SyncEngine implements VaultDocs {
   onRename(from: string, to: string): Promise<void> {
     return this.enqueue(async () => {
       this.retryTree();
-      const id = this.idOnDisk(from);
+      const id = this.onDisk.idAt(from);
       if (this.echoes.delete(echoKey("rename", from, to)) || !this.started) return;
       if (!id) {
         // The file wasn't synced at its old path, as when another device's deletion of it
         // was applied while this rename waited in the queue: sync it as a new file.
-        if (this.idOnDisk(to) || !this.opts.disk.accepts(to) || !(await this.opts.disk.exists(to))) return;
+        if (this.onDisk.idAt(to) || !this.opts.disk.accepts(to) || !(await this.opts.disk.exists(to))) return;
         this.log("debug", `Renamed here from ${from}, which wasn't synced; adding it`, to);
         if (!isMarkdownPath(to)) return this.uploadBinary(to, undefined);
         await this.createFromDisk(to, (await this.opts.disk.read(to)) ?? "", false);
@@ -1061,7 +1103,7 @@ export class SyncEngine implements VaultDocs {
   onDelete(path: string): Promise<void> {
     return this.enqueue(async () => {
       this.retryTree();
-      const id = this.idOnDisk(path);
+      const id = this.onDisk.idAt(path);
       if (this.echoes.delete(echoKey("delete", path)) || !this.started || !id) return;
       // Stale: the engine has since put this very note there, e.g. a remote rename to this path.
       if ((await this.opts.disk.exists(path)) && !(await this.changedHere(id, path))) return;
