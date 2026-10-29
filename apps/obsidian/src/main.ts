@@ -11,6 +11,7 @@ import { defaultSettings, ProvenanceSettingTab, type ProvenanceSettings } from "
 import { SyncEngine, type SyncStatus } from "./sync/engine";
 import { httpBlobs, indexedDbPersistence, ObsidianDisk } from "./sync/obsidian";
 
+const CHECK_EVERY = 10 * 60_000;
 const LEGACY_TOKEN_SECRET = "provenance-sync-device-token";
 
 const STATUS_TEXT: Record<SyncStatus | "error", string> = {
@@ -58,6 +59,9 @@ export default class ProvenancePlugin extends Plugin {
     this.addRibbonIcon("activity", "Open sync event log", () => void this.openLog());
     this.addCommand({ id: "open-event-log", name: "Open sync event log", callback: () => void this.openLog() });
     this.addCommand({ id: "resolve-conflicts", name: "Resolve conflict copies", callback: () => this.resolveConflicts() });
+    this.addCommand({ id: "check-sync", name: "Check that every file is synced", callback: () => void this.checkSync() });
+    // Vault events can be missed (a restart mid-change, another program), so compare everything now and then.
+    this.registerInterval(window.setInterval(() => void this.engine?.check(), CHECK_EVERY));
 
     this.addCommand({
       id: "show-provenance-at-cursor",
@@ -113,6 +117,12 @@ export default class ProvenancePlugin extends Plugin {
 
   async openLog() {
     await this.app.workspace.ensureSideLeaf(EVENT_LOG_VIEW, "right", { active: true, reveal: true });
+  }
+
+  async checkSync() {
+    if (!this.engine) return void new Notice("Provenance sync isn't running.");
+    const problems = await this.engine.check();
+    new Notice(problems ? `Sync check found ${problems} problems and repaired what it could. The sync event log has the details.` : "Sync check: every file matches the index.");
   }
 
   resolveConflicts() {

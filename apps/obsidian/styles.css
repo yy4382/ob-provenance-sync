@@ -144,3 +144,7 @@ body.prov-colors .prov-mixed {
 .prov-log-empty {
   color: var(--text-muted);
 }
+
+.prov-log-debug {
+  color: var(--text-muted);
+}

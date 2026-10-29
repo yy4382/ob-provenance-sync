@@ -8,9 +8,12 @@ export interface LoggedEvent extends SyncEvent {
   count: number;
 }
 
-const LIMIT = 500;
+/** Per-file steps make up most entries, so a startup or a conflict cleanup fits several times over. */
+const LIMIT = 5000;
+/** The view draws only the newest entries; "Copy log" has them all. */
+const SHOWN = 300;
 
-/** The last few hundred sync events, kept in memory for the event log view. */
+/** The last few thousand sync events, kept in memory for the event log view. */
 export class EventLog {
   readonly entries: LoggedEvent[] = [];
   private readonly listeners = new Set<() => void>();
@@ -101,6 +104,7 @@ export class EventLogView extends ItemView {
       b.onclick = onClick;
     };
     button("refresh-cw", "Reconnect", () => void this.plugin.restartSync());
+    button("list-checks", "Check sync", () => void this.plugin.checkSync());
     button("git-merge", "Resolve conflicts", () => void this.plugin.resolveConflicts());
     button("copy", "Copy log", () => {
       void navigator.clipboard.writeText(this.plugin.log.toText()).then(() => new Notice("Sync event log copied."));
@@ -110,7 +114,7 @@ export class EventLogView extends ItemView {
     const list = root.createDiv({ cls: "prov-log-list" });
     const entries = this.plugin.log.entries;
     if (!entries.length) list.createDiv({ cls: "prov-log-empty", text: "Nothing has happened yet." });
-    for (const e of [...entries].reverse()) {
+    for (const e of entries.slice(-SHOWN).reverse()) {
       const item = list.createDiv({ cls: `prov-log-item prov-log-${e.level}` });
       const meta = item.createDiv({ cls: "prov-log-meta" });
       meta.createSpan({ text: new Date(e.at).toLocaleTimeString() });
@@ -122,5 +126,6 @@ export class EventLogView extends ItemView {
         link.onclick = () => void this.app.workspace.openLinkText(path, "");
       }
     }
+    if (entries.length > SHOWN) list.createDiv({ cls: "prov-log-empty", text: `${entries.length - SHOWN} older events are left out here; "Copy log" includes them.` });
   }
 }

@@ -69,6 +69,9 @@ export class MemoryDisk implements Disk {
     void (existed ? this.engine?.onModify(path, true) : this.engine?.onCreate(path, true));
   }
   async rename(from: string, to: string) {
+    if (!this.files.has(from)) return;
+    // Like Obsidian's vault.rename.
+    if (this.files.has(to)) throw new Error("Destination file already exists!");
     this.files.set(to, this.files.get(from)!);
     this.files.delete(from);
     void this.engine?.onRename(from, to);
