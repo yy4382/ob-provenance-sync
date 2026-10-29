@@ -1,6 +1,6 @@
 {
   "name": "@provenance/obsidian",
-  "version": "0.1.0-alpha.5",
+  "version": "0.1.0-alpha.6",
   "description": "Obsidian plugin for provenance tracking and CRDT sync",
   "main": "main.js",
   "type": "module",
