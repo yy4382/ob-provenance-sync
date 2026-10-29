@@ -149,7 +149,12 @@ export default class ProvenancePlugin extends Plugin {
 
   async checkSync() {
     if (!this.engine) return void new Notice("Provenance sync isn't running.");
-    const problems = await this.engine.check();
+    let problems;
+    try {
+      problems = await this.engine.check();
+    } catch (e) {
+      return void new Notice(`Sync check failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
     new Notice(problems ? `Sync check found ${problems} problems and repaired what it could. The sync event log has the details.` : "Sync check: every file matches the index.");
   }
 

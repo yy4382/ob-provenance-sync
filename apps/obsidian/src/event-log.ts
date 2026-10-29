@@ -103,7 +103,7 @@ export class EventLogView extends ItemView {
       setIcon(b.createSpan({ prepend: true }), icon);
       b.onclick = onClick;
     };
-    button("refresh-cw", "Reconnect", () => void this.plugin.restartSync());
+    button("refresh-cw", "Reconnect", () => void this.plugin.reconnect());
     button("list-checks", "Check sync", () => void this.plugin.checkSync());
     button("git-merge", "Resolve conflicts", () => void this.plugin.resolveConflicts());
     button("copy", "Copy log", () => {

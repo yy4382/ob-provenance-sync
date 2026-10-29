@@ -931,6 +931,7 @@ export class SyncEngine implements VaultDocs {
    * or the startup scan would have. Resolves to the number found.
    */
   check(): Promise<number> {
+    this.log("info", "Check started; it runs once sync work already queued is done");
     return this.enqueue(async () => {
       if (!this.started) return 0;
       const { disk } = this.opts;
