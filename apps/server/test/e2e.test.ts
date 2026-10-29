@@ -146,6 +146,14 @@ describe("sync server", () => {
     expect((await post(`${s.http}/api/vaults/v/ops`, "bad-token-bad-token", { op: "list" })).status).toBe(401);
   });
 
+  it("answers malformed op requests as invalid, not as a server error", async () => {
+    const s = await start();
+    cleanup.push(s.close);
+    for (const body of [null, "list", { op: "append", path: "a.md", text: "x", by: "agent:andy" }]) {
+      expect(await post(`${s.http}/api/vaults/v/ops?agent=x`, ANY_AGENT, body)).toMatchObject({ status: 200, body: { ok: false, code: "invalid" } });
+    }
+  });
+
   it("serves the limited MCP toolset over HTTP", async () => {
     const s = await start();
     cleanup.push(s.close);

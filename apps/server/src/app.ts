@@ -42,6 +42,8 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
   }
 }
 
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+
 function send(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
@@ -106,11 +108,13 @@ export function createApp(config: Config) {
       pattern: /^\/api\/vaults\/([^/]+)\/ops$/,
       async handle(req, res, cred, url, [vault]) {
         if (req.method !== "POST") throw new HttpError(405, "POST only");
-        const body = (await readJson(req)) as { by?: { agent?: string } };
-        const agent = agentFor(cred, body.by?.agent ?? url.searchParams.get("agent"));
-        if (cred.role === "agent" && body.by) {
+        const body = await readJson(req);
+        // The agent is settled before the request is parsed: unpinned tokens may name it bare, or only in ?agent=.
+        const by = isObject(body) && isObject(body.by) ? body.by : null;
+        const agent = agentFor(cred, typeof by?.agent === "string" ? by.agent : url.searchParams.get("agent"));
+        if (cred.role === "agent" && by) {
           if (!agent) throw new HttpError(403, "this token needs a valid agent name");
-          body.by.agent = agent;
+          by.agent = agent;
         }
         const docs = new ServerVaultDocs(server.hocuspocus, vault!);
         try {
