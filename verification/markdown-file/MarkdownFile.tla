@@ -13,7 +13,7 @@
 (* reverted edit).                                                         *)
 (*                                                                         *)
 (* Each action is one synchronous run of JavaScript between two awaits or *)
-(* callbacks. Engine work goes through SyncEngine.enqueue (engine.ts:356) *)
+(* callbacks. Engine work goes through SyncEngine.enqueue (engine.ts:401) *)
 (* so one queued task runs at a time, but remote updates, typing, editor  *)
 (* saves and other programs' edits interleave with its awaits.            *)
 (***************************************************************************)
@@ -25,7 +25,8 @@ CONSTANTS
     TypedWords,     \* words typed in an Obsidian pane bound to this file
     ExternalWords,  \* words another program (vim, git, a sync tool) adds to the file
     MaxExternalDeletes, \* how many words other programs may delete
-    MaxBinds        \* how many times a pane may open the note
+    MaxBinds,       \* how many times a pane may open the note
+    MaxChecks       \* how many times the sync check may reread the note
 
 VARIABLES
     items,          \* MarkdownFile.doc: every inserted item <<word, copy>>
@@ -46,11 +47,12 @@ VARIABLES
     pendingExt,     \* other programs' edits whose vault "modify" event has not fired yet
     created,        \* every word anyone wrote (ghost)
     intentDel,      \* every word another program deliberately deleted (ghost)
-    extDeletes      \* how many deletions other programs made (bound only)
+    extDeletes,     \* how many deletions other programs made (bound only)
+    checks          \* how many times the sync check has queued a reread (bound only)
 
 doc == <<items, dels>>
 pane == <<editors, opening, binds, editorStates, editorText, dirty>>
-world == <<disk, pendingExt, created, intentDel, extDeletes>>
+world == <<disk, pendingExt, created, intentDel, extDeletes, checks>>
 vars == <<doc, pane, world, base, timer, queue, pc, held, savedInRead>>
 
 TextOf(s) == {i[1] : i \in s.items \ s.dels}
@@ -78,46 +80,47 @@ Init ==
     /\ created = Initial
     /\ intentDel = {}
     /\ extDeletes = 0
+    /\ checks = 0
 
-(* The ytext observer, engine.ts:120-123, after the doc became [items |-> is, dels |-> ds]. *)
+(* The ytext observer, engine.ts:134-136, after the doc became [items |-> is, dels |-> ds]. *)
 (* A bound pane converges to the CRDT (binding.ts onYjs -> loadFromCrdt) and so has       *)
 (* something to save.                                                                     *)
 ObservePane(is, ds) ==
     LET st == [items |-> is, dels |-> ds, text |-> TextOf([items |-> is, dels |-> ds])]
-    IN /\ editorStates' = IF editors > 0 THEN Append(editorStates, st) ELSE editorStates  \* engine.ts:121
+    IN /\ editorStates' = IF editors > 0 THEN Append(editorStates, st) ELSE editorStates  \* engine.ts:135
        /\ editorText' = IF editors > 0 THEN st.text ELSE editorText
        /\ dirty' = (dirty \/ editors > 0)
 
-\* A change that is not FROM_DISK also schedules a write: engine.ts:122, 271.
+\* A change that is not FROM_DISK also schedules a write: engine.ts:136, 300.
 Observe(is, ds) == ObservePane(is, ds) /\ timer' = IF editors = 0 THEN TRUE ELSE timer
 
-ScheduleWrite == timer' = IF editors = 0 THEN TRUE ELSE timer                          \* engine.ts:271
+ScheduleWrite == timer' = IF editors = 0 THEN TRUE ELSE timer                          \* engine.ts:300
 
-(* applyDisk's three-way merge of disk text d, engine.ts:183-188: replay diff(base.text, d) *)
+(* applyDisk's three-way merge of disk text d, engine.ts:211-217: replay diff(base.text, d) *)
 (* on a fork at the base snapshot and merge the fork into the doc.                         *)
-NewItems(d) == {<<w, Cardinality(Copies(w)) + 1>> : w \in d \ base.text}              \* engine.ts:186
-DelItems(d) == {i \in base.items \ base.dels : i[1] \in base.text \ d}                 \* engine.ts:186
-MergedItems(d) == items \cup NewItems(d)                                               \* engine.ts:187
+NewItems(d) == {<<w, Cardinality(Copies(w)) + 1>> : w \in d \ base.text}              \* engine.ts:215
+DelItems(d) == {i \in base.items \ base.dels : i[1] \in base.text \ d}                 \* engine.ts:215
+MergedItems(d) == items \cup NewItems(d)                                               \* engine.ts:216
 MergedDels(d) == dels \cup DelItems(d)
-MergedBase(d) == [items |-> base.items \cup NewItems(d), dels |-> base.dels \cup DelItems(d), text |-> d]  \* engine.ts:188
+MergedBase(d) == [items |-> base.items \cup NewItems(d), dels |-> base.dels \cup DelItems(d), text |-> d]  \* engine.ts:217
 
-(* applyDisk(d), engine.ts:178-191, as one synchronous step. *)
+(* applyDisk(d), engine.ts:206-219, as one synchronous step. *)
 ApplyDisk(d) ==
-    IF d = Text                                                                        \* engine.ts:181
+    IF d = Text                                                                        \* engine.ts:209
     THEN /\ base' = [State EXCEPT !.text = d]
          /\ UNCHANGED <<items, dels, editorStates, editorText, dirty, timer>>
-    ELSE IF d = base.text                                                              \* engine.ts:183
-    THEN /\ ScheduleWrite                                                              \* engine.ts:190
+    ELSE IF d = base.text                                                              \* engine.ts:211
+    THEN /\ ScheduleWrite                                                              \* engine.ts:219
          /\ UNCHANGED <<items, dels, base, editorStates, editorText, dirty>>
     ELSE LET is == MergedItems(d)
              ds == MergedDels(d)
-         IN /\ items' = is                                                             \* engine.ts:187
+         IN /\ items' = is                                                             \* engine.ts:216
             /\ dels' = ds
-            /\ base' = MergedBase(d)                                                   \* engine.ts:188
+            /\ base' = MergedBase(d)                                                   \* engine.ts:217
             /\ IF is /= items \/ ds /= dels
                THEN ObservePane(is, ds)
                ELSE UNCHANGED <<editorStates, editorText, dirty>>
-            /\ IF TextOf([items |-> is, dels |-> ds]) /= d                             \* engine.ts:190
+            /\ IF TextOf([items |-> is, dels |-> ds]) /= d                             \* engine.ts:219
                THEN ScheduleWrite
                ELSE UNCHANGED timer
 
@@ -130,7 +133,7 @@ RemoteInsert ==
         /\ created' = created \cup {w}
         /\ Observe(items', dels)
         /\ UNCHANGED <<dels, base, disk, editors, opening, binds, queue, pc, held, savedInRead,
-                       pendingExt, intentDel, extDeletes>>
+                       pendingExt, intentDel, extDeletes, checks>>
 
 \* binding.ts push(): typing in the bound pane goes straight into the doc.
 Type ==
@@ -140,14 +143,14 @@ Type ==
         /\ created' = created \cup {w}
         /\ Observe(items', dels)
         /\ UNCHANGED <<dels, base, disk, editors, opening, binds, queue, pc, held, savedInRead,
-                       pendingExt, intentDel, extDeletes>>
+                       pendingExt, intentDel, extDeletes, checks>>
 
-\* engine.ts:250-251 binds, then loadFromCrdt (binding.ts:106) replaces the text Obsidian
+\* engine.ts:280-281 binds, then loadFromCrdt (binding.ts:106) replaces the text Obsidian
 \* loaded from disk with the CRDT's.
 Bind(is, ds) ==
     LET t == TextOf([items |-> is, dels |-> ds])
     IN /\ editors' = 1
-       /\ editorStates' = Append(editorStates, [items |-> is, dels |-> ds, text |-> t])  \* engine.ts:251
+       /\ editorStates' = Append(editorStates, [items |-> is, dels |-> ds, text |-> t])  \* engine.ts:281
        /\ editorText' = t
        /\ dirty' = (dirty \/ t /= disk)
 
@@ -160,26 +163,26 @@ OpenPane ==
     /\ queue' = Append(queue, "open")
     /\ UNCHANGED <<doc, editors, editorStates, editorText, dirty, base, world, timer, pc, held, savedInRead>>
 
-\* binding.ts detach() -> release(), engine.ts:253-258. editorStates is kept.
+\* binding.ts detach() -> release(), engine.ts:283-288. editorStates is kept.
 ClosePane ==
     /\ editors = 1
     /\ editors' = 0
-    /\ timer' = TRUE                                                                   \* engine.ts:257
+    /\ timer' = TRUE                                                                   \* engine.ts:287
     /\ UNCHANGED <<doc, opening, binds, editorStates, editorText, dirty, world, base, queue, pc, held, savedInRead>>
 
 \* Obsidian saves the pane's text, possibly just after the pane closed, through vault.modify,
-\* which main.ts:78-86 wraps with trackWrite (engine.ts:222-238): the editor state with the
+\* which main.ts:96-102 wraps with trackWrite (engine.ts:252-268): the editor state with the
 \* saved text becomes the base as the save lands, and a read it overlapped reads again.
-\* The save fires "modify" (main.ts:68 -> SyncEngine.onModify, engine.ts:616).
+\* The save fires "modify" (main.ts:86 -> SyncEngine.onModify, engine.ts:1003).
 EditorSave ==
     /\ dirty
     /\ disk' = editorText
     /\ dirty' = FALSE
     /\ queue' = Append(queue, "modify")
-    /\ base' = editorStates[Len(editorStates)]                                         \* engine.ts:223-231
-    /\ savedInRead' = (savedInRead \/ pc = "reading")                                   \* engine.ts:227, 235
+    /\ base' = editorStates[Len(editorStates)]                                         \* engine.ts:253-261
+    /\ savedInRead' = (savedInRead \/ pc = "reading")                                   \* engine.ts:258, 265
     /\ UNCHANGED <<doc, editors, opening, binds, editorStates, editorText, timer, pc, held,
-                   pendingExt, created, intentDel, extDeletes>>
+                   pendingExt, created, intentDel, extDeletes, checks>>
 
 \* Assumption: other programs edit the note only while no pane has it open or unsaved;
 \* otherwise Obsidian's own editor can overwrite them, with or without this plugin.
@@ -189,7 +192,7 @@ ExternalAdd ==
         /\ disk' = disk \cup {w}
         /\ created' = created \cup {w}
         /\ pendingExt' = pendingExt + 1
-        /\ UNCHANGED <<doc, pane, base, timer, queue, pc, held, savedInRead, intentDel, extDeletes>>
+        /\ UNCHANGED <<doc, pane, base, timer, queue, pc, held, savedInRead, intentDel, extDeletes, checks>>
 
 ExternalDelete ==
     \E w \in disk :
@@ -199,53 +202,61 @@ ExternalDelete ==
         /\ intentDel' = intentDel \cup {w}
         /\ extDeletes' = extDeletes + 1
         /\ pendingExt' = pendingExt + 1
-        /\ UNCHANGED <<doc, pane, base, timer, queue, pc, held, savedInRead, created>>
+        /\ UNCHANGED <<doc, pane, base, timer, queue, pc, held, savedInRead, created, checks>>
 
 \* Obsidian's file watcher notices another program's edit and fires "modify".
 WatcherFires ==
     /\ pendingExt > 0
     /\ pendingExt' = pendingExt - 1
     /\ queue' = Append(queue, "modify")
-    /\ UNCHANGED <<doc, pane, base, disk, created, intentDel, extDeletes, timer, pc, held, savedInRead>>
+    /\ UNCHANGED <<doc, pane, base, disk, created, intentDel, extDeletes, timer, pc, held, savedInRead, checks>>
+
+\* SyncEngine.check (engine.ts:919) finds the file differing from the CRDT, at any time,
+\* and calls onDiskModified in its queued task (engine.ts:955), like a "modify" event.
+CheckFires ==
+    /\ checks < MaxChecks
+    /\ checks' = checks + 1
+    /\ queue' = Append(queue, "modify")
+    /\ UNCHANGED <<doc, pane, base, disk, pendingExt, created, intentDel, extDeletes, timer, pc, held, savedInRead>>
 
 (*************************** The engine ***************************)
 
 Next1(kind) == pc = "idle" /\ queue /= <<>> /\ Head(queue) = kind
 
-\* The 200 ms debounce elapses: engine.ts:273-276.
+\* The 200 ms debounce elapses: engine.ts:303-306.
 WriteTimerFires ==
     /\ timer
     /\ timer' = FALSE
     /\ queue' = Append(queue, "write")
     /\ UNCHANGED <<doc, pane, world, base, pc, held, savedInRead>>
 
-(* writeNow, engine.ts:284-297. writeIfUnchanged is vault.process, which checks and writes  *)
+(* writeNow, engine.ts:314-327. writeIfUnchanged is vault.process, which checks and writes  *)
 (* as one step of Obsidian's file queue. If the file no longer holds the base text, another *)
-(* program changed it: nothing is written, and the file is read and merged (engine.ts:293), *)
+(* program changed it: nothing is written, and the file is read and merged (engine.ts:323), *)
 (* which schedules the write again.                                                         *)
 WriteRuns ==
     /\ Next1("write")
-    /\ IF editors > 0 \/ base.text = Text                                              \* engine.ts:286, 288
+    /\ IF editors > 0 \/ base.text = Text                                              \* engine.ts:316, 318
        THEN /\ queue' = Tail(queue)
             /\ UNCHANGED <<disk, base>>
-       ELSE IF disk /= base.text                                                       \* engine.ts:292
-       THEN /\ queue' = Append(Tail(queue), "modify")                                  \* engine.ts:293
+       ELSE IF disk /= base.text                                                       \* engine.ts:322
+       THEN /\ queue' = Append(Tail(queue), "modify")                                  \* engine.ts:323
             /\ UNCHANGED <<disk, base>>
        ELSE /\ disk' = Text
-            /\ base' = State                                                           \* engine.ts:296
+            /\ base' = State                                                           \* engine.ts:326
             /\ queue' = Append(Tail(queue), "modify")                                  \* vault.process fires "modify"
-    /\ UNCHANGED <<doc, pane, pendingExt, created, intentDel, extDeletes, timer, pc, held, savedInRead>>
+    /\ UNCHANGED <<doc, pane, pendingExt, created, intentDel, extDeletes, timer, pc, held, savedInRead, checks>>
 
-\* onModify -> onDiskModified up to the read's await: engine.ts:616-621, 205-210.
+\* onModify -> onDiskModified up to the read's await: engine.ts:1003-1011, 234-240.
 ReadStarts ==
     /\ Next1("modify")
     /\ queue' = Tail(queue)
     /\ pc' = "reading"
-    /\ held' = disk                                                                    \* engine.ts:210
-    /\ savedInRead' = FALSE                                                            \* engine.ts:209
+    /\ held' = disk                                                                    \* engine.ts:240
+    /\ savedInRead' = FALSE                                                            \* engine.ts:239
     /\ UNCHANGED <<doc, pane, world, base, timer>>
 
-\* A save landed while the read awaited: read again, engine.ts:212-213.
+\* A save landed while the read awaited: read again, engine.ts:242-243.
 ReadRetries ==
     /\ pc = "reading"
     /\ savedInRead
@@ -253,7 +264,7 @@ ReadRetries ==
     /\ savedInRead' = FALSE
     /\ UNCHANGED <<doc, pane, world, base, timer, queue, pc>>
 
-\* Otherwise the read text is merged against the base: engine.ts:213.
+\* Otherwise the read text is merged against the base: engine.ts:243.
 ReadMerges ==
     /\ pc = "reading"
     /\ ~savedInRead
@@ -261,19 +272,19 @@ ReadMerges ==
     /\ pc' = "idle"
     /\ UNCHANGED <<editors, opening, binds, world, queue, held, savedInRead>>
 
-(* bindEditor's queued task, engine.ts:246-259. The first pane's loaded text is what       *)
+(* bindEditor's queued task, engine.ts:276-290. The first pane's loaded text is what       *)
 (* Obsidian read from disk; when it differs from the base it goes through applyDisk first.  *)
 BindTask ==
     /\ Next1("open")
     /\ queue' = Tail(queue)
     /\ opening' = FALSE
-    /\ LET merge == disk /= base.text /\ disk /= Text                                   \* engine.ts:249, 181
+    /\ LET merge == disk /= base.text /\ disk /= Text                                   \* engine.ts:279, 209
            is == IF merge THEN MergedItems(disk) ELSE items
            ds == IF merge THEN MergedDels(disk) ELSE dels
        IN /\ items' = is
           /\ dels' = ds
           /\ base' = IF merge THEN MergedBase(disk)
-                     ELSE IF disk /= base.text THEN State ELSE base                     \* engine.ts:181
+                     ELSE IF disk /= base.text THEN State ELSE base                     \* engine.ts:209
           /\ timer' = IF merge /\ TextOf([items |-> is, dels |-> ds]) /= disk THEN TRUE ELSE timer
           /\ Bind(is, ds)
     /\ UNCHANGED <<binds, world, pc, held, savedInRead>>
@@ -282,7 +293,7 @@ Reader ==
     RemoteInsert \/ Type \/ OpenPane \/ ClosePane \/ ExternalAdd \/ ExternalDelete
 
 System ==
-    \/ EditorSave \/ WatcherFires \/ WriteTimerFires \/ WriteRuns
+    \/ EditorSave \/ WatcherFires \/ CheckFires \/ WriteTimerFires \/ WriteRuns
     \/ ReadStarts \/ ReadRetries \/ ReadMerges \/ BindTask
 
 Next == Reader \/ System
