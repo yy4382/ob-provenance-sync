@@ -66,8 +66,8 @@ export class ProvenanceSettingTab extends PluginSettingTab {
           { name: "Vault ID", desc: "Must be the same on every device that syncs this vault.", control: { type: "text", key: "vaultId" } },
           {
             name: "Reconnect",
-            desc: "Restart syncing with the settings above.",
-            action: () => void this.plugin.restartSync(),
+            desc: "Stops syncing, writes pending changes to disk, and starts again with the settings above. It doesn't change your notes. The sync event log shows what happened.",
+            action: () => void this.plugin.reconnect(),
           },
         ],
       },

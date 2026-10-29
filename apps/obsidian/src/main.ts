@@ -3,6 +3,8 @@ import { MarkdownView, Notice, Platform, Plugin, TAbstractFile, TFile } from "ob
 import type { EditorView } from "@codemirror/view";
 import { around } from "monkey-around";
 import { startBridge } from "./bridge";
+import { ConflictsModal } from "./conflicts";
+import { EVENT_LOG_VIEW, EventLog, EventLogView } from "./event-log";
 import { installMcpCli, localMcpCommand, type LocalMcpCommand } from "./mcp-cli";
 import { provenanceExtension, renderProvenance, segmentAt } from "./editor/binding";
 import { defaultSettings, ProvenanceSettingTab, type ProvenanceSettings } from "./settings";
@@ -29,7 +31,11 @@ export default class ProvenancePlugin extends Plugin {
   private disk: ObsidianDisk | null = null;
   private stopBridge: (() => Promise<void>) | null = null;
   private statusEl: HTMLElement | null = null;
+  private status: SyncStatus | "error" = "connecting";
   private mcpCliPath: string | null = null;
+  /** Restarts run one after another, so two quick reconnects never leave two engines running. */
+  private restarting: Promise<void> = Promise.resolve();
+  readonly log = new EventLog();
 
   async onload() {
     const { token: legacyToken, ...saved } = ((await this.loadData()) ?? {}) as Partial<ProvenanceSettings> & { token?: string };
@@ -43,7 +49,15 @@ export default class ProvenancePlugin extends Plugin {
     this.addSettingTab(new ProvenanceSettingTab(this.app, this));
     this.registerEditorExtension(provenanceExtension(() => this.engine));
     this.applyColors();
-    if (!Platform.isMobile) this.statusEl = this.addStatusBarItem();
+    if (!Platform.isMobile) {
+      this.statusEl = this.addStatusBarItem();
+      this.statusEl.addClass("mod-clickable");
+      this.statusEl.onclick = () => void this.openLog();
+    }
+    this.registerView(EVENT_LOG_VIEW, (leaf) => new EventLogView(leaf, this));
+    this.addRibbonIcon("activity", "Open sync event log", () => void this.openLog());
+    this.addCommand({ id: "open-event-log", name: "Open sync event log", callback: () => void this.openLog() });
+    this.addCommand({ id: "resolve-conflicts", name: "Resolve conflict copies", callback: () => this.resolveConflicts() });
 
     this.addCommand({
       id: "show-provenance-at-cursor",
@@ -58,7 +72,7 @@ export default class ProvenancePlugin extends Plugin {
         }
       },
     });
-    this.addCommand({ id: "reconnect", name: "Reconnect sync", callback: () => void this.restartSync() });
+    this.addCommand({ id: "reconnect", name: "Reconnect sync", callback: () => void this.reconnect() });
 
     const forward = (fn: (engine: SyncEngine, file: TFile) => unknown) => (file: TAbstractFile) => {
       if (this.engine && this.disk && file instanceof TFile && this.disk.accepts(file.path)) void fn(this.engine, file);
@@ -94,7 +108,30 @@ export default class ProvenancePlugin extends Plugin {
   }
 
   onunload() {
-    void this.stopSync();
+    void this.restarting.then(() => this.stopSync());
+  }
+
+  async openLog() {
+    await this.app.workspace.ensureSideLeaf(EVENT_LOG_VIEW, "right", { active: true, reveal: true });
+  }
+
+  resolveConflicts() {
+    new ConflictsModal(this.app, (path) => new ObsidianDisk(this.app).accepts(path)).open();
+  }
+
+  /** What the event log view shows above the events, so the user can check the settings in effect. */
+  syncSummary(): Array<[string, string]> {
+    const s = this.settings;
+    const token = s.tokenSecret ? this.app.secretStorage.getSecret(s.tokenSecret) : null;
+    return [
+      ["Status", STATUS_TEXT[this.status].replace("Provenance: ", "")],
+      ["Server", s.serverUrl || "none (this device only)"],
+      ["Device token", token ? "set" : "missing"],
+      ["Vault ID", s.vaultId],
+      ["Device", s.deviceName],
+      ["Author", `human:${s.humanName}`],
+      ["Files tracked", this.engine ? String(this.engine.vaultIndex.entries().length) : "sync not running"],
+    ];
   }
 
   /** How an agent on this computer starts the local MCP server, with this vault's paths and server filled in. */
@@ -115,7 +152,9 @@ export default class ProvenancePlugin extends Plugin {
   }
 
   private setStatus(status: SyncStatus | "error") {
+    this.status = status;
     this.statusEl?.setText(STATUS_TEXT[status]);
+    this.log.changed();
   }
 
   private async stopSync() {
@@ -129,18 +168,35 @@ export default class ProvenancePlugin extends Plugin {
     this.pokeEditors();
   }
 
-  async restartSync() {
+  /** Restart that tells the user what came of it, for the Reconnect actions. */
+  async reconnect() {
+    new Notice("Provenance sync: reconnecting…");
+    await this.restartSync();
+    new Notice(`${STATUS_TEXT[this.status]}. The sync event log has the details.`);
+  }
+
+  restartSync(): Promise<void> {
+    const run = this.restarting.then(() => this.startSync());
+    this.restarting = run.catch(() => undefined);
+    return run;
+  }
+
+  private async startSync() {
     await this.stopSync();
     const s = this.settings;
     let author;
     try {
       author = humanId(s.humanName);
     } catch {
-      new Notice("Provenance sync: your name may only contain letters, digits, '.', '@', '_' and '-'.");
+      const message = "Your name may only contain letters, digits, '.', '@', '_' and '-'.";
+      this.log.add({ level: "error", message });
+      new Notice(`Provenance sync: ${message}`);
       return this.setStatus("error");
     }
     const base = s.serverUrl.replace(/\/+$/, "");
     const token = s.tokenSecret ? this.app.secretStorage.getSecret(s.tokenSecret) : null;
+    if (base && !token) this.log.add({ level: "warn", message: "A server is set but there is no device token, so sync stays on this device." });
+    this.log.add({ level: "info", message: `Starting sync of vault "${s.vaultId}" as ${s.deviceName}${base && token ? ` with ${base}` : ", this device only"}` });
     this.disk = new ObsidianDisk(this.app);
     const appId = (this.app as unknown as { appId?: string }).appId ?? this.app.vault.getName();
     const engine = new SyncEngine({
@@ -150,6 +206,7 @@ export default class ProvenancePlugin extends Plugin {
       disk: this.disk,
       persist: indexedDbPersistence(`provenance-sync/${appId}`),
       onStatus: (status) => this.setStatus(status),
+      onEvent: (event) => this.log.add(event),
       ...(base && token
         ? { server: { url: base.replace(/^http/, "ws"), token, blobs: httpBlobs(base, s.vaultId, token) } }
         : {}),
@@ -159,7 +216,9 @@ export default class ProvenancePlugin extends Plugin {
       await engine.start();
     } catch (e) {
       console.error("[provenance-sync] start failed", e);
-      new Notice(`Provenance sync failed to start: ${e instanceof Error ? e.message : String(e)}`);
+      const message = `Sync failed to start: ${e instanceof Error ? e.message : String(e)}`;
+      this.log.add({ level: "error", message });
+      new Notice(`Provenance ${message}`);
       return this.setStatus("error");
     }
     if (this.engine !== engine) return;

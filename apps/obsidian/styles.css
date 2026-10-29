@@ -78,3 +78,69 @@ body.prov-colors .prov-mixed {
   font-style: italic;
   margin: 0 0 var(--size-4-1) var(--size-4-2);
 }
+
+.prov-log-summary {
+  display: grid;
+  gap: 2px;
+  margin-bottom: var(--size-4-2);
+  font-size: var(--font-ui-small);
+}
+
+.prov-log-row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--size-4-2);
+}
+
+.prov-log-row > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: end;
+}
+
+.prov-log-label {
+  color: var(--text-muted);
+}
+
+.prov-log-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--size-4-1);
+  margin-bottom: var(--size-4-2);
+}
+
+.prov-log-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-4-1);
+}
+
+.prov-log-item {
+  padding: var(--size-4-1) 0;
+  border-top: 1px solid var(--background-modifier-border);
+  font-size: var(--font-ui-small);
+  overflow-wrap: anywhere;
+}
+
+.prov-log-meta {
+  display: flex;
+  gap: var(--size-4-2);
+  color: var(--text-faint);
+}
+
+.prov-log-warn .prov-log-meta {
+  color: var(--text-warning);
+}
+
+.prov-log-error .prov-log-meta {
+  color: var(--text-error);
+}
+
+.prov-log-path {
+  display: block;
+  cursor: pointer;
+}
+
+.prov-log-empty {
+  color: var(--text-muted);
+}

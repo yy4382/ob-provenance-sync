@@ -51,6 +51,11 @@ async function eventually(fn, ms = 8000) {
 // --- fixtures ---------------------------------------------------------------
 
 cpSync(join(repo, "test-vault"), vault, { recursive: true });
+// More notes than the server's default limit on documents waiting for authentication.
+mkdirSync(join(vault, "Bulk"));
+for (let i = 0; i < 150; i++) writeFileSync(join(vault, "Bulk", `n${i}.md`), `Bulk note ${i}.\n`);
+writeFileSync(join(vault, "Projects/Roadmap (conflict 0a0b0c0d).md"), readFileSync(join(vault, "Projects/Roadmap.md")));
+writeFileSync(join(vault, "Projects/Roadmap (conflict 1a1b1c1d).md"), readFileSync(join(vault, "Projects/Roadmap.md"), "utf8").replace(/\n/g, "\r\n"));
 const pluginDir = join(vault, ".obsidian/plugins/provenance-sync");
 mkdirSync(pluginDir, { recursive: true });
 for (const f of ["main.js", "manifest.json", "styles.css"]) cpSync(join(repo, "apps/obsidian", f), join(pluginDir, f));
@@ -139,6 +144,12 @@ async function page() {
       for (const ch of text) await call("Input.insertText", { text: ch });
     },
     hover: (x, y) => call("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }),
+    /** Saves a screenshot to $SHOTS/<name>.png when SHOTS is set, for looking at the UI by eye. */
+    async shot(name) {
+      if (!process.env.SHOTS) return;
+      const r = await call("Page.captureScreenshot", { format: "png" });
+      writeFileSync(join(process.env.SHOTS, `${name}.png`), Buffer.from(r.data, "base64"));
+    },
     close: () => ws.close(),
   };
 }
@@ -206,6 +217,32 @@ try {
     await cdp.eval(`const p = app.plugins.plugins["provenance-sync"]; return !("token" in p.settings) && !!app.secretStorage.getSecret(p.settings.tokenSecret)`),
   );
 
+  const plugin = `app.plugins.plugins["provenance-sync"]`;
+  await sleep(3000);
+  const drops = await cdp.eval(`return ${plugin}.log.entries.filter(e => e.message.startsWith("Disconnected")).length`);
+  check("a vault of over 100 notes stays connected", drops === 0, `${drops} disconnects`);
+
+  await cdp.eval(`document.querySelector('.side-dock-ribbon-action[aria-label="Open sync event log"]').click(); return true`);
+  const logText = await eventually(() => cdp.eval(`return document.querySelector(".prov-log")?.innerText`));
+  check("the ribbon button opens the event log", !!logText?.includes("Connected to") && logText.includes("e2e-mac"), JSON.stringify(logText?.slice(0, 300)));
+  await cdp.shot("event-log");
+
+  const engines = await cdp.eval(`const p = ${plugin}; const start = p.startSync.bind(p); const seen = [];
+    p.startSync = async () => { await start(); seen.push(p.engine); };
+    await Promise.all([p.restartSync(), p.restartSync()]); p.startSync = start;
+    return seen.map(e => e === p.engine ? "current" : e.files.size ? "leaked" : "stopped")`);
+  check("two overlapping reconnects leave one engine running", JSON.stringify(engines) === '["stopped","current"]', JSON.stringify(engines));
+  await eventually(() => cdp.eval(`return document.querySelector(".status-bar")?.innerText.includes("Provenance: synced")`));
+
+  await cdp.eval(`app.commands.executeCommandById("provenance-sync:resolve-conflicts"); return true`);
+  const modal = await eventually(() => cdp.eval(`const t = document.querySelector(".modal")?.innerText; return t?.includes("Delete 1 copy identical") ? t : undefined`));
+  check("the conflict resolver sorts copies by how they differ", !!modal?.includes("differs only in line endings"), JSON.stringify(modal));
+  await cdp.shot("conflicts");
+  await cdp.eval(`for (const s of document.querySelectorAll(".modal .setting-item")) if (/^(Delete|Restore)/.test(s.innerText)) { s.querySelector("button").click(); await new Promise(r => setTimeout(r, 1500)); } return true`);
+  const left = await eventually(() => cdp.eval(`const t = document.querySelector(".modal")?.innerText; return t?.includes("no conflict copies") ? t : undefined`));
+  check("bulk actions resolve copies that add nothing", !!left && !existsSync(join(vault, "Projects/Roadmap (conflict 0a0b0c0d).md")), JSON.stringify(left));
+  await cdp.eval(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); return true`);
+
   await cdp.eval(`const f = app.vault.getFileByPath("Welcome.md"); await app.workspace.getLeaf(false).openFile(f);
     await app.workspace.getLeaf("split").openFile(f); await new Promise(r => setTimeout(r, 1000)); return true`);
 
@@ -246,7 +283,8 @@ try {
 
   await cdp.eval(`await app.workspace.getLeaf(false).openFile(app.vault.getFileByPath("Projects/Roadmap.md")); await new Promise(r => setTimeout(r, 800)); return true`);
   const box = await cdp.eval(`const el = [...document.querySelectorAll(".workspace-leaf.mod-active .prov-agent")].find(e => e.textContent.includes("AgentBridge"));
-    const r = el.getBoundingClientRect(); return [r.left + 30, r.top + r.height / 2]`);
+    el.scrollIntoView({ block: "center" }); await new Promise(r => setTimeout(r, 300)); const r = el.getClientRects()[0]; return [r.left + Math.min(30, r.width / 2), r.top + r.height / 2]`);
+  await cdp.shot("hover");
   await cdp.hover(box[0], box[1]);
   await cdp.hover(box[0] + 2, box[1]);
   const tooltip = await eventually(() => cdp.eval(`return document.querySelector(".prov-tooltip")?.innerText`), 3000);
@@ -270,7 +308,8 @@ try {
   });
   const files = await eventually(async () => {
     const r = await opsCall({ op: "list" });
-    return r.result.files.join(",") === "Projects/Renamed.md" ? r.result.files : undefined;
+    const notes = r.result.files.filter((f) => !f.startsWith("Bulk/"));
+    return notes.join(",") === "Projects/Renamed.md" ? notes : undefined;
   }, 15000);
   check("an offline delete stays deleted and an offline rename keeps the file", !!files, JSON.stringify((await opsCall({ op: "list" })).result));
   const merged = await eventually(async () => {

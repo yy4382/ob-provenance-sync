@@ -412,7 +412,11 @@ export class SyncEngine implements VaultDocs {
         url: opts.server.url,
         ...(opts.server.WebSocketPolyfill ? { WebSocketPolyfill: opts.server.WebSocketPolyfill } : {}),
       });
+      let last = "";
       this.socket.on("status", ({ status }: { status: string }) => {
+        // The provider reports "connected" twice per connection.
+        if (status === last) return;
+        last = status;
         opts.onStatus?.(status === "connected" ? "connected" : status === "connecting" ? "connecting" : "offline");
         if (status === "connected") this.log("info", `Connected to ${opts.server!.url}`);
       });
