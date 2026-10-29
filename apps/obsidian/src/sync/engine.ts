@@ -24,6 +24,8 @@ export interface Disk {
   list(): Promise<Array<{ path: string; binary: boolean }>>;
   read(path: string): Promise<string | null>;
   write(path: string, text: string): Promise<void>;
+  /** Writes `text` only if the file still holds `expected`, as one step. Resolves to whether it wrote. */
+  writeIfUnchanged(path: string, expected: string, text: string): Promise<boolean>;
   readBinary(path: string): Promise<ArrayBuffer | null>;
   writeBinary(path: string, data: ArrayBuffer): Promise<void>;
   rename(from: string, to: string): Promise<void>;
@@ -86,9 +88,12 @@ const MIRROR_KEY = "on-disk";
  * diff(base, disk) on a fork taken at the base and merge the fork back, so
  * remote changes that haven't reached the disk yet are kept rather than
  * reverted. Disk writes are debounced and skipped while an editor is bound,
- * because then the editor owns saving; meanwhile `editorStates` remembers
- * the states the editor may save, so its saves are told apart from other
- * programs' edits and still move the base forward.
+ * because then the editor owns saving. When Obsidian saves, `trackWrite`
+ * learns the exact text it writes and finds in `editorStates` the state the
+ * editor showed with that text; once the save lands, that state is the base.
+ * Telling saves apart by comparing the text read back later is not enough:
+ * the read may also hold another program's edit, or an outside revert to an
+ * older editor text.
  */
 export class MarkdownFile {
   readonly doc = new Y.Doc({ gc: false });
@@ -96,6 +101,9 @@ export class MarkdownFile {
   readonly ready: Promise<void>;
   private base: { snapshot: Y.Snapshot; text: string } | null = null;
   private readonly editorStates: Array<{ snapshot: Y.Snapshot; text: string }> = [];
+  /** Tracked writes in flight, and a count bumped as each starts and lands, so a read that overlapped one reads again. */
+  private readonly writes = new Set<Promise<unknown>>();
+  private writeEvents = 0;
   private editors = 0;
   private writeTimer: ReturnType<typeof setTimeout> | null = null;
   private provider: HocuspocusProvider | null = null;
@@ -159,10 +167,10 @@ export class MarkdownFile {
     const path = this.path;
     if (path === undefined || this.destroyed) return;
     const disk = await this.engine.opts.disk.read(path);
-    if (disk === null) return this.writeNow();
+    if (disk === null) return this.writeNow(null);
     if (!this.knownLocally && !this.createdHere && this.ytext.length > 0 && disk !== this.ytext.toJSON()) {
       await this.engine.createFromDisk(conflictPath(path, this.id), disk, true);
-      return this.writeNow();
+      return this.writeNow(disk);
     }
     this.applyDisk(disk);
   }
@@ -188,35 +196,67 @@ export class MarkdownFile {
   }
 
   /**
-   * A modify event for this file. A save by an editor matches a state the
-   * editor held, possibly an older one if more edits landed since; that state
-   * becomes the base. Anything else is another program's edit and is merged,
-   * whether or not the file is open (the editor ignores Obsidian's reload).
+   * A modify event for this file. The text is merged against the base, so an
+   * editor's save, whose state `trackWrite` already made the base, adds
+   * nothing, and anything else is another program's edit, whether or not the
+   * file is open (the editor ignores Obsidian's reload). A read that a tracked
+   * write overlapped may hold the new text with the old base, so it reads again.
    */
   async onDiskModified(): Promise<void> {
-    if (!this.path) return;
-    const disk = await this.engine.opts.disk.read(this.path);
-    if (disk === null || this.destroyed) return;
-    const saved = [...this.editorStates].reverse().find((s) => s.text === disk);
-    if (saved) {
-      this.setBase(saved.snapshot, saved.text);
-      if (this.ytext.toJSON() !== disk) this.scheduleWrite();
-      return;
+    for (;;) {
+      const path = this.path;
+      if (!path) return;
+      const events = this.writeEvents;
+      const disk = await this.engine.opts.disk.read(path);
+      if (disk === null || this.destroyed) return;
+      if (this.writes.size) await Promise.allSettled(this.writes);
+      else if (events === this.writeEvents) return this.applyDisk(disk);
     }
-    this.applyDisk(disk);
   }
 
-  /** Returns a release function. While any editor is bound, the editor saves the file. */
-  bindEditor(): () => void {
-    this.editors++;
-    this.recordEditorState();
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      this.editors--;
-      this.scheduleWrite();
-    };
+  /**
+   * Obsidian is about to write `text` to this file, usually an editor saving.
+   * If the CRDT held that text, in its current state or one an editor showed,
+   * that state becomes the base once the write lands.
+   */
+  async trackWrite<T>(text: string, write: () => Promise<T>): Promise<T> {
+    const state =
+      text === this.ytext.toJSON() ? { snapshot: Y.snapshot(this.doc), text } : [...this.editorStates].reverse().find((s) => s.text === text);
+    if (!state) return write();
+    const run = write();
+    this.writes.add(run);
+    this.writeEvents++;
+    try {
+      const out = await run;
+      this.setBase(state.snapshot, state.text);
+      return out;
+    } finally {
+      this.writes.delete(run);
+      this.writeEvents++;
+    }
+  }
+
+  /**
+   * Binds an editor, as a queued task, and resolves to its release function.
+   * While any editor is bound, the editor saves the file. `loaded` is the text
+   * Obsidian loaded into the first editor; it may hold another program's edit
+   * whose modify event is still pending, so it is merged like a disk change
+   * before the editor is made to show the CRDT's text.
+   */
+  bindEditor(loaded: () => string | null = () => null): Promise<() => void> {
+    return this.engine.enqueue(async () => {
+      const text = this.editors === 0 && this.base ? loaded() : null;
+      if (text !== null && text !== this.base!.text) this.applyDisk(text);
+      this.editors++;
+      this.recordEditorState();
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        this.editors--;
+        this.scheduleWrite();
+      };
+    });
   }
 
   human() {
@@ -236,13 +276,23 @@ export class MarkdownFile {
     }, 200);
   }
 
-  async writeNow(): Promise<void> {
+  /**
+   * Writes the CRDT's text over `expected`, the text the file is believed to
+   * hold (null: the file is missing). If the file holds something else,
+   * another program changed it, so it is merged first and written afterwards.
+   */
+  async writeNow(expected: string | null | undefined = this.base?.text): Promise<void> {
     const path = this.path;
-    if (path === undefined || this.editors > 0 || this.destroyed) return;
+    if (path === undefined || this.editors > 0 || this.destroyed || expected === undefined) return;
     const text = this.ytext.toJSON();
     if (this.base?.text === text) return;
     const snapshot = Y.snapshot(this.doc);
-    await this.engine.opts.disk.write(path, text);
+    const { disk } = this.engine.opts;
+    if (expected === null) await disk.write(path, text);
+    else if (!(await disk.writeIfUnchanged(path, expected, text))) {
+      void this.engine.enqueue(() => this.onDiskModified());
+      return;
+    }
     this.setBase(snapshot, text);
   }
 
@@ -580,6 +630,12 @@ export class SyncEngine implements VaultDocs {
       this.vaultIndex.doc.transact(() => this.vaultIndex.rename(id, to), FROM_DISK);
       this.saveMirror();
     });
+  }
+
+  /** Obsidian is about to write `text` to `path`; see MarkdownFile.trackWrite. */
+  trackWrite<T>(path: string, text: string, write: () => Promise<T>): Promise<T> {
+    const file = this.fileAt(path);
+    return file ? file.trackWrite(text, write) : write();
   }
 
   onDelete(path: string): Promise<void> {

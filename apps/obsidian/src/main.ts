@@ -1,6 +1,7 @@
 import { humanId } from "@provenance/core";
 import { MarkdownView, Notice, Platform, Plugin, TAbstractFile, TFile } from "obsidian";
 import type { EditorView } from "@codemirror/view";
+import { around } from "monkey-around";
 import { startBridge } from "./bridge";
 import { installMcpCli, localMcpCommand, type LocalMcpCommand } from "./mcp-cli";
 import { provenanceExtension, renderProvenance, segmentAt } from "./editor/binding";
@@ -69,6 +70,18 @@ export default class ProvenancePlugin extends Plugin {
       this.registerEvent(
         this.app.vault.on("rename", (file, oldPath) => {
           if (this.engine && this.disk && file instanceof TFile && this.disk.accepts(oldPath)) void this.engine.onRename(oldPath, file.path);
+        }),
+      );
+      // An editor saves through vault.modify with the exact text it writes;
+      // the engine needs that text to tell the save from other programs' edits.
+      const vault = this.app.vault;
+      this.register(
+        around(vault, {
+          modify: (next) => (file, data, options) => {
+            const write = () => next.call(vault, file, data, options);
+            const tracked = this.engine && this.disk?.accepts(file.path) && file.extension === "md";
+            return tracked ? this.engine!.trackWrite(file.path, data, write) : write();
+          },
         }),
       );
       void this.restartSync();

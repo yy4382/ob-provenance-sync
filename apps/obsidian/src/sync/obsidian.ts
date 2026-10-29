@@ -47,6 +47,15 @@ export class ObsidianDisk implements Disk {
     }
   }
 
+  /** vault.process runs the check and the write as one step of Obsidian's file queue, and skips the write when nothing changes. */
+  async writeIfUnchanged(path: string, expected: string, text: string) {
+    const f = this.file(path);
+    if (!f) return false;
+    let wrote = false;
+    await this.app.vault.process(f, (data) => (data === expected ? ((wrote = true), text) : data));
+    return wrote;
+  }
+
   async writeBinary(path: string, data: ArrayBuffer) {
     const f = this.file(path);
     if (f) await this.app.vault.modifyBinary(f, data);

@@ -51,6 +51,15 @@ export class MemoryDisk implements Disk {
     this.files.set(path, text);
     void (existed ? this.engine?.onModify(path, false) : this.engine?.onCreate(path, false));
   }
+  async writeIfUnchanged(path: string, expected: string, text: string) {
+    if (this.files.get(path) !== expected) return false;
+    await this.write(path, text);
+    return true;
+  }
+  /** An editor's save: vault.modify, which the plugin wraps with trackWrite. */
+  save(path: string, text: string) {
+    return this.engine!.trackWrite(path, text, () => this.write(path, text));
+  }
   async writeBinary(path: string, data: ArrayBuffer) {
     const existed = this.files.has(path);
     this.files.set(path, data);

@@ -67,6 +67,8 @@ const plugin = ViewPlugin.fromClass(
     file: MarkdownFile | null = null;
     private path: string | null = null;
     release: (() => void) | null = null;
+    /** Identifies the current attachment, so a binding that resolves after the pane moved on is released. */
+    private attached: object | null = null;
     private readonly observer = (event: Y.YTextEvent, tr: Y.Transaction) => this.onYjs(event, tr);
 
     constructor(readonly view: EditorView) {
@@ -94,12 +96,16 @@ const plugin = ViewPlugin.fromClass(
       if (!set) panes.set(file, (set = new Set()));
       set.add(this);
       file.ytext.observe(this.observer);
-      void file.ready.then(() => {
-        if (this.file !== file) return;
-        this.release = file.bindEditor();
-        if (this.primary) this.loadFromCrdt();
-        this.scheduleRefresh();
-      });
+      const attached = (this.attached = {});
+      const current = () => (this.attached === attached ? this.view.state.doc.toString() : null);
+      void file.ready
+        .then(() => file.bindEditor(current))
+        .then((release) => {
+          if (this.attached !== attached) return release();
+          this.release = release;
+          if (this.primary) this.loadFromCrdt();
+          this.scheduleRefresh();
+        });
     }
 
     /** Makes the editor show the CRDT's text. Converging by diff makes repeats harmless. */
@@ -117,6 +123,7 @@ const plugin = ViewPlugin.fromClass(
       set.delete(this);
       this.release?.();
       this.release = null;
+      this.attached = null;
       this.file = null;
       this.segments = [];
       this.decorations = Decoration.none;

@@ -177,6 +177,9 @@ importers:
       fast-diff:
         specifier: ^1.3.0
         version: 1.3.0
+      monkey-around:
+        specifier: ^3.0.0
+        version: 3.0.0
       y-indexeddb:
         specifier: ^9.0.12
         version: 9.0.12(yjs@13.6.33)
@@ -1785,6 +1788,9 @@ packages:
 
   moment@2.31.0:
     resolution: {integrity: sha512-0acOTfMiWOheYS4eoWb80yYMb/JLvVv9SHbs2PehaDzfUG0Bw855SKyk0IKTnPGa5+U2bmi3W68l1+sGLX/pvw==}
+
+  monkey-around@3.0.0:
+    resolution: {integrity: sha512-jL6uY2lEAoaHxZep1cNRkCZjoIWY4g5VYCjriEWmcyHU7w8NU1+JH57xE251UVTohK0lCxMjv0ZV4ByDLIXEpw==}
 
   ms@2.1.3:
     resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
@@ -4039,6 +4045,8 @@ snapshots:
   module-replacements@2.11.0: {}
 
   moment@2.31.0: {}
+
+  monkey-around@3.0.0: {}
 
   ms@2.1.3: {}
 
