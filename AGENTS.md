@@ -4,6 +4,7 @@
   - Think twice before creating new project documents (those that describe how to develop our project, e.g. `Architecture.md`, not those user-oriented documents that describe how to use our project). Adding this kind of documentation requires user permission.
 - Be curious about WHY. Find out why we want this change and why the previous code has such logic. Don't only learn what the logic (more specifically, the code's control flow) is; also find out why we did it that way. This helps avoid unnecessary changes and anomalies in the project's expected behavior.
 - You're free to commit and push to main. Pushing a semver tag needs human approval, but an alpha tag doesn't. When the user asks you to "release", you may push any semver tag that makes sense.
+- Normally this git commit sign is enabled through 1Password, but if it fails, you can continue by skipping the gpg sign.
 
 ## Tech stack
 
