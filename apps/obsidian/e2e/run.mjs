@@ -62,6 +62,10 @@ writeFileSync(join(vault, "Lost (conflict 3a3b3c3d) (conflict 4a4b4c4d).md"), "S
 const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==", "base64");
 writeFileSync(join(vault, "pixel.png"), pixel);
 writeFileSync(join(vault, "pixel (conflict 5a5b5c5d).png"), pixel);
+// Obsidian turns its own Sync on by default, and the plugin stays off while another sync is on.
+const corePlugins = join(vault, ".obsidian/core-plugins.json");
+mkdirSync(dirname(corePlugins), { recursive: true });
+writeFileSync(corePlugins, JSON.stringify({ ...(existsSync(corePlugins) ? JSON.parse(readFileSync(corePlugins, "utf8")) : {}), sync: false }));
 const pluginDir = join(vault, ".obsidian/plugins/provenance-sync");
 mkdirSync(pluginDir, { recursive: true });
 for (const f of ["main.js", "manifest.json", "styles.css"]) cpSync(join(repo, "apps/obsidian", f), join(pluginDir, f));
@@ -208,7 +212,12 @@ async function openObsidian() {
   const synced = await eventually(() =>
     cdp.eval(`return document.querySelector(".status-bar")?.innerText.includes("Provenance: synced") && !!${engineFile("Welcome.md")}`),
   );
-  if (!synced) throw new Error("plugin never reported synced");
+  if (!synced) {
+    const why = await cdp
+      .eval(`const p = app.plugins.plugins["provenance-sync"]; return JSON.stringify({ status: document.querySelector(".status-bar")?.innerText, loaded: !!p, log: p?.log.entries.slice(-5).map((e) => e.message) })`)
+      .catch((e) => String(e));
+    throw new Error(`plugin never reported synced: ${why}`);
+  }
   return cdp;
 }
 
@@ -230,7 +239,7 @@ try {
 
   await cdp.eval(`document.querySelector('.side-dock-ribbon-action[aria-label="Open sync event log"]').click(); return true`);
   const logText = await eventually(() => cdp.eval(`return document.querySelector(".prov-log")?.innerText`));
-  check("the ribbon button opens the event log", !!logText?.includes("Connected to") && logText.includes("e2e-mac"), JSON.stringify(logText?.slice(0, 300)));
+  check("the ribbon button opens the event log", !!logText?.includes("Status\nsynced") && logText.includes("e2e-mac"), JSON.stringify(logText?.slice(0, 300)));
   await cdp.shot("event-log");
 
   const engines = await cdp.eval(`const p = ${plugin}; const start = p.startSync.bind(p); const seen = [];
