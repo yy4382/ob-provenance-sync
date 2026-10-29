@@ -179,6 +179,25 @@ async function focusPane(cdp, index, line = 0) {
   await sleep(300);
 }
 
+/** Selects `marker` in the active editor, runs a reattribution command, fills its modal and returns the notice it shows. */
+async function reattributeVia(cdp, command, marker, { why, agent }) {
+  await cdp.eval(`document.querySelectorAll(".notice").forEach((n) => n.remove());
+    const e = app.workspace.activeEditor.editor; const i = e.getValue().indexOf(${JSON.stringify(marker)});
+    e.setSelection(e.offsetToPos(i), e.offsetToPos(i + ${marker.length}));
+    app.commands.executeCommandById("provenance-sync:${command}"); return true`);
+  if (!(await eventually(() => cdp.eval(`return !!document.querySelector(".modal button.mod-cta")`), 3000))) {
+    return `no modal: ${await cdp.eval(`return document.querySelector(".notice")?.innerText`)}`;
+  }
+  await cdp.eval(`const m = document.querySelector(".modal"); const s = m.querySelector("select");
+    if (s && ${JSON.stringify(why ?? null)}) { s.value = ${JSON.stringify(why ?? "")}; s.dispatchEvent(new Event("change")); }
+    const input = m.querySelector("input[type=text]");
+    if (input && ${JSON.stringify(agent ?? null)}) { input.value = ${JSON.stringify(agent ?? "")}; input.dispatchEvent(new Event("input")); }
+    return true`);
+  await cdp.shot(command);
+  await cdp.eval(`document.querySelector(".modal button.mod-cta").click(); return true`);
+  return (await eventually(() => cdp.eval(`return document.querySelector(".notice")?.innerText`))) ?? "no notice";
+}
+
 async function opsCall(body) {
   const res = await fetch(api, { method: "POST", headers: { authorization: `Bearer ${AGENT_TOKEN}` }, body: JSON.stringify(body) });
   return res.json();
@@ -299,6 +318,29 @@ try {
   check("a remote agent edit appears once in every pane", !!remote);
   const noDupes = (await cdp.eval(`return ${engineFile("Welcome.md")}.ytext.toJSON()`)).match(/TypedLeft|TypedRight|ExternalEdit|RemoteAgent/g);
   check("nothing was duplicated", noDupes?.length === 4, JSON.stringify(noDupes));
+
+  await focusPane(cdp, 0);
+  const recovered = await reattributeVia(cdp, "recover-provenance", "ExternalEdit line.", { why: "human-typed" });
+  check("recovery attributes unknown text to the human", JSON.stringify(await authorsOf(cdp, "Welcome.md", "ExternalEdit line.")) === '["human:tester"]', recovered);
+  const untouched = await reattributeVia(cdp, "recover-provenance", "RemoteAgent line.", { why: "human-typed" });
+  check(
+    "recovery never turns an agent's text into the human's",
+    JSON.stringify(await authorsOf(cdp, "Welcome.md", "RemoteAgent line.")) === '["agent:andy"]' && untouched.includes("No unknown text"),
+    untouched,
+  );
+  const marked = await reattributeVia(cdp, "mark-as-ai", "TypedRight", { agent: "gpt-e2e" });
+  check("mark as AI attributes the human's text to the named agent", JSON.stringify(await authorsOf(cdp, "Welcome.md", "TypedRight")) === '["agent:gpt-e2e"]', marked);
+  const authorsOnServer = async () => {
+    const r = await opsCall({ op: "read", path: "Welcome.md", provenance: true });
+    const of = (m) => r.result?.sentences?.find((x) => x.text.includes(m))?.authors ?? [];
+    return { external: of("ExternalEdit"), typed: of("TypedRight") };
+  };
+  const synced = await eventually(async () => {
+    const { external, typed } = await authorsOnServer();
+    return external.join() === "human:tester" && typed.includes("agent:gpt-e2e") ? true : undefined;
+  });
+  check("reattribution syncs to the server", !!synced, JSON.stringify(await authorsOnServer()));
+  check("reattribution leaves the file's text alone", (await cdp.eval(`return ${engineFile("Welcome.md")}.ytext.toJSON()`)).match(/TypedLeft|TypedRight|ExternalEdit|RemoteAgent/g)?.length === 4);
 
   await cdp.eval(`await app.workspace.getLeaf(false).openFile(app.vault.getFileByPath("Projects/Roadmap.md")); await new Promise(r => setTimeout(r, 800)); return true`);
   const box = await cdp.eval(`const el = [...document.querySelectorAll(".workspace-leaf.mod-active .prov-agent")].find(e => e.textContent.includes("AgentBridge"));

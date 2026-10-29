@@ -6,7 +6,10 @@ import {
   attribute,
   humanProvenance,
   insertText,
+  reattribute,
+  REATTRIBUTABLE,
   replaceText,
+  runsOf,
   sentenceRanges,
   setText,
   unknownProvenance,
@@ -144,5 +147,56 @@ describe("text edits", () => {
     const copy = new Y.Doc();
     Y.applyUpdate(copy, Y.encodeStateAsUpdate(t.doc!));
     expect(kinds(copy.getText("content"))).toEqual(kinds(t));
+  });
+});
+
+describe("reattribute", () => {
+  const pasted = agentProvenance("agent:chatgpt", "agent", null, "mac");
+  const authors = (t: Y.Text) => runsOf(t).map((r) => [t.toString().slice(r.from, r.to), r.provenance.author]);
+  const apply = (t: Y.Text, from: number, to: number, by: typeof me, rule: keyof typeof REATTRIBUTABLE) => {
+    let n = 0;
+    t.doc!.transact(() => (n = reattribute(t, from, to, by, REATTRIBUTABLE[rule])));
+    return n;
+  };
+
+  it("marks human and unknown text as an agent's, leaving agent text alone", () => {
+    const t = text(["Mine. ", me], ["Bot. ", bot], ["Disk.", external]);
+    expect(apply(t, 0, t.length, pasted, "mark-as-ai")).toBe(11);
+    expect(t.toString()).toBe("Mine. Bot. Disk.");
+    expect(authors(t)).toEqual([
+      ["Mine. ", "agent:chatgpt"],
+      ["Bot. ", "agent:claude-code"],
+      ["Disk.", "agent:chatgpt"],
+    ]);
+  });
+
+  it("leaves dictated text alone when marking as an agent's", () => {
+    const t = text(["Said.", dictated]);
+    expect(apply(t, 0, t.length, pasted, "mark-as-ai")).toBe(0);
+    expect(authors(t)).toEqual([["Said.", "agent:andy"]]);
+  });
+
+  it("recovers only unknown text, so agent text never becomes human", () => {
+    const t = text(["Mine. ", me], ["Bot. ", bot], ["Said. ", dictated], ["Disk.", external]);
+    const recovered = humanProvenance("human:sam", "mac");
+    expect(apply(t, 0, t.length, recovered, "recover")).toBe(5);
+    expect(t.toString()).toBe("Mine. Bot. Said. Disk.");
+    expect(authors(t)).toEqual([
+      ["Mine. ", "human:chris"],
+      ["Bot. ", "agent:claude-code"],
+      ["Said. ", "agent:andy"],
+      ["Disk.", "human:sam"],
+    ]);
+  });
+
+  it("changes only the part of a run inside the range", () => {
+    const t = text(["abcdef", external]);
+    expect(apply(t, 2, 4, me, "recover")).toBe(2);
+    expect(t.toString()).toBe("abcdef");
+    expect(authors(t)).toEqual([
+      ["ab", "unknown"],
+      ["cd", "human:chris"],
+      ["ef", "unknown"],
+    ]);
   });
 });

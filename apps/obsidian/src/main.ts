@@ -1,5 +1,5 @@
-import { humanId } from "@provenance/core";
-import { MarkdownView, Notice, Platform, Plugin, TAbstractFile, TFile, type App } from "obsidian";
+import { humanId, reattribute, REATTRIBUTABLE } from "@provenance/core";
+import { MarkdownView, Notice, Platform, Plugin, TAbstractFile, TFile, type App, type Editor } from "obsidian";
 import type { EditorView } from "@codemirror/view";
 import { around } from "monkey-around";
 import { startBridge } from "./bridge";
@@ -7,6 +7,7 @@ import { ConflictsModal } from "./conflicts";
 import { EVENT_LOG_VIEW, EventLog, EventLogView } from "./event-log";
 import { installMcpCli, localMcpCommand, type LocalMcpCommand } from "./mcp-cli";
 import { provenanceExtension, renderProvenance, segmentAt } from "./editor/binding";
+import { ReattributeModal, type Attribution, type Reattribution } from "./reattribute";
 import { defaultSettings, ProvenanceSettingTab, type ProvenanceSettings } from "./settings";
 import { SyncEngine, type SyncStatus } from "./sync/engine";
 import { httpBlobs, indexedDbPersistence, ObsidianDisk } from "./sync/obsidian";
@@ -98,6 +99,16 @@ export default class ProvenancePlugin extends Plugin {
         }
       },
     });
+    this.addCommand({
+      id: "mark-as-ai",
+      name: "Mark selection as written by AI",
+      editorCallback: (editor, ctx) => ctx instanceof MarkdownView && this.reattribute(editor, ctx, "mark-as-ai"),
+    });
+    this.addCommand({
+      id: "recover-provenance",
+      name: "Recover provenance of unknown text…",
+      editorCallback: (editor, ctx) => ctx instanceof MarkdownView && this.reattribute(editor, ctx, "recover"),
+    });
     this.addCommand({ id: "reconnect", name: "Reconnect sync", callback: () => void this.reconnect() });
 
     const forward = (fn: (engine: SyncEngine, file: TFile) => unknown) => (file: TAbstractFile) => {
@@ -156,6 +167,46 @@ export default class ProvenancePlugin extends Plugin {
       return void new Notice(`Sync check failed: ${e instanceof Error ? e.message : String(e)}`);
     }
     new Notice(problems ? `Sync check found ${problems} problems and repaired what it could. The sync event log has the details.` : "Sync check: every file matches the index.");
+  }
+
+  /** The selection, or the sentence at the cursor, and its note; a message instead if its authors can't be changed now. */
+  private reattributionTarget(editor: Editor, view: MarkdownView) {
+    if (!this.engine) return "Provenance sync isn't running.";
+    const file = view.file && this.engine.fileAt(view.file.path);
+    if (!file) return "This note isn't tracked by provenance sync.";
+    if (file.ytext.length !== editor.getValue().length) return "This note is still syncing; try again in a moment.";
+    const from = editor.posToOffset(editor.getCursor("from"));
+    const to = editor.posToOffset(editor.getCursor("to"));
+    if (from < to) return { file, from, to, where: "the selection" };
+    const cm = cmOf(view);
+    const segment = cm && segmentAt(cm, from);
+    if (!segment) return "Select some text first.";
+    return { file, from: segment.from, to: segment.to, where: "this sentence" };
+  }
+
+  private reattribute(editor: Editor, view: MarkdownView, mode: Reattribution) {
+    const first = this.reattributionTarget(editor, view);
+    if (typeof first === "string") return void new Notice(first);
+    new ReattributeModal(this.app, mode, this.engine!.opts.author, this.settings.lastAgentName, (choice: Attribution) => {
+      // The note may have changed while the modal was open.
+      const target = this.reattributionTarget(editor, view);
+      if (typeof target === "string") return void new Notice(target);
+      const { file, from, to, where } = target;
+      const by = choice.why === "human-typed" ? file.human() : file.agent(choice.agent, choice.why, choice.note);
+      let changed = 0;
+      file.doc.transact(() => (changed = reattribute(file.ytext, from, to, by, REATTRIBUTABLE[mode])));
+      const agentName = choice.why === "human-typed" ? null : choice.agent.slice("agent:".length);
+      if (agentName && agentName !== this.settings.lastAgentName) {
+        this.settings.lastAgentName = agentName;
+        void this.saveSettings();
+      }
+      const as = choice.why === "human-via-agent" ? `${by.author} (your words)` : by.author;
+      if (mode === "mark-as-ai") {
+        new Notice(changed ? `Marked ${changed} characters as written by ${as}.` : `Nothing to change: ${where} is already attributed to an agent.`);
+      } else {
+        new Notice(changed ? `Recovered ${changed} characters as ${as}.` : `No unknown text in ${where}.`);
+      }
+    }).open();
   }
 
   resolveConflicts() {

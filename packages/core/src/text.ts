@@ -88,6 +88,29 @@ export function adoptText(target: Y.Text, source: Y.Text, keepText = false): voi
   }
 }
 
+/** Which runs each way of reattributing may rewrite. Recovery only touches unknown text, so agent text can never become human. */
+export const REATTRIBUTABLE = {
+  "mark-as-ai": (p) => !p.author.startsWith("agent:"),
+  recover: (p) => p.author === "unknown",
+} satisfies Record<string, (p: Provenance) => boolean>;
+
+/**
+ * Attributes the `eligible` runs within `[from, to)` to `by`, leaving the text
+ * as it is, and returns how many characters changed. Callers wrap this in a
+ * transaction.
+ */
+export function reattribute(ytext: Y.Text, from: number, to: number, by: Provenance, eligible: (p: Provenance) => boolean): number {
+  let changed = 0;
+  for (const run of runsOf(ytext)) {
+    const start = Math.max(run.from, from);
+    const end = Math.min(run.to, to);
+    if (start >= end || !eligible(run.provenance)) continue;
+    ytext.format(start, end - start, toAttrs(by));
+    changed += end - start;
+  }
+  return changed;
+}
+
 /** Every character's provenance; characters of one run share one object. */
 function byChar(ytext: Y.Text): Provenance[] {
   return runsOf(ytext).flatMap((r) => Array<Provenance>(r.to - r.from).fill(r.provenance));

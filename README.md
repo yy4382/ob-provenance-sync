@@ -69,6 +69,8 @@ Sentences are colored by who wrote them:
 
 Hover a sentence to see each author, the reason, the agent's note, the time, and the device. On mobile, use the command **Show who wrote the current sentence**.
 
+Two commands change who text is attributed to without changing the text. Both work on the selection, or on the sentence at the cursor when nothing is selected. **Mark selection as written by AI** is for AI output you pasted in: it attributes your text and unknown text to the agent you name, and leaves other agents' text as it is. **Recover provenance of unknown text** changes only unknown text, to you, an agent, or your words inserted by an agent, so nothing an agent wrote can turn into yours.
+
 Edits made to files outside Obsidian are never lost. When the plugin next sees them, they are recorded as `unknown` and merged with everyone else's changes. Don't run another sync tool (Obsidian Sync, remotely-save, iCloud) on the same vault. Their edits would show up as unknown, and they can fight with this plugin.
 
 ### 3. Connect agents (MCP)

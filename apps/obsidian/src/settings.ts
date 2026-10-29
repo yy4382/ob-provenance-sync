@@ -12,6 +12,8 @@ export interface ProvenanceSettings {
   deviceName: string;
   showColors: boolean;
   enableBridge: boolean;
+  /** Last agent named when marking text as an agent's, offered again next time. */
+  lastAgentName: string;
 }
 
 export function defaultSettings(app: App): ProvenanceSettings {
@@ -25,6 +27,7 @@ export function defaultSettings(app: App): ProvenanceSettings {
     deviceName: `${Platform.isMobile ? "mobile" : "desktop"}-${suffix}`,
     showColors: true,
     enableBridge: true,
+    lastAgentName: "chatgpt",
   };
 }
 

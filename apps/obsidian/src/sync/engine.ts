@@ -1,6 +1,7 @@
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import {
   adoptText,
+  agentProvenance,
   conflictPath,
   difference,
   fileDocName,
@@ -17,6 +18,8 @@ import {
   unknownProvenance,
   VaultIndex,
   type FileEntry,
+  type AgentId,
+  type AgentWhy,
   type FileId,
   type HumanId,
   type VaultDocs,
@@ -297,6 +300,10 @@ export class MarkdownFile {
 
   human() {
     return humanProvenance(this.engine.opts.author, this.engine.opts.device);
+  }
+
+  agent(author: AgentId, why: AgentWhy, note: string | null) {
+    return agentProvenance(author, why, note, this.engine.opts.device);
   }
 
   unknown() {
