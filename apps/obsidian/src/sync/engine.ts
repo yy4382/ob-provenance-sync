@@ -8,6 +8,7 @@ import {
   isMarkdownPath,
   newFileId,
   pairRenames,
+  repairedConflictPath,
   setText,
   TEXT_KEY,
   unknownProvenance,
@@ -691,6 +692,12 @@ export class SyncEngine implements VaultDocs {
    */
   private async syncTree(): Promise<void> {
     const index = this.vaultIndex;
+    for (const [id, entry] of index.entries()) {
+      const repaired = repairedConflictPath(entry.path, id);
+      if (repaired === null) continue;
+      this.log("warn", `Renamed a conflict copy whose name was too long to write to ${repaired}`, entry.path);
+      index.doc.transact(() => index.rename(id, repaired));
+    }
     const losers = new Set(index.conflicts().map(([id]) => id));
     for (const id of losers) void this.settleCollision(id);
     const entries = new Map(index.entries());

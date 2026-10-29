@@ -88,6 +88,15 @@ export function conflictPath(path: string, id: FileId): string {
   return `${stem} (conflict ${id.slice(0, 8)})${ext}`;
 }
 
+/**
+ * The name for a conflict copy that older versions piled suffixes onto, often
+ * past the file-name length limit, so no device could write it; null if `path`
+ * needs no repair.
+ */
+export function repairedConflictPath(path: string, id: FileId): string | null {
+  return (path.match(CONFLICT_SUFFIX)?.length ?? 0) > 1 ? conflictPath(path, id) : null;
+}
+
 /** The path a conflict copy was made from, or null if `path` isn't a conflict copy. */
 export function conflictOriginal(path: string): string | null {
   const original = path.replace(CONFLICT_SUFFIX, "");

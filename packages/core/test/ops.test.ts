@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { conflictOriginal, conflictPath, difference, handleOpRequest, TEXT_KEY, VaultIndex, type FileId, type VaultDocs } from "../src";
+import { conflictOriginal, conflictPath, difference, repairedConflictPath, handleOpRequest, TEXT_KEY, VaultIndex, type FileId, type VaultDocs } from "../src";
 
 function memoryVault(): VaultDocs & { files: Map<FileId, Y.Doc> } {
   const index = new VaultIndex(new Y.Doc());
@@ -97,6 +97,11 @@ describe("conflict copies", () => {
     expect(conflictPath(once, "22222222-x" as FileId)).toBe("dir/a.b (conflict 22222222).md");
     expect(conflictOriginal("a (conflict 11111111) (conflict 22222222).md")).toBe("a.md");
     expect(conflictOriginal("a.md")).toBeNull();
+  });
+
+  it("repairs a conflict copy whose suffixes piled up", () => {
+    expect(repairedConflictPath("a (conflict 11111111) (conflict 11111111).md", "22222222-x" as FileId)).toBe("a (conflict 22222222).md");
+    expect(repairedConflictPath("a (conflict 11111111).md", "22222222-x" as FileId)).toBeNull();
   });
 
   it("tells differences that don't show from real ones", () => {

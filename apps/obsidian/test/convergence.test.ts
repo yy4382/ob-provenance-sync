@@ -27,6 +27,23 @@ const stop = async (d: { engine: SyncEngine; disk: MemoryDisk }) => {
 };
 
 describe("convergence", () => {
+  it("renames a conflict copy whose suffixes piled up, so every device can write it", async () => {
+    const { device } = await setup();
+    const diskA = new MemoryDisk();
+    diskA.files.set(`setup${" (conflict edf8d9a0)".repeat(12)}.md`, "Setup.");
+    const a = device("mac", diskA);
+    await a.started;
+    const b = device("phone");
+    await b.started;
+    const single = /^setup \(conflict [0-9a-f]{8}\)\.md$/;
+    await eventually(() => {
+      for (const disk of [diskA, b.disk]) {
+        expect([...disk.files.keys()]).toEqual([expect.stringMatching(single)]);
+        expect([...disk.files.values()]).toEqual(["Setup."]);
+      }
+    });
+  });
+
   it("keeps a rename made while the engine is still scanning the disk", async () => {
     const { device } = await setup();
     const diskA = new MemoryDisk();
