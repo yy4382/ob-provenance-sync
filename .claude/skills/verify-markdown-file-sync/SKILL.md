@@ -15,7 +15,7 @@ The rules, in `verification/markdown-file/MarkdownFile.tla`:
 
 ## Does my change touch this?
 
-Covered code. The model was last confirmed to describe this code at commit **SYNC_COMMIT** (sync commit):
+Covered code. The model was last confirmed to describe this code at commit **6234562** (sync commit):
 
 | Code | Model |
 | --- | --- |
@@ -29,7 +29,7 @@ Covered code. The model was last confirmed to describe this code at commit **SYN
 | `binding.ts` `attach` → `bindEditor(current)` + `loadFromCrdt`, `onYjs`, `push` | `OpenPane`, `BindTask`, `Observe` (pane follows the CRDT), `Type` |
 | `main.ts` vault `modify` event → `engine.onModify` | `EditorSave`, `WatcherFires`, `WriteRuns` append `"modify"` |
 
-Run `git diff SYNC_COMMIT -- apps/obsidian/src/sync/engine.ts apps/obsidian/src/sync/obsidian.ts apps/obsidian/src/editor/binding.ts apps/obsidian/src/main.ts`. If a hunk touches a row above, the model may no longer describe the code: update it (below) before you trust a result. Changes only in `SyncEngine` scan/rename/tree code (`scanDisk`, `detectRenames`, `syncTree`, binaries, the mirror) are not covered.
+Run `git diff 6234562 -- apps/obsidian/src/sync/engine.ts apps/obsidian/src/sync/obsidian.ts apps/obsidian/src/editor/binding.ts apps/obsidian/src/main.ts`. If a hunk touches a row above, the model may no longer describe the code: update it (below) before you trust a result. Changes only in `SyncEngine` scan/rename/tree code (`scanDisk`, `detectRenames`, `syncTree`, binaries, the mirror) are not covered.
 
 ## Run it
 
