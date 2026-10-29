@@ -1,5 +1,6 @@
 import diff from "fast-diff";
 import type * as Y from "yjs";
+import { runsOf } from "./attribution";
 import { toAttrs, type Provenance } from "./provenance";
 
 export function insertText(ytext: Y.Text, index: number, text: string, by: Provenance): void {
@@ -45,6 +46,63 @@ function meaningfulDiff(oldText: string, newText: string): diff.Diff[] {
 /** Makes `ytext` equal `next` with the smallest edit. Callers wrap this in a transaction. */
 export function setText(ytext: Y.Text, next: string, by: Provenance): void {
   rewriteRange(ytext, 0, ytext.toString(), next, by);
+}
+
+/**
+ * Makes `target` hold `source`'s text without losing who wrote it, for when
+ * two copies of one note become one (conflict copies, duplicate ids). Going
+ * through bare Markdown instead would mark every character it brings over as
+ * unknown. Text only `source` has arrives with its attributes. Text both have
+ * takes `source`'s author where `target` doesn't know one, and also where they
+ * disagree unless `keepText`, in which case `target`'s text stays as it is and
+ * only learns authors from `source`. Callers wrap this in a transaction.
+ */
+export function adoptText(target: Y.Text, source: Y.Text, keepText = false): void {
+  const ours = byChar(target);
+  const theirs = byChar(source);
+  let pos = 0;
+  let i = 0;
+  let j = 0;
+  for (const [op, chunk] of diff(target.toString(), source.toString())) {
+    const n = chunk.length;
+    if (op === diff.DELETE) {
+      if (keepText) pos += n;
+      else target.delete(pos, n);
+      i += n;
+    } else if (op === diff.INSERT) {
+      if (!keepText) {
+        for (const [from, to, p] of spans(theirs, j, j + n)) target.insert(pos + from - j, chunk.slice(from - j, to - j), toAttrs(p));
+        pos += n;
+      }
+      j += n;
+    } else {
+      const wanted = theirs.slice(j, j + n).map((p, k) => {
+        const mine = ours[i + k]!;
+        return p.author !== "unknown" && (mine.author === "unknown" || (!keepText && !sameAttrs(p, mine))) ? p : null;
+      });
+      for (const [from, to, p] of spans(wanted, 0, n)) if (p) target.format(pos + from, to - from, toAttrs(p));
+      pos += n;
+      i += n;
+      j += n;
+    }
+  }
+}
+
+/** Every character's provenance; characters of one run share one object. */
+function byChar(ytext: Y.Text): Provenance[] {
+  return runsOf(ytext).flatMap((r) => Array<Provenance>(r.to - r.from).fill(r.provenance));
+}
+
+const sameAttrs = (a: Provenance, b: Provenance) => JSON.stringify(toAttrs(a)) === JSON.stringify(toAttrs(b));
+
+/** Splits `items[from, to)` into stretches of the same item. */
+function* spans<T>(items: T[], from: number, to: number): Generator<[number, number, T]> {
+  for (let start = from; start < to; ) {
+    let end = start + 1;
+    while (end < to && items[end] === items[start]) end++;
+    yield [start, end, items[start]!];
+    start = end;
+  }
 }
 
 export class EditError extends Error {

@@ -1,5 +1,6 @@
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import {
+  adoptText,
   conflictPath,
   difference,
   fileDocName,
@@ -887,7 +888,13 @@ export class SyncEngine implements VaultDocs {
 
   private async dropDuplicate(loser: FileId, winner: FileId): Promise<void> {
     const path = this.onDisk.get(loser);
-    this.files.get(loser)?.destroy();
+    const dropped = this.files.get(loser);
+    // Same text, but the loser may know who wrote parts the winner has as unknown, e.g. one device's copy was imported from disk.
+    if (dropped && this.vaultIndex.get(winner)?.type === "markdown") {
+      const kept = this.openFile(winner, false);
+      kept.doc.transact(() => adoptText(kept.ytext, dropped.ytext, true));
+    }
+    dropped?.destroy();
     this.files.delete(loser);
     // If the winner isn't on disk yet, it takes over the loser's file; otherwise the next pass trashes that file.
     if (path !== undefined && !this.onDisk.has(winner)) {
@@ -1114,6 +1121,34 @@ export class SyncEngine implements VaultDocs {
       this.binaryHashes.delete(id);
       this.vaultIndex.doc.transact(() => this.vaultIndex.delete(id), FROM_DISK);
       this.saveMirror();
+    });
+  }
+
+  /**
+   * Resolves the conflict copy at `copy` into the note at `original` through
+   * their CRDTs, so the original keeps the copy's authors; copying the file's
+   * Markdown would mark all of it unknown. With `keepText` the original's
+   * text stays and only learns authors from the copy; otherwise it becomes
+   * the copy's text. The copy itself is left for the caller to trash.
+   * Resolves to false if either isn't a synced note, for the caller to fall
+   * back to plain file operations.
+   */
+  adoptCopy(original: string, copy: string, keepText: boolean): Promise<boolean> {
+    return this.enqueue(async () => {
+      const [target, source] = [original, copy].map((path) => {
+        const id = this.onDisk.idAt(path);
+        return id && this.vaultIndex.get(id)?.type === "markdown" ? this.files.get(id) : undefined;
+      });
+      if (!target?.loaded || !source?.loaded) return false;
+      // Either file may hold an edit whose modify event is still queued; the user decided on what the files hold.
+      for (const file of [target, source]) {
+        if ((await this.opts.disk.read(file.path!)) !== file.ytext.toJSON()) await file.onDiskModified();
+      }
+      target.doc.transact(() => adoptText(target.ytext, source.ytext, keepText));
+      this.log("info", `Resolved conflict copy ${copy} into the note, keeping its authors`, original);
+      // Written now, so a rescan of the conflict copies sees the result.
+      await target.flush();
+      return true;
     });
   }
 

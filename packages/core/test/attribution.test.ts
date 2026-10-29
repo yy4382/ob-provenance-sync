@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
+  adoptText,
   agentProvenance,
   attribute,
   humanProvenance,
@@ -113,6 +114,29 @@ describe("text edits", () => {
     expect(() => replaceText(t, "z", "c", bot)).toThrow(/not found/);
     expect(replaceText(t, "a", "c", bot, true)).toBe(2);
     expect(t.toString()).toBe("c b c");
+  });
+
+  it("adoptText brings a copy's text over with its authors", () => {
+    const t = text(["Kept. ", external], ["Dropped.", me]);
+    const copy = text(["Kept. ", dictated], ["Added.", bot]);
+    t.doc!.transact(() => adoptText(t, copy));
+    expect(t.toString()).toBe("Kept. Added.");
+    expect(kinds(t)).toEqual([
+      ["Kept.", "via-agent"],
+      ["Added.", "agent"],
+    ]);
+    expect(attribute(t)[0]!.contributors.map((c) => [c.why, c.device])).toEqual([["human-via-agent", "server"]]);
+  });
+
+  it("adoptText with keepText only teaches the target authors it doesn't know", () => {
+    const t = text(["Mine. ", me], ["Pasted in.", external]);
+    const copy = text(["Mine. ", bot], ["Pasted  in.", dictated]);
+    t.doc!.transact(() => adoptText(t, copy, true));
+    expect(t.toString()).toBe("Mine. Pasted in.");
+    expect(kinds(t)).toEqual([
+      ["Mine.", "human"],
+      ["Pasted in.", "via-agent"],
+    ]);
   });
 
   it("survives a round trip through a Yjs update", () => {

@@ -1,4 +1,4 @@
-import { agentProvenance, attribute, executeOp, fileDocName, humanProvenance, insertText, newFileId, TEXT_KEY } from "@provenance/core";
+import { agentProvenance, attribute, executeOp, fileDocName, humanProvenance, insertText, newFileId, TEXT_KEY, type FileId } from "@provenance/core";
 import * as Y from "yjs";
 import { afterEach, describe, expect, it } from "vitest";
 import { SyncEngine } from "../src/sync/engine";
@@ -140,6 +140,50 @@ describe("SyncEngine", () => {
     expect([...b.disk.files]).toEqual([["a.md", "Same everywhere."]]);
     expect(b.engine.vaultIndex.idOf("a.md")).toBe(a.engine.vaultIndex.idOf("a.md"));
     expect(b.engine.vaultIndex.entries()).toHaveLength(1);
+  });
+
+  it("keeps the authors of an identical copy it drops after two devices created one note", async () => {
+    const { device } = await setup();
+    const diskA = new MemoryDisk();
+    diskA.files.set("a.md", "Dictated line.");
+    const a = await device("mac", diskA);
+    const b = await device("phone");
+    await eventually(() => expect(b.disk.files.get("a.md")).toBe("Dictated line."));
+    // The copy that loses the path (the larger id) is the one that knows its author.
+    const loser = "ffffffff-ffff-4fff-bfff-ffffffffffff" as FileId;
+    await a.engine.updateText(loser, (t) => insertText(t, 0, "Dictated line.", agentProvenance("agent:andy", "human-via-agent", "read aloud", "mac")));
+    await a.engine.updateIndex((index) => index.set(loser, { type: "markdown", path: "a.md" }));
+    await eventually(() => expect(a.engine.vaultIndex.entries()).toHaveLength(1));
+    await eventually(() => expect(b.engine.vaultIndex.entries()).toHaveLength(1));
+    expect(a.engine.vaultIndex.idOf("a.md")).not.toBe(loser);
+    for (const { engine } of [a, b]) await eventually(() => expect(kindsOf(engine, "a.md")).toEqual([["Dictated line.", "via-agent", ["mac"]]]));
+    expect(attribute(b.engine.fileAt("a.md")!.ytext)[0]!.contributors.map((c) => [c.why, c.note])).toEqual([["human-via-agent", "read aloud"]]);
+    expect(a.disk.files.get("a.md")).toBe("Dictated line.");
+  });
+
+  it("resolves a conflict copy into its note without losing the copy's authors", async () => {
+    const { device } = await setup();
+    const diskA = new MemoryDisk();
+    diskA.files.set("n.md", "");
+    diskA.files.set("m.md", "Same line.");
+    const a = await device("mac", diskA);
+    const b = await device("phone");
+    const by = { agent: "agent:claude-code", why: "agent" } as const;
+    await executeOp(a.engine, { op: "create", path: "n (conflict 11111111).md", content: "Agent line.", by });
+    await executeOp(a.engine, { op: "create", path: "m (conflict 22222222).md", content: "Same line.", by });
+    await a.engine.settle();
+
+    expect(await a.engine.adoptCopy("n.md", "n (conflict 11111111).md", false)).toBe(true);
+    expect(await a.engine.adoptCopy("m.md", "m (conflict 22222222).md", true)).toBe(true);
+    // Written before it resolves, so a rescan of the conflict copies sees it.
+    expect(a.disk.files.get("n.md")).toBe("Agent line.");
+    await a.disk.trash("n (conflict 11111111).md");
+    await a.disk.trash("m (conflict 22222222).md");
+    await eventually(() => expect(Object.fromEntries(b.disk.files)).toEqual({ "n.md": "Agent line.", "m.md": "Same line." }));
+    for (const { engine } of [a, b]) {
+      await eventually(() => expect(kindsOf(engine, "n.md")).toEqual([["Agent line.", "agent", ["mac"]]]));
+      await eventually(() => expect(kindsOf(engine, "m.md")).toEqual([["Same line.", "agent", ["mac"]]]));
+    }
   });
 
   it("works with no server configured", async () => {

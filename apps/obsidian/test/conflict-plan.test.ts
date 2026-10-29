@@ -22,6 +22,9 @@ function vault(files: Record<string, string>) {
       disk.get(original)!.text = disk.get(copy)!.text;
       disk.delete(copy);
     },
+    async dropSame(_original, copy) {
+      disk.delete(copy);
+    },
   };
   const texts = () => Object.fromEntries([...disk].map(([p, f]) => [p, f.text]));
   return { ops, texts };

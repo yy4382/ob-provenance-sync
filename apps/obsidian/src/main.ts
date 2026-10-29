@@ -159,7 +159,7 @@ export default class ProvenancePlugin extends Plugin {
   }
 
   resolveConflicts() {
-    new ConflictsModal(this.app, (path) => new ObsidianDisk(this.app).accepts(path)).open();
+    new ConflictsModal(this.app, (path) => new ObsidianDisk(this.app).accepts(path), () => this.engine).open();
   }
 
   /** What the event log view shows above the events, so the user can check the settings in effect. */

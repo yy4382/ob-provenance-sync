@@ -1,9 +1,10 @@
 import { conflictOriginal } from "@provenance/core";
 import { Modal, Notice, Setting, TFile, type App } from "obsidian";
 import { planConflicts, resolveSafe, SAFE, type ConflictFiles, type Content, type CopyInfo, type Verdict } from "./conflict-plan";
-import { sha256 } from "./sync/engine";
+import { sha256, type SyncEngine } from "./sync/engine";
 
-function vaultFiles(app: App, accepts: (path: string) => boolean): ConflictFiles {
+/** `engine` is null while sync isn't running; notes are then resolved as plain files, and their authors aren't carried over. */
+function vaultFiles(app: App, accepts: (path: string) => boolean, engine: () => SyncEngine | null): ConflictFiles {
   const file = (path: string) => {
     const f = app.vault.getFileByPath(path);
     if (!f) throw new Error(`${path} no longer exists`);
@@ -30,9 +31,13 @@ function vaultFiles(app: App, accepts: (path: string) => boolean): ConflictFiles
     async replace(original, copy) {
       const o = file(original);
       const c = file(copy);
-      if (c.extension === "md") await app.vault.modify(o, await app.vault.read(c));
-      else await app.vault.modifyBinary(o, await app.vault.readBinary(c));
+      if (c.extension !== "md") await app.vault.modifyBinary(o, await app.vault.readBinary(c));
+      else if (!(await engine()?.adoptCopy(original, copy, false))) await app.vault.modify(o, await app.vault.read(c));
       await app.fileManager.trashFile(c);
+    },
+    async dropSame(original, copy) {
+      if (file(copy).extension === "md" && app.vault.getFileByPath(original)) await engine()?.adoptCopy(original, copy, true);
+      await app.fileManager.trashFile(file(copy));
     },
   };
 }
@@ -66,9 +71,9 @@ const MANUAL_ROWS = 200;
 export class ConflictsModal extends Modal {
   private readonly files: ConflictFiles;
 
-  constructor(app: App, accepts: (path: string) => boolean) {
+  constructor(app: App, accepts: (path: string) => boolean, engine: () => SyncEngine | null) {
     super(app);
-    this.files = vaultFiles(app, accepts);
+    this.files = vaultFiles(app, accepts, engine);
     this.setTitle("Conflict copies");
   }
 

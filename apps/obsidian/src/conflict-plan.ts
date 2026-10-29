@@ -84,6 +84,8 @@ export interface ConflictFiles {
   rename(from: string, to: string): Promise<void>;
   /** Puts the copy's content into the original, then trashes the copy. */
   replace(original: string, copy: string): Promise<void>;
+  /** Trashes a copy whose content the original already has, after the original learns who wrote it. */
+  dropSame(original: string, copy: string): Promise<void>;
 }
 
 export const SAFE: ReadonlySet<Verdict> = new Set(["same", "copy-empty", "original-empty", "orphan"]);
@@ -91,6 +93,7 @@ export const SAFE: ReadonlySet<Verdict> = new Set(["same", "copy-empty", "origin
 export async function applyPlan(files: ConflictFiles, plan: Plan): Promise<void> {
   if (plan.verdict === "orphan") await files.rename(plan.copy, plan.original);
   else if (plan.verdict === "original-empty") await files.replace(plan.original, plan.copy);
+  else if (plan.verdict === "same") await files.dropSame(plan.original, plan.copy);
   else await files.trash(plan.copy);
 }
 
