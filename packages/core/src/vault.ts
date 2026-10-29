@@ -8,6 +8,13 @@ export type FileEntry =
 
 export const TEXT_KEY = "content";
 
+/** Gives a new note's document state even when blank, so a document with none reads as never stored, not as blank. */
+export function markNote(doc: Y.Doc): void {
+  doc.getMap("note").set("created", true);
+}
+
+export const hasState = (doc: Y.Doc) => doc.store.clients.size > 0;
+
 export const indexDocName = (vault: string) => `${vault}/index`;
 export const fileDocName = (vault: string, id: FileId) => `${vault}/md/${id}`;
 

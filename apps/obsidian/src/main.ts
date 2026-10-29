@@ -1,5 +1,5 @@
 import { humanId } from "@provenance/core";
-import { MarkdownView, Notice, Platform, Plugin, TAbstractFile, TFile } from "obsidian";
+import { MarkdownView, Notice, Platform, Plugin, TAbstractFile, TFile, type App } from "obsidian";
 import type { EditorView } from "@codemirror/view";
 import { around } from "monkey-around";
 import { startBridge } from "./bridge";
@@ -12,15 +12,35 @@ import { SyncEngine, type SyncStatus } from "./sync/engine";
 import { httpBlobs, indexedDbPersistence, ObsidianDisk } from "./sync/obsidian";
 
 const CHECK_EVERY = 10 * 60_000;
+const OTHER_SYNC_CHECK_EVERY = 5_000;
 const LEGACY_TOKEN_SECRET = "provenance-sync-device-token";
 
-const STATUS_TEXT: Record<SyncStatus | "error", string> = {
+type Status = SyncStatus | "error" | "disabled";
+
+const STATUS_TEXT: Record<Status, string> = {
+  disabled: "Provenance: off (another sync is on)",
   connected: "Provenance: synced",
   connecting: "Provenance: connecting",
   offline: "Provenance: offline",
   "local-only": "Provenance: local only",
   error: "Provenance: error",
 };
+
+/**
+ * Other tools that sync this vault's files. Each turns this plugin's renames,
+ * trashes and writes on one device into file events on the others, which
+ * this plugin takes for the user's own and syncs again, so one mistake
+ * reaches every device. These are Obsidian internals, read defensively.
+ */
+function otherSyncs(app: App): string[] {
+  const internal = (app as unknown as { internalPlugins?: { getEnabledPluginById?(id: string): unknown } }).internalPlugins;
+  const community = (app as unknown as { plugins?: { enabledPlugins?: Set<string> } }).plugins?.enabledPlugins;
+  const found: string[] = [];
+  if (internal?.getEnabledPluginById?.("sync")) found.push("Obsidian Sync");
+  if (community?.has("remotely-save")) found.push("Remotely Save");
+  if (community?.has("obsidian-git")) found.push("Obsidian Git");
+  return found;
+}
 
 function cmOf(view: MarkdownView): EditorView | null {
   return (view.editor as unknown as { cm?: EditorView }).cm ?? null;
@@ -32,7 +52,9 @@ export default class ProvenancePlugin extends Plugin {
   private disk: ObsidianDisk | null = null;
   private stopBridge: (() => Promise<void>) | null = null;
   private statusEl: HTMLElement | null = null;
-  private status: SyncStatus | "error" = "connecting";
+  private status: Status = "connecting";
+  /** The other sync tools that kept sync off at the last start, joined; "" if none. */
+  private blockedBy = "";
   private mcpCliPath: string | null = null;
   /** Restarts run one after another, so two quick reconnects never leave two engines running. */
   private restarting: Promise<void> = Promise.resolve();
@@ -103,6 +125,12 @@ export default class ProvenancePlugin extends Plugin {
         }),
       );
       void this.restartSync();
+      // Another sync may be turned on or off at any time; Obsidian has no event for it.
+      this.registerInterval(
+        window.setInterval(() => {
+          if (otherSyncs(this.app).join(", ") !== this.blockedBy) void this.restartSync();
+        }, OTHER_SYNC_CHECK_EVERY),
+      );
       if (Platform.isDesktopApp) {
         installMcpCli(this.app, this.manifest.dir!)
           .then((path) => (this.mcpCliPath = path))
@@ -161,7 +189,7 @@ export default class ProvenancePlugin extends Plugin {
     document.body.toggleClass("prov-colors", this.settings.showColors);
   }
 
-  private setStatus(status: SyncStatus | "error") {
+  private setStatus(status: Status) {
     this.status = status;
     this.statusEl?.setText(STATUS_TEXT[status]);
     this.log.changed();
@@ -193,6 +221,14 @@ export default class ProvenancePlugin extends Plugin {
 
   private async startSync() {
     await this.stopSync();
+    const others = otherSyncs(this.app);
+    this.blockedBy = others.join(", ");
+    if (others.length) {
+      const message = `Sync is off while ${this.blockedBy} also syncs this vault: two sync tools moving the same files can delete notes on every device. Disable ${others.length > 1 ? "them" : "it"} and sync starts again.`;
+      this.log.add({ level: "error", message });
+      new Notice(`Provenance: ${message}`, 0);
+      return this.setStatus("disabled");
+    }
     const s = this.settings;
     let author;
     try {

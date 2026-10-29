@@ -9,7 +9,7 @@ export interface CopyInfo {
   mtime: number;
 }
 
-/** What to do with one conflict copy. Every kind but "different" and "waiting" is safe to apply in bulk. */
+/** What to do with one conflict copy. Only the kinds in SAFE may be applied in bulk. */
 export type Verdict =
   /** Same as the original, or different only in line endings, invisible characters or whitespace. */
   | "same"
@@ -19,6 +19,8 @@ export type Verdict =
   | "original-empty"
   /** Nothing is at the original path any more: the copy moves back there. */
   | "orphan"
+  /** Blank, nothing is at the original path, and no copy has content: only the user can choose. */
+  | "orphan-empty"
   /** Another copy of the same original goes first; this one is compared with the result afterwards. */
   | "waiting"
   /** Both have content that differs: only the user can choose. */
@@ -37,7 +39,8 @@ const size = (content: Content) => (typeof content === "string" ? content.trim()
  * Decides every conflict copy given what is at each original path
  * (`originals.get(path)`, undefined if nothing is there). When the original is missing or blank, only one copy
  * per original may replace it, the one with the most content and then the
- * newest; its siblings wait, so they never overwrite each other.
+ * newest; its siblings wait, so they never overwrite each other. A blank copy
+ * never replaces a missing original.
  */
 export function planConflicts(copies: CopyInfo[], originals: Map<string, Content | undefined>): Plan[] {
   const groups = new Map<string, CopyInfo[]>();
@@ -51,9 +54,13 @@ export function planConflicts(copies: CopyInfo[], originals: Map<string, Content
     const content = originals.get(original);
     const plan = (copy: CopyInfo, verdict: Verdict) => plans.push({ copy: copy.path, original, verdict });
     if (content === undefined || blank(content)) {
-      const candidates = content === undefined ? group : group.filter((c) => !blank(c.content));
+      const candidates = group.filter((c) => !blank(c.content));
       const leader = [...candidates].sort((a, b) => size(b.content) - size(a.content) || b.mtime - a.mtime)[0];
       for (const copy of group) {
+        if (!leader && content === undefined) {
+          plan(copy, "orphan-empty");
+          continue;
+        }
         if (copy === leader) plan(copy, content === undefined ? "orphan" : typeof copy.content === "string" ? "original-empty" : "different");
         else if (content !== undefined && blank(copy.content)) plan(copy, "same");
         else plan(copy, "waiting");

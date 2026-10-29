@@ -3,7 +3,7 @@ import type * as Y from "yjs";
 import { attribute } from "./attribution";
 import { agentIdSchema, agentProvenance, noteSchema, type SegmentKind } from "./provenance";
 import { EditError, insertText, replaceText } from "./text";
-import { isMarkdownPath, newFileId, type FileId, type VaultIndex } from "./vault";
+import { isMarkdownPath, markNote, newFileId, type FileId, type VaultIndex } from "./vault";
 
 /** Only Obsidian's own normalized form, so one file can never be reached under two spellings. */
 const pathSchema = z
@@ -131,7 +131,10 @@ export async function executeOp(docs: VaultDocs, req: OpRequest): Promise<OpResu
       if ((await docs.index()).idOf(req.path)) throw new OpError("exists", `file already exists: ${req.path}`);
       const by = agentProvenance(req.by.agent, req.by.why, req.by.note ?? null, docs.device);
       const id = newFileId();
-      await docs.updateText(id, (t) => insertText(t, 0, req.content, by));
+      await docs.updateText(id, (t) => {
+        markNote(t.doc!);
+        insertText(t, 0, req.content, by);
+      });
       await docs.updateIndex((index) => index.set(id, { type: "markdown", path: req.path }));
       return { op: "create" };
     }

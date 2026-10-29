@@ -39,7 +39,7 @@ function vaultFiles(app: App, accepts: (path: string) => boolean): ConflictFiles
 
 const nCopies = (n: number) => `${n} ${n === 1 ? "copy" : "copies"}`;
 
-const SAFE_ACTIONS: Record<Exclude<Verdict, "waiting" | "different">, { name: (n: number) => string; desc: string }> = {
+const SAFE_ACTIONS: Record<Exclude<Verdict, "waiting" | "different" | "orphan-empty">, { name: (n: number) => string; desc: string }> = {
   same: {
     name: (n) => `Delete ${nCopies(n)} that match the original`,
     desc: "They differ at most in whitespace, line endings or invisible characters. The original stays as it is.",
@@ -91,9 +91,10 @@ export class ConflictsModal extends Modal {
     const safe = plans.filter((p) => SAFE.has(p.verdict));
     const waiting = of("waiting").length;
     const different = of("different");
+    const emptyOrphans = of("orphan-empty");
 
     contentEl.createEl("p", {
-      text: `${nCopies(plans.length)}: ${safe.length} can be resolved safely, ${waiting} wait for another copy of the same note, ${different.length} need you to choose.`,
+      text: `${nCopies(plans.length)}: ${safe.length} can be resolved safely, ${waiting} wait for another copy of the same note, ${different.length + emptyOrphans.length} need you to choose.`,
     });
     if (safe.length) {
       new Setting(contentEl)
@@ -109,6 +110,21 @@ export class ConflictsModal extends Modal {
         .setDesc(action.desc)
         .addButton((b) => b.setButtonText("Apply").onClick(() => this.resolve(new Set([verdict]))));
     }
+
+    if (emptyOrphans.length) {
+      contentEl.createEl("h3", { text: `Empty, with no original (${emptyOrphans.length})` });
+      contentEl.createEl("p", {
+        text: "Nothing is at the original path and no copy has content. The note's content may never have synced: check the trash or a backup before you choose.",
+      });
+    }
+    for (const plan of emptyOrphans.slice(0, MANUAL_ROWS)) {
+      new Setting(contentEl)
+        .setName(plan.copy)
+        .setDesc(`Copy of ${plan.original}`)
+        .addButton((b) => b.setButtonText("Delete").onClick(() => this.act(() => this.files.trash(plan.copy))))
+        .addButton((b) => b.setButtonText("Restore empty").onClick(() => this.act(() => this.files.rename(plan.copy, plan.original))));
+    }
+    if (emptyOrphans.length > MANUAL_ROWS) contentEl.createEl("p", { text: `…and ${emptyOrphans.length - MANUAL_ROWS} more. Resolve some to see the rest.` });
 
     if (different.length) contentEl.createEl("h3", { text: `Different content (${different.length})` });
     for (const plan of different.slice(0, MANUAL_ROWS)) {

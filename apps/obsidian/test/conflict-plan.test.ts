@@ -76,3 +76,11 @@ it("keeps going past a copy that fails", async () => {
   expect(failed).toEqual([["a (conflict 11111111).md", "locked"]]);
   expect(texts()).toEqual({ "a (conflict 11111111).md": "A", "b.md": "B" });
 });
+
+it("leaves blank copies of a missing original for the user, rather than restoring one", async () => {
+  const { ops, texts } = vault({ "a (conflict 11111111).md": "", "a (conflict 22222222).md": " \n" });
+  const { copies, originals } = await ops.scan();
+  expect(planConflicts(copies, originals).map((p) => p.verdict)).toEqual(["orphan-empty", "orphan-empty"]);
+  expect(await resolveSafe(ops)).toEqual({ resolved: 0, failed: [] });
+  expect(Object.keys(texts())).toEqual(["a (conflict 11111111).md", "a (conflict 22222222).md"]);
+});

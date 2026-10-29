@@ -1,4 +1,4 @@
-import { agentProvenance, attribute, executeOp, fileDocName, humanProvenance, insertText, TEXT_KEY } from "@provenance/core";
+import { agentProvenance, attribute, executeOp, fileDocName, humanProvenance, insertText, newFileId, TEXT_KEY } from "@provenance/core";
 import * as Y from "yjs";
 import { afterEach, describe, expect, it } from "vitest";
 import { SyncEngine } from "../src/sync/engine";
@@ -425,6 +425,49 @@ describe("SyncEngine", () => {
     await Promise.all([a.engine.settle(), b.engine.settle()]);
     expect(a.engine.vaultIndex.entries().map(([, e]) => e.path)).toEqual(["p.md"]);
     expect([...a.disk.files]).toEqual([["p.md", "New."]]);
+  });
+
+  it("places a blank note on another device", async () => {
+    const { device } = await setup();
+    const diskA = new MemoryDisk();
+    diskA.files.set("blank.md", "");
+    await device("mac", diskA);
+    const b = await device("phone");
+    await eventually(() => expect(b.disk.files.get("blank.md")).toBe(""));
+  });
+
+  it("does not turn a note the server has no content for into an empty file, and places it once content arrives", async () => {
+    const { device } = await setup();
+    const a = await device("mac");
+    // An older version's upload that failed: the index names the note, the server never got its document.
+    const id = newFileId();
+    a.engine.vaultIndex.doc.transact(() => a.engine.vaultIndex.set(id, { type: "markdown", path: "lost.md" }));
+    const b = await device("phone");
+    await sleep(300);
+    await b.engine.settle();
+    expect(b.disk.files.has("lost.md")).toBe(false);
+    expect(await b.engine.check()).toBeGreaterThan(0);
+    expect(b.disk.files.has("lost.md")).toBe(false);
+
+    await a.engine.updateText(id, (t) => insertText(t, 0, "Recovered.", humanProvenance("human:chris", "mac")));
+    await eventually(async () => {
+      await b.engine.check();
+      expect(b.disk.files.get("lost.md")).toBe("Recovered.");
+    });
+  });
+
+  it("adopts a file put where a note the server has no content for belongs", async () => {
+    const { device } = await setup();
+    const a = await device("mac");
+    const id = newFileId();
+    a.engine.vaultIndex.doc.transact(() => a.engine.vaultIndex.set(id, { type: "markdown", path: "lost.md" }));
+    const b = await device("phone");
+    await sleep(300);
+    await b.disk.write("lost.md", "From the backup.");
+    await eventually(() => expect(a.engine.files.get(id)?.ytext.toJSON()).toBe("From the backup."));
+    await b.engine.settle();
+    expect(b.engine.vaultIndex.entries().map(([i, e]) => [i, e.path])).toEqual([[id, "lost.md"]]);
+    expect([...b.disk.files.keys()]).toEqual(["lost.md"]);
   });
 
   it("stays connected with more notes than the server lets wait for authentication by default", async () => {

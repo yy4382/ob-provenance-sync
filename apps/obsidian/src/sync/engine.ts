@@ -3,9 +3,11 @@ import {
   conflictPath,
   difference,
   fileDocName,
+  hasState,
   humanProvenance,
   indexDocName,
   isMarkdownPath,
+  markNote,
   newFileId,
   pairRenames,
   repairedConflictPath,
@@ -200,6 +202,8 @@ export class MarkdownFile {
       await this.engine.createFromDisk(copy, disk, true);
       return this.writeNow(disk);
     }
+    // The file here is the note, even if blank, so the server learns it exists.
+    if (!hasState(this.doc)) markNote(this.doc);
     this.applyDisk(disk);
     this.engine.retryTree();
   }
@@ -315,6 +319,8 @@ export class MarkdownFile {
   async writeNow(expected: string | null | undefined = this.base?.text): Promise<void> {
     const path = this.path;
     if (path === undefined || this.editors > 0 || this.destroyed || expected === undefined) return;
+    // A blank note has state (markNote); none means the server never got this note's content.
+    if (expected === null && !hasState(this.doc)) return this.engine.log("error", `Not placing note ${short(this.id)}: the server has no content for it`, path);
     const text = this.ytext.toJSON();
     if (expected !== null && this.base?.text === text) return;
     const snapshot = Y.snapshot(this.doc);
@@ -896,6 +902,7 @@ export class SyncEngine implements VaultDocs {
     const id = newFileId();
     this.onDisk.set(id, path);
     const file = this.openFile(id, true);
+    markNote(file.doc);
     file.applyDisk(text);
     this.vaultIndex.doc.transact(() => this.vaultIndex.set(id, { type: "markdown", path }), FROM_DISK);
     if (alsoWrite) await this.opts.disk.write(path, text);
@@ -998,6 +1005,8 @@ export class SyncEngine implements VaultDocs {
   onCreate(path: string, binary: boolean): Promise<void> {
     return this.enqueue(async () => {
       this.retryTree();
+      const held = this.fileAt(path);
+      if (this.started && held?.loaded && !hasState(held.doc)) return held.reconcileDisk();
       // Gone already: the rename or deletion queued after this event deals with it.
       if (!this.started || this.idOnDisk(path) || !(await this.opts.disk.exists(path))) return;
       this.log("debug", "Created here", path);
