@@ -212,7 +212,13 @@ class ProvenanceView {
       if (!open || open.kind === "unknown") return;
       const { from, to, kind } = open;
       builder.add(from, to, marks[kind]);
-      if (to - from === 1) builder.add(from, to, edges[kind].both);
+      // A band that begins a line stays flush with the text column, so a
+      // wrapped paragraph keeps a straight left edge.
+      const startsLine = /^\s*$/.test(doc.sliceString(doc.lineAt(from).from, from));
+      if (startsLine) {
+        const tail = doc.sliceString(Math.max(from, to - 16), to);
+        builder.add(to - tail.length + findClusterBreak(tail, tail.length, false), to, edges[kind].end);
+      } else if (to - from === 1) builder.add(from, to, edges[kind].both);
       else {
         // Whole characters, so an emoji at either end isn't cut in half.
         const head = doc.sliceString(from, Math.min(to, from + 16));
