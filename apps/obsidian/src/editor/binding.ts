@@ -1,5 +1,5 @@
-import { Annotation, findClusterBreak, RangeSetBuilder, StateEffect, Transaction, type ChangeSpec, type Extension } from "@codemirror/state";
-import { Decoration, EditorView, hoverTooltip, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
+import { Annotation, EditorSelection, RangeSetBuilder, StateEffect, Transaction, type ChangeSpec, type Extension } from "@codemirror/state";
+import { Decoration, EditorView, hoverTooltip, layer, RectangleMarker, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { attribute, insertText, type Segment } from "@provenance/core";
 import diff from "fast-diff";
 import { editorInfoField } from "obsidian";
@@ -16,21 +16,7 @@ const marks = {
   mixed: Decoration.mark({ class: "prov-mixed" }),
 } as const;
 
-type Edge = "start" | "end" | "both";
-
-/**
- * The first and last characters of a band, which draw its tint a little past
- * the glyphs. Bold, links and code split the band's own mark into pieces, so
- * only these know where the band really begins and ends.
- */
-const edgeMark = (kind: keyof typeof marks, edge: Edge) =>
-  Decoration.mark({ class: `prov-edge prov-edge-${edge}`, attributes: { style: `--prov-edge: var(--prov-${kind})` } });
-const edges = Object.fromEntries(
-  Object.keys(marks).map((kind) => [
-    kind,
-    { start: edgeMark(kind as keyof typeof marks, "start"), end: edgeMark(kind as keyof typeof marks, "end"), both: edgeMark(kind as keyof typeof marks, "both") },
-  ]),
-) as Record<keyof typeof marks, Record<Edge, Decoration>>;
+type Band = { from: number; to: number; kind: keyof typeof marks };
 
 /**
  * Every pane showing a file pushes the edits made in it. Obsidian copies each
@@ -79,6 +65,8 @@ const engine = () => currentEngine();
 class ProvenanceView {
   decorations: DecorationSet = Decoration.none;
   segments: Segment[] = [];
+  /** Runs of one kind on one line, drawn by the band layer. */
+  bands: Band[] = [];
   file: MarkdownFile | null = null;
   private path: string | null = null;
   release: (() => void) | null = null;
@@ -199,6 +187,7 @@ class ProvenanceView {
     const doc = this.view.state.doc;
     if (!file || file.ytext.length !== doc.length) {
       this.segments = [];
+      this.bands = [];
       this.decorations = Decoration.none;
       return;
     }
@@ -206,26 +195,10 @@ class ProvenanceView {
     // Segments leave out the spaces between sentences. Color those too when the
     // sentences on either side match, so a paragraph reads as one band, and
     // keep the gap only where the kind changes.
-    const builder = new RangeSetBuilder<Decoration>();
+    this.bands = [];
     let open: { from: number; to: number; kind: Segment["kind"] } | null = null;
     const flush = () => {
-      if (!open || open.kind === "unknown") return;
-      const { from, to, kind } = open;
-      builder.add(from, to, marks[kind]);
-      // A band that begins a line stays flush with the text column, so a
-      // wrapped paragraph keeps a straight left edge.
-      const startsLine = /^\s*$/.test(doc.sliceString(doc.lineAt(from).from, from));
-      if (startsLine) {
-        const tail = doc.sliceString(Math.max(from, to - 16), to);
-        builder.add(to - tail.length + findClusterBreak(tail, tail.length, false), to, edges[kind].end);
-      } else if (to - from === 1) builder.add(from, to, edges[kind].both);
-      else {
-        // Whole characters, so an emoji at either end isn't cut in half.
-        const head = doc.sliceString(from, Math.min(to, from + 16));
-        const tail = doc.sliceString(Math.max(from, to - 16), to);
-        builder.add(from, from + findClusterBreak(head, 0), edges[kind].start);
-        builder.add(to - tail.length + findClusterBreak(tail, tail.length, false), to, edges[kind].end);
-      }
+      if (open && open.kind !== "unknown") this.bands.push({ from: open.from, to: open.to, kind: open.kind });
     };
     for (const s of this.segments) {
       if (open && open.kind === s.kind && /^[ \t]*$/.test(doc.sliceString(open.to, s.from))) open.to = s.to;
@@ -235,6 +208,10 @@ class ProvenanceView {
       }
     }
     flush();
+    // The tint itself is drawn by the band layer. The marks only tell inline
+    // code which kind it sits in, since its pill would hide the tint below.
+    const builder = new RangeSetBuilder<Decoration>();
+    for (const b of this.bands) builder.add(b.from, b.to, marks[b.kind]);
     this.decorations = builder.finish();
   }
 
@@ -244,6 +221,50 @@ class ProvenanceView {
 }
 
 const plugin = ViewPlugin.fromClass(ProvenanceView, { decorations: (v) => v.decorations });
+
+/**
+ * Draws each band the way a selection is drawn: one rectangle per visual
+ * line, so a wrapped band has a straight left edge, its inner lines reach
+ * the right edge, and only its last line stops at the text. Marks can't do
+ * this: Obsidian splits them at bold, links and code, and they hug the glyphs.
+ */
+const bandLayer = layer({
+  above: false,
+  class: "prov-band-layer",
+  update: (u) => u.docChanged || u.viewportChanged || u.transactions.some((tr) => tr.effects.some((e) => e.is(refresh))),
+  markers(view) {
+    const bands = view.plugin(plugin)?.bands ?? [];
+    const { from, to } = view.viewport;
+    return bands.filter((b) => b.to > from && b.from < to).flatMap((b) => bandRects(view, b));
+  },
+});
+
+function bandRects(view: EditorView, band: Band): RectangleMarker[] {
+  const className = `prov-band prov-band-${band.kind}`;
+  const rects = RectangleMarker.forRange(view, className, EditorSelection.range(band.from, band.to)) as RectangleMarker[];
+  const node = view.domAtPos(band.from).node;
+  const line = (node instanceof HTMLElement ? node : node.parentElement)?.closest<HTMLElement>(".cm-line");
+  if (!rects.length || !line) return rects;
+  // forRange runs inner lines across the whole editor. Bring them to this
+  // line's own text column, which a list item indents.
+  const style = getComputedStyle(line);
+  const box = line.getBoundingClientRect();
+  const scroller = view.scrollDOM.getBoundingClientRect();
+  const base = scroller.left - view.scrollDOM.scrollLeft;
+  const left = box.left + parseFloat(style.paddingLeft) - base;
+  const right = box.right - parseFloat(style.paddingRight) - base;
+  // Rectangles cover the glyphs' height. Grow the first and last by the
+  // leftover line spacing so a band is as tall as its lines.
+  const first = rects[0]!;
+  const pad = Math.max(0, (parseFloat(style.lineHeight) - first.height) / 2);
+  return rects.map((r, i) => {
+    const l = i > 0 ? left : r.left;
+    const rt = i < rects.length - 1 ? right : r.left + (r.width ?? 0);
+    const top = i === 0 ? r.top - pad : r.top;
+    const bottom = r.top + r.height + (i === rects.length - 1 ? pad : 0);
+    return new RectangleMarker(className, l, top, Math.max(0, rt - l), bottom - top);
+  });
+}
 
 export function segmentAt(view: EditorView, pos: number): Segment | null {
   return view.plugin(plugin)?.segments.find((s) => s.from <= pos && pos <= s.to) ?? null;
@@ -256,7 +277,7 @@ export function provenanceExtension(getEngine: () => SyncEngine | null): Extensi
     if (!segment) return null;
     return { pos: segment.from, end: segment.to, above: true, create: () => ({ dom: renderProvenance(segment) }) };
   });
-  return [plugin, hover];
+  return [plugin, bandLayer, hover];
 }
 
 const KIND_LABEL: Record<Segment["kind"], string> = {

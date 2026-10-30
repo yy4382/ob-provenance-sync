@@ -28,53 +28,34 @@ body {
 }
 
 /*
- * A span's background covers only the glyphs' height, leaving a stripe of
- * line spacing between wrapped lines. Padding the leftover half-leading on
- * both sides closes it without moving any text.
+ * Bands are drawn behind the text, one rectangle per visual line. Each gets
+ * a little room past the text on both sides; padding on a content-box adds
+ * to the width the editor measured, and the margin keeps it centred.
  */
-body.prov-colors :is(.prov-human, .prov-via-agent, .prov-agent, .prov-mixed, .prov-edge) {
-  padding-block: max(0px, calc((1lh - 1.2em) / 2));
+.prov-band-layer {
+  z-index: -1;
 }
+
+body:not(.prov-colors) .prov-band-layer {
+  display: none;
+}
+
+.prov-band-layer .prov-band {
+  --prov-bleed: 3px;
+  box-sizing: content-box;
+  padding-inline: var(--prov-bleed);
+  margin-left: calc(-1 * var(--prov-bleed));
+}
+
+.prov-band-human { background-color: var(--prov-human); }
+.prov-band-via-agent { background-color: var(--prov-via-agent); }
+.prov-band-agent { background-color: var(--prov-agent); }
+.prov-band-mixed { background-color: var(--prov-mixed); }
 
 /*
- * Side room past the first and last glyph of a band. A shadow, unlike
- * padding, leaves the text where it is and paints only outside the box, so
- * it never doubles the tint underneath.
+ * Inline code draws its own pill around the text. It would hide the band
+ * behind it, so tint the pill itself over its usual background.
  */
-body.prov-colors {
-  --prov-bleed: 0.2em;
-}
-
-body.prov-colors .prov-edge-start {
-  border-radius: 3px 0 0 3px;
-  box-shadow: calc(-1 * var(--prov-bleed)) 0 0 var(--prov-edge);
-}
-
-body.prov-colors .prov-edge-end {
-  border-radius: 0 3px 3px 0;
-  box-shadow: var(--prov-bleed) 0 0 var(--prov-edge);
-}
-
-body.prov-colors .prov-edge-both {
-  border-radius: 3px;
-  box-shadow: calc(-1 * var(--prov-bleed)) 0 0 var(--prov-edge), var(--prov-bleed) 0 0 var(--prov-edge);
-}
-
-body.prov-colors .prov-human { background-color: var(--prov-human); }
-body.prov-colors .prov-via-agent { background-color: var(--prov-via-agent); }
-body.prov-colors .prov-agent { background-color: var(--prov-agent); }
-body.prov-colors .prov-mixed { background-color: var(--prov-mixed); }
-
-/*
- * Inline code draws its own pill around the text. Tint the whole pill over
- * its usual background instead of a box inside it, so the code keeps its
- * shape and the tint runs on into the prose beside it.
- */
-body.prov-colors .cm-inline-code :is(.prov-human, .prov-via-agent, .prov-agent, .prov-mixed) {
-  padding-block: 0;
-  background-color: transparent;
-}
-
 body.prov-colors .cm-inline-code:has(.prov-human) { --prov-code-tint: var(--prov-human); }
 body.prov-colors .cm-inline-code:has(.prov-via-agent) { --prov-code-tint: var(--prov-via-agent); }
 body.prov-colors .cm-inline-code:has(.prov-agent) { --prov-code-tint: var(--prov-agent); }
