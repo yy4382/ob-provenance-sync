@@ -243,7 +243,7 @@ function bandRects(view: EditorView, band: Band): RectangleMarker[] {
   const className = `prov-band prov-band-${band.kind}`;
   const rects = RectangleMarker.forRange(view, className, EditorSelection.range(band.from, band.to)) as RectangleMarker[];
   const node = view.domAtPos(band.from).node;
-  const line = (node instanceof HTMLElement ? node : node.parentElement)?.closest<HTMLElement>(".cm-line");
+  const line = (node.instanceOf(HTMLElement) ? node : node.parentElement)?.closest<HTMLElement>(".cm-line");
   if (!rects.length || !line) return rects;
   // forRange runs inner lines across the whole editor. Bring them to this
   // line's own text column, which a list item indents.
