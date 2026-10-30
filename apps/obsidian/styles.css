@@ -17,10 +17,14 @@ body {
   --prov-mixed: oklch(var(--prov-l) var(--prov-c) var(--prov-hue-mixed) / var(--prov-alpha));
 }
 
+/*
+ * On a dark page a light tint lifts the background toward the text and
+ * washes it out. A darker, more saturated one shifts only the hue.
+ */
 .theme-dark {
-  --prov-l: 0.75;
-  --prov-c: 0.09;
-  --prov-alpha: 0.09;
+  --prov-l: 0.5;
+  --prov-c: 0.11;
+  --prov-alpha: 0.16;
 }
 
 /*
@@ -28,8 +32,32 @@ body {
  * line spacing between wrapped lines. Padding the leftover half-leading on
  * both sides closes it without moving any text.
  */
-body.prov-colors :is(.prov-human, .prov-via-agent, .prov-agent, .prov-mixed) {
+body.prov-colors :is(.prov-human, .prov-via-agent, .prov-agent, .prov-mixed, .prov-edge) {
   padding-block: max(0px, calc((1lh - 1.2em) / 2));
+}
+
+/*
+ * Side room past the first and last glyph of a band. A shadow, unlike
+ * padding, leaves the text where it is and paints only outside the box, so
+ * it never doubles the tint underneath.
+ */
+body.prov-colors {
+  --prov-bleed: 0.2em;
+}
+
+body.prov-colors .prov-edge-start {
+  border-radius: 3px 0 0 3px;
+  box-shadow: calc(-1 * var(--prov-bleed)) 0 0 var(--prov-edge);
+}
+
+body.prov-colors .prov-edge-end {
+  border-radius: 0 3px 3px 0;
+  box-shadow: var(--prov-bleed) 0 0 var(--prov-edge);
+}
+
+body.prov-colors .prov-edge-both {
+  border-radius: 3px;
+  box-shadow: calc(-1 * var(--prov-bleed)) 0 0 var(--prov-edge), var(--prov-bleed) 0 0 var(--prov-edge);
 }
 
 body.prov-colors .prov-human { background-color: var(--prov-human); }

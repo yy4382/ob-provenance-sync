@@ -1,4 +1,4 @@
-import { Annotation, RangeSetBuilder, StateEffect, Transaction, type ChangeSpec, type Extension } from "@codemirror/state";
+import { Annotation, findClusterBreak, RangeSetBuilder, StateEffect, Transaction, type ChangeSpec, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, hoverTooltip, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { attribute, insertText, type Segment } from "@provenance/core";
 import diff from "fast-diff";
@@ -15,6 +15,22 @@ const marks = {
   agent: Decoration.mark({ class: "prov-agent" }),
   mixed: Decoration.mark({ class: "prov-mixed" }),
 } as const;
+
+type Edge = "start" | "end" | "both";
+
+/**
+ * The first and last characters of a band, which draw its tint a little past
+ * the glyphs. Bold, links and code split the band's own mark into pieces, so
+ * only these know where the band really begins and ends.
+ */
+const edgeMark = (kind: keyof typeof marks, edge: Edge) =>
+  Decoration.mark({ class: `prov-edge prov-edge-${edge}`, attributes: { style: `--prov-edge: var(--prov-${kind})` } });
+const edges = Object.fromEntries(
+  Object.keys(marks).map((kind) => [
+    kind,
+    { start: edgeMark(kind as keyof typeof marks, "start"), end: edgeMark(kind as keyof typeof marks, "end"), both: edgeMark(kind as keyof typeof marks, "both") },
+  ]),
+) as Record<keyof typeof marks, Record<Edge, Decoration>>;
 
 /**
  * Every pane showing a file pushes the edits made in it. Obsidian copies each
@@ -193,7 +209,17 @@ class ProvenanceView {
     const builder = new RangeSetBuilder<Decoration>();
     let open: { from: number; to: number; kind: Segment["kind"] } | null = null;
     const flush = () => {
-      if (open && open.kind !== "unknown") builder.add(open.from, open.to, marks[open.kind]);
+      if (!open || open.kind === "unknown") return;
+      const { from, to, kind } = open;
+      builder.add(from, to, marks[kind]);
+      if (to - from === 1) builder.add(from, to, edges[kind].both);
+      else {
+        // Whole characters, so an emoji at either end isn't cut in half.
+        const head = doc.sliceString(from, Math.min(to, from + 16));
+        const tail = doc.sliceString(Math.max(from, to - 16), to);
+        builder.add(from, from + findClusterBreak(head, 0), edges[kind].start);
+        builder.add(to - tail.length + findClusterBreak(tail, tail.length, false), to, edges[kind].end);
+      }
     };
     for (const s of this.segments) {
       if (open && open.kind === s.kind && /^[ \t]*$/.test(doc.sliceString(open.to, s.from))) open.to = s.to;
