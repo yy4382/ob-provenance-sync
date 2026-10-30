@@ -32,11 +32,6 @@ const edges = Object.fromEntries(
   ]),
 ) as Record<keyof typeof marks, Record<Edge, Decoration>>;
 
-/** A whole line of one kind, tinted edge to edge as a block. */
-const blocks = Object.fromEntries(
-  Object.keys(marks).map((kind) => [kind, Decoration.line({ class: `prov-block prov-block-${kind}` })]),
-) as Record<keyof typeof marks, Decoration>;
-
 /**
  * Every pane showing a file pushes the edits made in it. Obsidian copies each
  * edit into the file's other panes, and reloads a file another program
@@ -216,15 +211,10 @@ class ProvenanceView {
     const flush = () => {
       if (!open || open.kind === "unknown") return;
       const { from, to, kind } = open;
-      const line = doc.lineAt(from);
-      const startsLine = /^\s*$/.test(doc.sliceString(line.from, from));
-      if (startsLine && /^\s*$/.test(doc.sliceString(to, line.to))) {
-        builder.add(line.from, line.from, blocks[kind]);
-        return;
-      }
       builder.add(from, to, marks[kind]);
       // A band that begins a line stays flush with the text column, so a
       // wrapped paragraph keeps a straight left edge.
+      const startsLine = /^\s*$/.test(doc.sliceString(doc.lineAt(from).from, from));
       if (startsLine) {
         const tail = doc.sliceString(Math.max(from, to - 16), to);
         builder.add(to - tail.length + findClusterBreak(tail, tail.length, false), to, edges[kind].end);

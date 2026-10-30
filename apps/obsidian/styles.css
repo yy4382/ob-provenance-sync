@@ -60,53 +60,6 @@ body.prov-colors .prov-edge-both {
   box-shadow: calc(-1 * var(--prov-bleed)) 0 0 var(--prov-edge), var(--prov-bleed) 0 0 var(--prov-edge);
 }
 
-/*
- * A line of one kind is tinted edge to edge, so a paragraph reads as one
- * rectangle. Consecutive lines of a kind join into one block, rounded only
- * at its top and bottom.
- */
-body.prov-colors .prov-block-human { --prov-block: var(--prov-human); }
-body.prov-colors .prov-block-via-agent { --prov-block: var(--prov-via-agent); }
-body.prov-colors .prov-block-agent { --prov-block: var(--prov-agent); }
-body.prov-colors .prov-block-mixed { --prov-block: var(--prov-mixed); }
-
-body.prov-colors .prov-block {
-  --prov-code-tint: var(--prov-block);
-  background-color: var(--prov-block);
-  box-shadow: calc(-1 * var(--prov-bleed)) 0 0 var(--prov-block), var(--prov-bleed) 0 0 var(--prov-block);
-  border-radius: 3px;
-}
-
-/*
- * Obsidian spaces a heading with padding above it. Keep the block to the
- * heading itself: clip the tint to the content, and shrink each side shadow
- * by half that padding and drop it as far, so it starts where the text does.
- */
-body.prov-colors .prov-block.HyperMD-header {
-  --prov-half-gap: calc(var(--p-spacing) / 2);
-  background-clip: content-box;
-  border-radius: 0;
-  box-shadow:
-    calc(-1 * (var(--prov-bleed) + var(--prov-half-gap))) var(--prov-half-gap) 0 calc(-1 * var(--prov-half-gap)) var(--prov-block),
-    calc(var(--prov-bleed) + var(--prov-half-gap)) var(--prov-half-gap) 0 calc(-1 * var(--prov-half-gap)) var(--prov-block);
-}
-
-body.prov-colors .prov-block-human + .prov-block-human,
-body.prov-colors .prov-block-via-agent + .prov-block-via-agent,
-body.prov-colors .prov-block-agent + .prov-block-agent,
-body.prov-colors .prov-block-mixed + .prov-block-mixed {
-  border-top-left-radius: 0;
-  border-top-right-radius: 0;
-}
-
-body.prov-colors .prov-block-human:has(+ .prov-block-human),
-body.prov-colors .prov-block-via-agent:has(+ .prov-block-via-agent),
-body.prov-colors .prov-block-agent:has(+ .prov-block-agent),
-body.prov-colors .prov-block-mixed:has(+ .prov-block-mixed) {
-  border-bottom-left-radius: 0;
-  border-bottom-right-radius: 0;
-}
-
 body.prov-colors .prov-human { background-color: var(--prov-human); }
 body.prov-colors .prov-via-agent { background-color: var(--prov-via-agent); }
 body.prov-colors .prov-agent { background-color: var(--prov-agent); }
