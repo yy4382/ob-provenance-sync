@@ -1,31 +1,59 @@
+/*
+ * One lightness and chroma for every kind, so only the hue tells them apart
+ * and none weighs more than another. Human text, most of a vault, is the
+ * faintest.
+ */
 body {
-  --prov-human: rgba(64, 160, 96, 0.16);
-  --prov-via-agent: rgba(48, 170, 170, 0.18);
-  --prov-agent: rgba(140, 90, 220, 0.18);
-  --prov-mixed: rgba(230, 140, 40, 0.2);
+  --prov-l: 0.68;
+  --prov-c: 0.1;
+  --prov-alpha: 0.075;
+  --prov-hue-human: 150;
+  --prov-hue-via-agent: 200;
+  --prov-hue-agent: 290;
+  --prov-hue-mixed: 70;
+  --prov-human: oklch(var(--prov-l) var(--prov-c) var(--prov-hue-human) / calc(var(--prov-alpha) * 0.7));
+  --prov-via-agent: oklch(var(--prov-l) var(--prov-c) var(--prov-hue-via-agent) / var(--prov-alpha));
+  --prov-agent: oklch(var(--prov-l) var(--prov-c) var(--prov-hue-agent) / var(--prov-alpha));
+  --prov-mixed: oklch(var(--prov-l) var(--prov-c) var(--prov-hue-mixed) / var(--prov-alpha));
 }
 
 .theme-dark {
-  --prov-human: rgba(90, 200, 120, 0.14);
-  --prov-via-agent: rgba(70, 200, 200, 0.16);
-  --prov-agent: rgba(170, 120, 255, 0.2);
-  --prov-mixed: rgba(255, 160, 60, 0.18);
+  --prov-l: 0.75;
+  --prov-c: 0.09;
+  --prov-alpha: 0.09;
 }
 
-body.prov-colors .prov-human {
-  background-color: var(--prov-human);
+/*
+ * A span's background covers only the glyphs' height, leaving a stripe of
+ * line spacing between wrapped lines. Padding the leftover half-leading on
+ * both sides closes it without moving any text.
+ */
+body.prov-colors :is(.prov-human, .prov-via-agent, .prov-agent, .prov-mixed) {
+  padding-block: max(0px, calc((1lh - 1.2em) / 2));
 }
 
-body.prov-colors .prov-via-agent {
-  background-color: var(--prov-via-agent);
+body.prov-colors .prov-human { background-color: var(--prov-human); }
+body.prov-colors .prov-via-agent { background-color: var(--prov-via-agent); }
+body.prov-colors .prov-agent { background-color: var(--prov-agent); }
+body.prov-colors .prov-mixed { background-color: var(--prov-mixed); }
+
+/*
+ * Inline code draws its own pill around the text. Tint the whole pill over
+ * its usual background instead of a box inside it, so the code keeps its
+ * shape and the tint runs on into the prose beside it.
+ */
+body.prov-colors .cm-inline-code :is(.prov-human, .prov-via-agent, .prov-agent, .prov-mixed) {
+  padding-block: 0;
+  background-color: transparent;
 }
 
-body.prov-colors .prov-agent {
-  background-color: var(--prov-agent);
-}
+body.prov-colors .cm-inline-code:has(.prov-human) { --prov-code-tint: var(--prov-human); }
+body.prov-colors .cm-inline-code:has(.prov-via-agent) { --prov-code-tint: var(--prov-via-agent); }
+body.prov-colors .cm-inline-code:has(.prov-agent) { --prov-code-tint: var(--prov-agent); }
+body.prov-colors .cm-inline-code:has(.prov-mixed) { --prov-code-tint: var(--prov-mixed); }
 
-body.prov-colors .prov-mixed {
-  background-color: var(--prov-mixed);
+body.prov-colors .cm-inline-code {
+  background-image: linear-gradient(var(--prov-code-tint, transparent), var(--prov-code-tint, transparent));
 }
 
 .cm-tooltip:has(> .prov-tooltip) {
@@ -49,10 +77,10 @@ body.prov-colors .prov-mixed {
   border-left: 3px solid var(--text-faint);
 }
 
-.prov-kind-human { border-left-color: rgb(64, 160, 96); }
-.prov-kind-via-agent { border-left-color: rgb(48, 170, 170); }
-.prov-kind-agent { border-left-color: rgb(140, 90, 220); }
-.prov-kind-mixed { border-left-color: rgb(230, 140, 40); }
+.prov-kind-human { border-left-color: oklch(var(--prov-l) var(--prov-c) var(--prov-hue-human)); }
+.prov-kind-via-agent { border-left-color: oklch(var(--prov-l) var(--prov-c) var(--prov-hue-via-agent)); }
+.prov-kind-agent { border-left-color: oklch(var(--prov-l) var(--prov-c) var(--prov-hue-agent)); }
+.prov-kind-mixed { border-left-color: oklch(var(--prov-l) var(--prov-c) var(--prov-hue-mixed)); }
 
 .prov-tooltip-row {
   display: flex;

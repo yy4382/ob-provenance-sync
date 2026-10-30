@@ -187,8 +187,22 @@ class ProvenanceView {
       return;
     }
     this.segments = attribute(file.ytext);
+    // Segments leave out the spaces between sentences. Color those too when the
+    // sentences on either side match, so a paragraph reads as one band, and
+    // keep the gap only where the kind changes.
     const builder = new RangeSetBuilder<Decoration>();
-    for (const s of this.segments) if (s.kind !== "unknown") builder.add(s.from, s.to, marks[s.kind]);
+    let open: { from: number; to: number; kind: Segment["kind"] } | null = null;
+    const flush = () => {
+      if (open && open.kind !== "unknown") builder.add(open.from, open.to, marks[open.kind]);
+    };
+    for (const s of this.segments) {
+      if (open && open.kind === s.kind && /^[ \t]*$/.test(doc.sliceString(open.to, s.from))) open.to = s.to;
+      else {
+        flush();
+        open = { from: s.from, to: s.to, kind: s.kind };
+      }
+    }
+    flush();
     this.decorations = builder.finish();
   }
 
