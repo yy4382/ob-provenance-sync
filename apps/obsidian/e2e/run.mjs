@@ -512,6 +512,13 @@ try {
 
   await cdp.eval(`await app.plugins.plugins["provenance-sync"].engine.settle(); return true`);
   await sleep(1500);
+  ob(["create", "--path", "Cli/late.md", "--content", "Base.\n", "--why", "agent", "--agent", "shell-agent"]);
+  const late = join(work, "late-request.json");
+  writeFileSync(late, JSON.stringify({ op: "append", path: "Cli/late.md", text: "Late.\n", by: { agent: "agent:shell-agent", why: "agent" } }));
+  writeFileSync(`${late}.taken`, "");
+  instance.cli("provenance-sync", `request=${late}`);
+  const lateText = ob(["read", "--path", "Cli/late.md"]).stdout;
+  check("a request ob-provenance gave up on doesn't run when it reaches the plugin", lateText.includes("Base.") && !lateText.includes("Late."), lateText);
   ob(["create", "--path", "Cli/crash.md", "--content", "Base.\n", "--why", "agent", "--agent", "shell-agent"]);
   await sleep(1000);
   // The delay holds the reply back after the write, so the crash below lands between the two.

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { errorMessage, FULL_ONLY_OPS, parseOpResponse, type OpRequest, type OpResponse } from "@provenance/core";
+import { errorMessage, FULL_ONLY_OPS, parseOpResponse, takenMarker, type OpRequest, type OpResponse } from "@provenance/core";
 import type { OpsTransport } from "@provenance/tools";
 import type { RegisteredVault, Selection } from "./vault";
 
@@ -79,6 +79,17 @@ function run(command: string, args: string[], timeoutMs: number): Promise<Finish
 /** What became of a call to Obsidian. Only `missed` shows the plugin never ran it, so only `missed` may move on to the server. */
 export type Attempt = { kind: "answered"; response: OpResponse } | { kind: "missed"; why: string } | { kind: "cut-off"; why: string };
 
+/**
+ * The plugin creates this file before it runs a request. Creating it here
+ * first keeps the plugin from ever running it, even if `obsidian` is only slow,
+ * and the one who fails knows the other has the request.
+ */
+const pluginStarted = (request: string) =>
+  writeFile(takenMarker(request), "", { flag: "wx" }).then(
+    () => false,
+    () => true,
+  );
+
 /** `obsidian` exits 0 on most failures, so only a parsed response counts as an answer. */
 export async function askObsidian(obsidian: string, vaultId: string, req: OpRequest, timeoutMs: number): Promise<Attempt> {
   const dir = await mkdtemp(join(tmpdir(), "ob-provenance-"));
@@ -86,13 +97,12 @@ export async function askObsidian(obsidian: string, vaultId: string, req: OpRequ
   await writeFile(file, JSON.stringify(req), { mode: 0o600 });
   try {
     const r = await run(obsidian, [`vault=${vaultId}`, PLUGIN_ID, `request=${file}`], timeoutMs);
-    if (r.timedOut) return { kind: "cut-off", why: noAnswer(timeoutMs) };
-    if (r.error?.code === "ENOENT") return { kind: "missed", why: "the obsidian command isn't on PATH. The human turns it on in Obsidian's settings, under General, Command line interface." };
-    if (r.error) return { kind: "missed", why: r.error.message };
     const response = parseOpResponse(r.stdout);
     if (response) return { kind: "answered", response };
-    // quirk: cli-cut-off-prints-nothing
-    if (r.code === null || (r.code === 0 && !r.stdout.trim())) return { kind: "cut-off", why: "Obsidian stopped during the call. A write may have landed, so read the note before retrying." };
+    if (await pluginStarted(file)) return { kind: "cut-off", why: r.timedOut ? noAnswer(timeoutMs) : "Obsidian stopped during the call. A write may have landed, so read the note before retrying." };
+    if (r.timedOut) return { kind: "missed", why: `no answer within ${timeoutMs / 1000} seconds` };
+    if (r.error?.code === "ENOENT") return { kind: "missed", why: "the obsidian command isn't on PATH. The human turns it on in Obsidian's settings, under General, Command line interface." };
+    if (r.error) return { kind: "missed", why: r.error.message };
     return { kind: "missed", why: (r.code === 0 ? r.stdout : r.stderr).trim() || "it printed nothing" };
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -102,8 +112,8 @@ export async function askObsidian(obsidian: string, vaultId: string, req: OpRequ
 /**
  * The plugin when Obsidian answers, otherwise the sync server's limited API.
  * Looked up on every call because Obsidian may start or quit during an agent
- * session. A call that was cut off never moves on to the server: the first
- * request may have landed, and the second would write the same text again.
+ * session. A call the plugin started never moves on to the server: it may have
+ * landed, and the second request would write the same text again.
  */
 export function agentOps(opts: { select: () => Promise<Selection>; obsidian?: string; timeoutMs?: number }): OpsTransport {
   const { obsidian = "obsidian", timeoutMs = TIMEOUT_MS } = opts;

@@ -1,4 +1,4 @@
-import { executeOp, handleOpRequest, OpError, type OpRequest, type OpResponse, type OpResult } from "@provenance/core";
+import { executeOp, handleOpRequest, OpError, takenMarker, type OpRequest, type OpResponse, type OpResult } from "@provenance/core";
 import { Platform, prepareSimpleSearch, type App, type Plugin } from "obsidian";
 import { dailyNotePath, dailyNotesPlugin } from "./quirks";
 import type { SyncEngine } from "./sync/engine";
@@ -83,8 +83,10 @@ export function registerAgentCli(plugin: Plugin, serve: (run: (engine: SyncEngin
   // eslint-disable-next-line @typescript-eslint/no-require-imports, no-undef -- Obsidian provides require on desktop; loaded lazily so mobile never evaluates it
   const fs = require("node:fs") as typeof import("node:fs");
   // The request travels as a file: a note can exceed what a command line holds, and arguments show up in `ps`.
-  const readRequest = (path: string): unknown => {
+  const takeRequest = (path: string): unknown => {
     try {
+      // Fails if ob-provenance gave up on this request and may have sent it to the server.
+      fs.writeFileSync(takenMarker(path), "", { flag: "wx" });
       return JSON.parse(fs.readFileSync(path, "utf8"));
     } catch {
       return null;
@@ -95,7 +97,7 @@ export function registerAgentCli(plugin: Plugin, serve: (run: (engine: SyncEngin
     "Run a vault operation for ob-provenance",
     { request: { value: "<path>", description: "JSON file holding the operation", required: true } },
     async ({ request }) => {
-      const answer = await serve((engine) => handleOpRequest(engine, readRequest(request!), (op) => runFull(plugin.app, engine, op)));
+      const answer = await serve((engine) => handleOpRequest(engine, takeRequest(request!), (op) => runFull(plugin.app, engine, op)));
       return answer ? JSON.stringify(answer) : "This vault isn't serving agents: Agent CLI is off, or sync isn't running.";
     },
   );

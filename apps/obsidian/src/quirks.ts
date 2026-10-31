@@ -146,12 +146,3 @@ export function dailyNotePath(app: App, daily: DailyNotes): string | null {
  *
  * quirk: cli-reply-is-stdout
  */
-
-/**
- * ob-provenance tells a call that never reached the plugin from one cut off
- * partway, because only the first is safe to send to the server. `obsidian`
- * exits 1 when Obsidian isn't running, and exits 0 having printed nothing when
- * Obsidian dies during a call. A handler always prints something.
- *
- * quirk: cli-cut-off-prints-nothing
- */

@@ -15,6 +15,9 @@ export function agentPaths(home: string) {
   return { bin: `${home}/.local/bin/${AGENT_CLI}`, vaults: `${home}/.config/${AGENT_CLI}/vaults` };
 }
 
+/** Beside a request file: whoever creates it first decides whether the plugin runs that request. */
+export const takenMarker = (request: string) => `${request}.taken`;
+
 /** Whether release `a` is newer than `b`, with a prerelease before its release. */
 export function isNewerVersion(a: string, b: string): boolean {
   const order = (x: string, y: string) => x.localeCompare(y, "en", { numeric: true });

@@ -42,6 +42,8 @@ const opsFor = (v: RegisteredVault, obsidian: string, timeoutMs?: number) =>
   agentOps({ select: async () => ({ ok: true, vault: v }), obsidian, ...(timeoutMs ? { timeoutMs } : {}) });
 const answerList = `echo '{"ok":true,"result":{"op":"list","files":["local.md"]}}'`;
 const by = { agent: "agent:cli" as const, why: "agent" as const };
+/** What the plugin does before it runs a request. */
+const takeRequest = `for a in "$@"; do case "$a" in request=*) : > "\${a#request=}.taken";; esac; done`;
 
 describe("agentOps", () => {
   it("returns the plugin's answer and never asks the server", async () => {
@@ -105,24 +107,39 @@ describe("agentOps", () => {
     expect(await ops({ op: "list" })).toMatchObject({ ok: false, code: "unavailable", message: expect.stringMatching(/not available right now/) });
   });
 
-  it("does not send a write to the server when Obsidian stops answering", async () => {
+  it("does not send a write to the server once the plugin has started it and stopped answering", async () => {
     const remote = await fakeServer();
-    const ops = opsFor(vault({ url: remote.url, vault: "notes", token: "t" }), await fakeObsidian(`exec sleep 30`), 50);
+    const ops = opsFor(vault({ url: remote.url, vault: "notes", token: "t" }), await fakeObsidian(`${takeRequest}\nexec sleep 30`), 1000);
     expect(await ops({ op: "append", path: "a.md", text: "x", by })).toMatchObject({ ok: false, code: "unavailable", message: expect.stringMatching(/may still land/) });
     expect(remote.seen).toEqual([]);
   });
 
-  it("does not send a write to the server when Obsidian dies during the call", async () => {
+  it.each([
+    ["exits 0", "exit 0"],
+    ["exits 1", "exit 1"],
+    ["is killed", "kill -9 $$"],
+  ])("does not send a write to the server when the plugin started it and obsidian %s", async (_, end) => {
     const remote = await fakeServer();
-    const ops = opsFor(vault({ url: remote.url, vault: "notes", token: "t" }), await fakeObsidian(`exit 0`));
+    const ops = opsFor(vault({ url: remote.url, vault: "notes", token: "t" }), await fakeObsidian(`${takeRequest}\n${end}`));
     expect(await ops({ op: "append", path: "a.md", text: "x", by })).toMatchObject({ ok: false, code: "unavailable", message: expect.stringMatching(/may have landed/) });
     expect(remote.seen).toEqual([]);
+  });
+
+  it.each([
+    ["hangs", `exec sleep 30`],
+    ["exits 0 with nothing", "exit 0"],
+    ["is killed", "kill -9 $$"],
+  ])("goes to the server when obsidian %s before the plugin starts", async (_, script) => {
+    const remote = await fakeServer();
+    const ops = opsFor(vault({ url: remote.url, vault: "notes", token: "t" }), await fakeObsidian(script), 200);
+    expect(await ops({ op: "append", path: "a.md", text: "x", by })).toMatchObject({ ok: true });
+    expect(remote.seen).toHaveLength(1);
   });
 
   it("keeps to its limit when obsidian is a wrapper script", async () => {
     const started = Date.now();
     const ops = opsFor(vault(null), await fakeObsidian(`sleep 5; echo done`), 50);
-    expect(await ops({ op: "list" })).toMatchObject({ ok: false, code: "unavailable", message: expect.stringMatching(/No answer within/) });
+    expect(await ops({ op: "list" })).toMatchObject({ ok: false, code: "unavailable", message: expect.stringMatching(/no answer within/) });
     expect(Date.now() - started).toBeLessThan(2000);
   });
 
@@ -163,6 +180,6 @@ describe("describeRoute", () => {
 
   it("doesn't call Obsidian reachable when it stopped answering", async () => {
     const text = (await describeRoute(vault(null), await fakeObsidian(`exec sleep 30`), 50)).join("\n");
-    expect(text).toMatch(/Obsidian: not reachable: No answer within/);
+    expect(text).toMatch(/Obsidian: not reachable: no answer within/);
   });
 });
