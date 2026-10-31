@@ -1,10 +1,19 @@
 import { executeOp, handleOpRequest, OpError, type OpRequest, type OpResult } from "@provenance/core";
-import { Platform, prepareSimpleSearch, type App } from "obsidian";
+import { Platform, prepareSimpleSearch, type App, type TFile } from "obsidian";
 import type { SyncEngine } from "./sync/engine";
+
+/** How long a rename gets to finish before it counts as waiting on the human. */
+const RENAME_SETTLE_MS = 2000;
+
+/** Obsidian's core Daily notes plugin. These are internals, read defensively. */
+interface DailyNotes {
+  getDailyNote?(): Promise<TFile | null>;
+  options?: { folder?: string };
+}
 
 /**
  * The full-mode half of the vault ops: things only a running Obsidian knows
- * (links, search) or does better (renames that rewrite links, trash).
+ * (links, search, the daily note) or does better (renames that rewrite links, trash).
  */
 async function runFull(app: App, engine: SyncEngine, req: OpRequest): Promise<OpResult> {
   const fileAt = (path: string) => {
@@ -14,10 +23,19 @@ async function runFull(app: App, engine: SyncEngine, req: OpRequest): Promise<Op
   };
   const links = app.metadataCache.resolvedLinks;
   switch (req.op) {
-    case "rename":
+    case "rename": {
       if (app.vault.getAbstractFileByPath(req.to)) throw new OpError("exists", `file already exists: ${req.to}`);
-      await app.fileManager.renameFile(fileAt(req.from), req.to);
-      return { op: "rename" };
+      const file = fileAt(req.from);
+      const dir = req.to.split("/").slice(0, -1).join("/");
+      if (dir && !app.vault.getFolderByPath(dir)) await app.vault.createFolder(dir);
+      // Unless the vault always updates links, renameFile moves a linked note, then waits for the human to answer a dialog.
+      const settled = await Promise.race([
+        app.fileManager.renameFile(file, req.to).then(() => true),
+        new Promise<boolean>((resolve) => window.setTimeout(() => resolve(false), RENAME_SETTLE_MS)),
+      ]);
+      if (!settled && file.path !== req.to) throw new OpError("unavailable", `the rename of ${req.from} has not finished`);
+      return settled ? { op: "rename" } : { op: "rename", linksPending: true };
+    }
     case "delete":
       await app.fileManager.trashFile(fileAt(req.path));
       return { op: "delete" };
@@ -41,6 +59,14 @@ async function runFull(app: App, engine: SyncEngine, req: OpRequest): Promise<Op
         if (paths.length >= 50) break;
       }
       return { op: "search", paths };
+    }
+    case "daily": {
+      const internal = (app as unknown as { internalPlugins?: { getEnabledPluginById?(id: string): DailyNotes | null } }).internalPlugins;
+      const daily = internal?.getEnabledPluginById?.("daily-notes");
+      if (!daily?.getDailyNote) throw new OpError("unsupported", "Obsidian's Daily notes plugin is turned off");
+      const file = await daily.getDailyNote();
+      if (!file) throw new OpError("not-found", `could not open today's daily note; check that its folder exists: ${daily.options?.folder ?? "(vault root)"}`);
+      return { op: "daily", path: file.path };
     }
     default:
       return executeOp(engine, req);

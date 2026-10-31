@@ -43,12 +43,13 @@ export const opRequestSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("links"), path: markdownPath }),
   z.object({ op: z.literal("backlinks"), path: markdownPath }),
   z.object({ op: z.literal("search"), query: z.string().min(1) }),
+  z.object({ op: z.literal("daily") }),
 ]);
 export type OpRequest = z.infer<typeof opRequestSchema>;
 export type OpName = OpRequest["op"];
 
 /** Ops that need a running Obsidian (metadata cache, file explorer semantics). */
-export const FULL_ONLY_OPS = new Set<OpName>(["rename", "delete", "links", "backlinks", "search"]);
+export const FULL_ONLY_OPS = new Set<OpName>(["rename", "delete", "links", "backlinks", "search", "daily"]);
 
 export interface AttributedSentence {
   text: string;
@@ -60,8 +61,10 @@ export type OpResult =
   | { op: "list"; files: string[] }
   | { op: "read"; content: string; sentences?: AttributedSentence[] }
   | { op: "edit"; replaced: number }
-  | { op: "append" | "create" | "rename" | "delete" }
-  | { op: "links" | "backlinks" | "search"; paths: string[] };
+  | { op: "append" | "create" | "delete" }
+  | { op: "rename"; linksPending?: boolean }
+  | { op: "links" | "backlinks" | "search"; paths: string[] }
+  | { op: "daily"; path: string };
 
 export type OpResponse = { ok: true; result: OpResult } | { ok: false; code: OpErrorCode; message: string };
 export type OpErrorCode = "invalid" | "not-found" | "ambiguous" | "exists" | "unsupported" | "unavailable";
@@ -155,6 +158,7 @@ export async function executeOp(docs: VaultDocs, req: OpRequest): Promise<OpResu
     case "links":
     case "backlinks":
     case "search":
+    case "daily":
       throw new OpError("unsupported", `${req.op} needs Obsidian running (full mode)`);
   }
 }

@@ -77,7 +77,7 @@ Edits made to files outside Obsidian are never lost. When the plugin next sees t
 
 **Local, full mode.** The MCP server ships inside the plugin. On the computer running Obsidian, open the plugin's settings and use **Copy Claude Code command** or **Copy MCP JSON config**. The copied command has this vault's path, the server and the device token filled in, and it needs Node.js 22 or later. Edits are attributed to the name each MCP client reports in its handshake, so several agents can share one configuration (`--agent <name>` pins a name instead).
 
-While Obsidian runs, edits go through the plugin. Full mode adds `rename_file`, `delete_file`, `get_links`, `get_backlinks` and `search`. When Obsidian is closed, writes go to the server instead. If the server is also unreachable, the agent is told the vault is unavailable.
+While Obsidian runs, edits go through the plugin. Full mode adds `rename_file`, `delete_file`, `get_links`, `get_backlinks`, `get_daily_note` and `search`. When Obsidian is closed, writes go to the server instead. If the server is also unreachable, the agent is told the vault is unavailable.
 
 **Remote, limited mode.** Long-running agents connect to the server over Streamable HTTP at `https://sync.example.com/mcp/<vault-id>`, sending `Authorization: Bearer <agent token>`. Add `?agent=<name>` if the token doesn't pin an identity. Limited mode offers `list_files`, `read_file`, `edit_file`, `append_to_file` and `create_file`.
 

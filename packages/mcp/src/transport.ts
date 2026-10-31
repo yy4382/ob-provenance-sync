@@ -9,7 +9,7 @@ export const PLUGIN_ID = "provenance-sync";
 /** Thrown when the far end can't be reached at all, as opposed to answering with an error. */
 export class Unreachable extends Error {}
 
-export function httpOps(url: string, token: string): OpsTransport {
+export function httpOps(url: string, token: string, timeoutMs = 15_000): OpsTransport {
   return async (req) => {
     let res: Response;
     try {
@@ -17,9 +17,13 @@ export function httpOps(url: string, token: string): OpsTransport {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
         body: JSON.stringify(req),
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (e) {
+      // The far end may still finish this request, so it must not be sent anywhere else.
+      if (e instanceof Error && e.name === "TimeoutError") {
+        return { ok: false, code: "unavailable", message: `No answer within ${timeoutMs / 1000} seconds. A write may still land, so read the note before retrying.` };
+      }
       throw new Unreachable(`${url}: ${errorMessage(e)}`);
     }
     if (res.status === 401) return { ok: false, code: "unavailable", message: `${url} rejected the token` };
@@ -53,18 +57,18 @@ export async function findBridge(vaultPath: string): Promise<{ url: string; toke
  * limited API when Obsidian is closed. The bridge is looked up on every call
  * because Obsidian may start or quit while the agent session lives on.
  */
-export function localOps(opts: { vaultPath: string; remote: OpsTransport | null }): OpsTransport {
+export function localOps(opts: { vaultPath: string; remote: OpsTransport | null; timeoutMs?: number }): OpsTransport {
   return async (req) => {
     const bridge = await findBridge(opts.vaultPath);
     if (bridge) {
       try {
-        return await httpOps(bridge.url, bridge.token)(req);
+        return await httpOps(bridge.url, bridge.token, opts.timeoutMs)(req);
       } catch (e) {
         if (!(e instanceof Unreachable)) throw e;
       }
     }
     if (FULL_ONLY_OPS.has(req.op)) {
-      return { ok: false, code: "unavailable", message: `${req.op} needs Obsidian running, and it is not` };
+      return { ok: false, code: "unavailable", message: "This tool needs Obsidian running, and it is not." };
     }
     if (!opts.remote) {
       return { ok: false, code: "unavailable", message: "Obsidian is not running and no sync server is configured" };

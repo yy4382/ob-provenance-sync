@@ -67,6 +67,47 @@ describe("MCP tools", () => {
     expect(await names("limited")).toEqual(["append_to_file", "create_file", "edit_file", "list_files", "read_file"]);
     expect(await names("full")).toContain("get_backlinks");
   });
+
+  it("tells each mode only about tools it has, within what clients keep", async () => {
+    const text = async (mode: "full" | "limited") => (await connect(async () => ({ ok: true, result: { op: "append" } }), mode)).getInstructions() ?? "";
+    const [full, limited] = [await text("full"), await text("limited")];
+    expect(full).toContain("get_daily_note");
+    expect(limited).not.toMatch(/get_daily_note|get_links|search|Obsidian isn't running/);
+    expect(full.length).toBeLessThan(4096);
+  });
+
+  it("prints a passage of no recorded author once, and keeps unknown among other authors", async () => {
+    const sentences = [
+      { text: "From disk.", kind: "unknown" as const, authors: ["unknown"] },
+      { text: "Half half.", kind: "mixed" as const, authors: ["agent:claude-code", "unknown"] },
+    ];
+    const client = await connect(async () => ({ ok: true, result: { op: "read", content: "", sentences } }), "limited");
+    const res = await client.callTool({ name: "read_file", arguments: { path: "a.md", provenance: true } });
+    expect(res.content).toEqual([{ type: "text", text: "[unknown] From disk.\n[mixed agent:claude-code,unknown] Half half." }]);
+  });
+
+  it("rejects a multi-line note before it reaches the vault", async () => {
+    const seen: OpRequest[] = [];
+    const client = await connect(async (req) => (seen.push(req), { ok: true, result: { op: "append" } }), "limited");
+    const res = await client.callTool({ name: "append_to_file", arguments: { path: "a.md", text: "x", why: "agent", note: "two\nlines" } });
+    expect(res.isError).toBe(true);
+    expect(seen).toEqual([]);
+  });
+
+  it("says when a rename left links waiting on the human", async () => {
+    const answer = async (linksPending: boolean) => {
+      const client = await connect(async () => ({ ok: true, result: { op: "rename", ...(linksPending ? { linksPending } : {}) } }), "full");
+      return client.callTool({ name: "rename_file", arguments: { from: "a.md", to: "b.md" } });
+    };
+    expect((await answer(false)).content).toEqual([{ type: "text", text: "ok" }]);
+    expect((await answer(true)).content).toEqual([{ type: "text", text: expect.stringMatching(/asking the human/) }]);
+  });
+
+  it("returns today's daily note path", async () => {
+    const client = await connect(async () => ({ ok: true, result: { op: "daily", path: "Journal/2026-10-31.md" } }), "full");
+    const res = await client.callTool({ name: "get_daily_note", arguments: {} });
+    expect(res.content).toEqual([{ type: "text", text: "Journal/2026-10-31.md" }]);
+  });
 });
 
 describe("localOps", () => {
@@ -95,5 +136,22 @@ describe("localOps", () => {
       code: "unavailable",
       message: expect.stringMatching(/not available right now/),
     });
+  });
+
+  it("does not send a write to the server when the bridge stops answering", async () => {
+    const vaultPath = await mkdtemp(join(tmpdir(), "vault-"));
+    const hung = createServer(() => {});
+    await new Promise<void>((r) => hung.listen(0, "127.0.0.1", r));
+    closers.push(() => hung.closeAllConnections());
+    closers.push(() => hung.close());
+    const dir = join(vaultPath, ".obsidian", "plugins", PLUGIN_ID);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "bridge.json"), JSON.stringify({ port: (hung.address() as AddressInfo).port, token: "t" }));
+    const sent: OpRequest[] = [];
+    const remote: OpsTransport = async (req) => (sent.push(req), { ok: true, result: { op: "append" } });
+    const by = { agent: "agent:claude-code" as const, why: "agent" as const };
+    const res = await localOps({ vaultPath, remote, timeoutMs: 50 })({ op: "append", path: "a.md", text: "x", by });
+    expect(res).toMatchObject({ ok: false, code: "unavailable", message: expect.stringMatching(/may still land/) });
+    expect(sent).toEqual([]);
   });
 });

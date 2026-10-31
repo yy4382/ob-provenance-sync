@@ -317,6 +317,38 @@ try {
   const links = await mcpCall("get_backlinks", { path: "Welcome.md" });
   check("full mode answers backlinks", !links.isError && links.content[0].text.includes("Projects/Roadmap.md"), JSON.stringify(links.content));
 
+  await mcpCall("create_file", { path: "Target.md", content: "Target text.\n", why: "agent" });
+  await mcpCall("create_file", { path: "Linker.md", content: "See [[Target]] here.\n", why: "agent" });
+  await eventually(() => cdp.eval(`return app.metadataCache.resolvedLinks["Linker.md"]?.["Target.md"]`));
+  const renameStart = Date.now();
+  const renamed = await mcpCall("rename_file", { from: "Target.md", to: "McpMoved/Deep/Target2.md" });
+  check(
+    "renaming a linked note reports the link dialog instead of waiting on it",
+    !renamed.isError && renamed.content[0].text.includes("asking the human") && Date.now() - renameStart < 10000,
+    JSON.stringify(renamed.content),
+  );
+  const moved = await eventually(async () => {
+    const r = await mcpCall("read_file", { path: "McpMoved/Deep/Target2.md", provenance: true });
+    return r.isError ? undefined : r.content[0].text;
+  });
+  check("a rename into a new folder keeps attribution", moved?.startsWith("[agent agent:"), moved);
+  await cdp.eval(`[...document.querySelectorAll(".modal button")].find((b) => /Just once/.test(b.innerText)).click(); return true`);
+  const relinked = await eventually(async () => {
+    const r = await mcpCall("read_file", { path: "Linker.md" });
+    return r.content[0].text.includes("Target2") ? r.content[0].text : undefined;
+  });
+  check("the human's answer updates the link", !!relinked);
+  const daily = await mcpCall("get_daily_note", {});
+  const dailyRead = await eventually(async () => {
+    const r = await mcpCall("read_file", { path: daily.content[0].text });
+    return r.isError ? undefined : r;
+  });
+  check("get_daily_note returns a note the agent can read", !daily.isError && !!dailyRead, JSON.stringify(daily.content));
+  await cdp.eval(`app.internalPlugins.getEnabledPluginById("daily-notes").options = { folder: "NoSuchFolder" }; return true`);
+  const noFolder = await mcpCall("get_daily_note", {});
+  await cdp.eval(`app.internalPlugins.getEnabledPluginById("daily-notes").options = {}; return true`);
+  check("get_daily_note names a missing folder", noFolder.isError && noFolder.content[0].text.includes("NoSuchFolder"), JSON.stringify(noFolder.content));
+
   await opsCall({ op: "append", path: "Welcome.md", text: "RemoteAgent line.", by: { agent: "agent:andy", why: "agent" } });
   const remote = await eventually(async () => {
     const counts = await cdp.eval(`return app.workspace.getLeavesOfType("markdown").map(l => l.view.editor.getValue().split("RemoteAgent").length - 1)`);
@@ -424,7 +456,9 @@ try {
   });
   const files = await eventually(async () => {
     const r = await opsCall({ op: "list" });
-    const notes = r.result.files.filter((f) => !f.startsWith("Bulk/") && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md"].includes(f));
+    const notes = r.result.files.filter(
+      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Linker.md"].includes(f),
+    );
     return notes.join(",") === "Projects/Renamed.md" ? notes : undefined;
   }, 15000);
   check("an offline delete stays deleted and an offline rename keeps the file", !!files, JSON.stringify((await opsCall({ op: "list" })).result));
