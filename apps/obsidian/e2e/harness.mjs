@@ -1,9 +1,9 @@
 // Starts a real Obsidian with an isolated profile, so it never sees your own vaults, and drives it
 // over the Chrome DevTools protocol. Shared by the end-to-end test and the quirk probes.
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const OBSIDIAN = process.env.OBSIDIAN_BIN ?? "/Applications/Obsidian.app/Contents/MacOS/Obsidian";
 // Extra command-line flags, split on spaces. CI needs some that a desktop doesn't.
@@ -46,7 +46,12 @@ export async function obsidian({ vault, profile }) {
   // from your own Obsidian and leave it dead. Under /tmp, as macOS limits socket paths to 104 bytes.
   const home = mkdtempSync("/tmp/provenance-home-");
   process.on("exit", () => rmSync(home, { recursive: true, force: true }));
-  const env = { ...process.env, HOME: home, XDG_RUNTIME_DIR: home };
+  // Obsidian's command line client, under its usual name. Builds without one answer through the app itself.
+  const client = join(dirname(OBSIDIAN), "obsidian-cli");
+  const clientCommand = existsSync(client) ? [client] : [OBSIDIAN, `--user-data-dir=${profile}`, ...EXTRA_ARGS];
+  mkdirSync(join(home, "bin"));
+  writeFileSync(join(home, "bin/obsidian"), `#!/bin/sh\nexec ${clientCommand.map((a) => JSON.stringify(a)).join(" ")} "$@"\n`, { mode: 0o755 });
+  const env = { ...process.env, HOME: home, XDG_RUNTIME_DIR: home, PATH: `${join(home, "bin")}:${process.env.PATH}` };
   // Without this, macOS looks for a login keychain in the new HOME and Obsidian hangs.
   const keychainArgs = process.platform === "darwin" ? ["--use-mock-keychain"] : [];
   // A run must stay on the version it was started with, or a restart could test a newer one.
@@ -125,5 +130,8 @@ export async function obsidian({ vault, profile }) {
     await sleep(1500);
   }
 
-  return { open, page, kill, env };
+  /** Runs `obsidian` against this instance, never yours. */
+  const cli = (...args) => spawnSync("obsidian", ["vault=e2evault", ...args], { env, encoding: "utf8", timeout: 30000, maxBuffer: 1 << 26 });
+
+  return { open, page, kill, env, cli };
 }

@@ -1,71 +1,7 @@
-import { executeOp, handleOpRequest, OpError, type OpRequest, type OpResult } from "@provenance/core";
-import { Platform, prepareSimpleSearch, type App } from "obsidian";
-import { dailyNotesPlugin } from "./quirks";
+import { handleOpRequest } from "@provenance/core";
+import { Platform, type App } from "obsidian";
+import { runFull } from "./agent-ops";
 import type { SyncEngine } from "./sync/engine";
-
-/** How long a rename gets to finish before it counts as waiting on the human. */
-const RENAME_SETTLE_MS = 2000;
-
-/**
- * The full-mode half of the vault ops: things only a running Obsidian knows
- * (links, search, the daily note) or does better (renames that rewrite links, trash).
- */
-async function runFull(app: App, engine: SyncEngine, req: OpRequest): Promise<OpResult> {
-  const fileAt = (path: string) => {
-    const f = app.vault.getFileByPath(path);
-    if (!f) throw new OpError("not-found", `no such file: ${path}`);
-    return f;
-  };
-  const links = app.metadataCache.resolvedLinks;
-  switch (req.op) {
-    case "rename": {
-      if (app.vault.getAbstractFileByPath(req.to)) throw new OpError("exists", `file already exists: ${req.to}`);
-      const file = fileAt(req.from);
-      const dir = req.to.split("/").slice(0, -1).join("/");
-      if (dir && !app.vault.getFolderByPath(dir)) await app.vault.createFolder(dir);
-      // Unless the vault always updates links, renameFile moves a linked note, then waits for the human to answer a dialog.
-      const settled = await Promise.race([
-        app.fileManager.renameFile(file, req.to).then(() => true),
-        new Promise<boolean>((resolve) => window.setTimeout(() => resolve(false), RENAME_SETTLE_MS)),
-      ]);
-      if (!settled && file.path !== req.to) throw new OpError("unavailable", `the rename of ${req.from} has not finished`);
-      return settled ? { op: "rename" } : { op: "rename", linksPending: true };
-    }
-    case "delete":
-      await app.fileManager.trashFile(fileAt(req.path));
-      return { op: "delete" };
-    case "links":
-      fileAt(req.path);
-      return { op: "links", paths: Object.keys(links[req.path] ?? {}).sort() };
-    case "backlinks":
-      fileAt(req.path);
-      return {
-        op: "backlinks",
-        paths: Object.entries(links)
-          .filter(([, targets]) => req.path in targets)
-          .map(([source]) => source)
-          .sort(),
-      };
-    case "search": {
-      const match = prepareSimpleSearch(req.query);
-      const paths: string[] = [];
-      for (const f of app.vault.getMarkdownFiles()) {
-        if (match(f.path) || match(await app.vault.cachedRead(f))) paths.push(f.path);
-        if (paths.length >= 50) break;
-      }
-      return { op: "search", paths };
-    }
-    case "daily": {
-      const daily = dailyNotesPlugin(app);
-      if (!daily?.getDailyNote) throw new OpError("unsupported", "Obsidian's Daily notes plugin is turned off");
-      const file = await daily.getDailyNote();
-      if (!file) throw new OpError("not-found", `could not open today's daily note; check that its folder exists: ${daily.options?.folder ?? "(vault root)"}`);
-      return { op: "daily", path: file.path };
-    }
-    default:
-      return executeOp(engine, req);
-  }
-}
 
 function randomToken(): string {
   return [...crypto.getRandomValues(new Uint8Array(24))].map((b) => b.toString(16).padStart(2, "0")).join("");

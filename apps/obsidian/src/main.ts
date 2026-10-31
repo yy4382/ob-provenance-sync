@@ -1,5 +1,6 @@
 import { errorMessage, humanId, reattribute, REATTRIBUTABLE } from "@provenance/core";
 import { MarkdownView, Notice, Platform, Plugin, type Editor } from "obsidian";
+import { registerAgentCli } from "./agent-ops";
 import { startBridge } from "./bridge";
 import { ConflictsModal } from "./conflicts";
 import { EVENT_LOG_VIEW, EventLog, EventLogView } from "./event-log";
@@ -37,6 +38,9 @@ export default class ProvenancePlugin extends Plugin {
   private mcpCliPath: string | null = null;
   /** Restarts run one after another, so two quick reconnects never leave two engines running. */
   private restarting: Promise<void> = Promise.resolve();
+  private firstStartDone = () => {};
+  /** A CLI call can open this vault's window and arrive before sync has started for the first time. */
+  private readonly firstStart = new Promise<void>((resolve) => (this.firstStartDone = resolve));
   readonly log = new EventLog();
 
   async onload() {
@@ -88,10 +92,15 @@ export default class ProvenancePlugin extends Plugin {
       editorCallback: (editor, ctx) => ctx instanceof MarkdownView && this.reattribute(editor, ctx, "recover"),
     });
     this.addCommand({ id: "reconnect", name: "Reconnect sync", callback: () => void this.reconnect() });
+    registerAgentCli(this, async () => {
+      await this.firstStart;
+      await this.restarting;
+      return this.engine;
+    });
 
     this.app.workspace.onLayoutReady(() => {
       watchVault(this, () => this.engine);
-      void this.restartSync();
+      void this.restartSync().finally(this.firstStartDone);
       // Another sync may be turned on or off at any time; Obsidian has no event for it.
       this.registerInterval(
         window.setInterval(() => {

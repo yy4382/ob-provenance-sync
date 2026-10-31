@@ -138,6 +138,20 @@ async function mcpCall(name, args) {
   }
 }
 
+let requests = 0;
+
+/** One op through `obsidian provenance-sync`, the way ob-provenance sends it. */
+function cliCall(body) {
+  const file = join(work, `request-${++requests}.json`);
+  writeFileSync(file, JSON.stringify(body));
+  const r = instance.cli("provenance-sync", `request=${file}`);
+  try {
+    return JSON.parse(r.stdout);
+  } catch {
+    return { unparsed: r.stdout, stderr: r.stderr, status: r.status };
+  }
+}
+
 async function openObsidian() {
   const cdp = await instance.open();
   const synced = await eventually(() =>
@@ -260,6 +274,36 @@ try {
   await cdp.eval(`app.internalPlugins.getEnabledPluginById("daily-notes").options = {}; return true`);
   check("get_daily_note names a missing folder", noFolder.isError && noFolder.content[0].text.includes("NoSuchFolder"), JSON.stringify(noFolder.content));
 
+  const by = { agent: "agent:cli-e2e", why: "agent" };
+  const strings = [`quote"s and 'single'`, "line1\nline2\r\nline3", "tab\there", "back\\slash \\n literal", "emoji 🧠 中文 العربية", "a=b=c", "control\x01\x02\x1f", "--looks-like-flag", "path/that.md", "", "  spaces  ", "obsidian://open", "\u2028sep\u2029"];
+  const garbled = strings.filter((content, i) => {
+    const path = `Cli/string${i}.md`;
+    return cliCall({ op: "create", path, content, by }).ok !== true || cliCall({ op: "read", path }).result?.content !== content;
+  });
+  check("obsidian provenance-sync keeps every string intact", garbled.length === 0, JSON.stringify(garbled));
+  cliCall({ op: "create", path: "Cli/ops.md", content: "First.", by });
+  const edited = cliCall({ op: "edit", path: "Cli/ops.md", oldString: "First", newString: "Second", by });
+  const appended = cliCall({ op: "append", path: "Cli/ops.md", text: " Third.", by });
+  const provenance = cliCall({ op: "read", path: "Cli/ops.md", provenance: true });
+  check(
+    "writes through the handler are attributed to the agent",
+    edited.result?.replaced === 1 && appended.ok && provenance.result?.content === "Second. Third." && provenance.result.sentences.every((s) => s.authors.join() === "agent:cli-e2e"),
+    JSON.stringify(provenance),
+  );
+  check("the handler lists", cliCall({ op: "list", prefix: "Cli/" }).result?.files.includes("Cli/ops.md"));
+  check("the handler searches", cliCall({ op: "search", query: "AgentBridge" }).result?.paths.includes("Projects/Roadmap.md"));
+  check("the handler follows links", cliCall({ op: "links", path: "Linker.md" }).result?.paths.includes("McpMoved/Deep/Target2.md"));
+  check("the handler follows backlinks", cliCall({ op: "backlinks", path: "McpMoved/Deep/Target2.md" }).result?.paths.includes("Linker.md"));
+  check("the handler finds the daily note", cliCall({ op: "daily" }).result?.path === daily.content[0].text);
+  await eventually(async () => existsSync(join(vault, "Cli/ops.md")));
+  const cliRenamed = cliCall({ op: "rename", from: "Cli/ops.md", to: "Cli/renamed.md" });
+  await eventually(async () => existsSync(join(vault, "Cli/renamed.md")));
+  check("the handler renames and deletes", cliRenamed.ok === true && cliCall({ op: "delete", path: "Cli/renamed.md" }).ok === true, JSON.stringify(cliRenamed));
+  const invalid = cliCall({ op: "read", path: "../outside.md" });
+  check("the handler rejects a bad request as an op response", invalid.ok === false && invalid.code === "invalid", JSON.stringify(invalid));
+  const big = "A long line of a long note.\n".repeat(190_000);
+  check("a 5 MB note goes through a request file", cliCall({ op: "create", path: "Cli/big.md", content: big, by }).ok === true && cliCall({ op: "read", path: "Cli/big.md" }).result?.content === big);
+
   await opsCall({ op: "append", path: "Welcome.md", text: "RemoteAgent line.", by: { agent: "agent:andy", why: "agent" } });
   const remote = await eventually(async () => {
     const counts = await cdp.eval(`return app.workspace.getLeavesOfType("markdown").map(l => l.view.editor.getValue().split("RemoteAgent").length - 1)`);
@@ -368,7 +412,7 @@ try {
   const files = await eventually(async () => {
     const r = await opsCall({ op: "list" });
     const notes = r.result.files.filter(
-      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Linker.md"].includes(f),
+      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Linker.md"].includes(f),
     );
     return notes.join(",") === "Projects/Renamed.md" ? notes : undefined;
   }, 15000);
@@ -380,6 +424,14 @@ try {
   }, 15000);
   check("edits made on both sides while closed are merged", !!merged);
   check("the merged note is written back to disk", existsSync(join(vault, "Projects/Renamed.md")) && readFileSync(join(vault, "Projects/Renamed.md"), "utf8").includes("WhileClosed"));
+
+  // Closing the last window ends the app off macOS, so a cold call can't be tested there.
+  if (process.platform === "darwin") {
+    await cdp.eval(`window.close(); return true`).catch(() => undefined);
+    await sleep(1500);
+    const cold = cliCall({ op: "list", prefix: "Projects/" });
+    check("a call to a closed vault opens it and waits for sync to start", cold.result?.files.includes("Projects/Renamed.md"), JSON.stringify(cold));
+  }
   cdp?.close();
 } catch (e) {
   check("run completed", false, e instanceof Error ? e.stack : String(e));

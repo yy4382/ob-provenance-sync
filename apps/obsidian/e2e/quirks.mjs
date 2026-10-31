@@ -249,6 +249,18 @@ const QUIRKS = [
     },
   },
   {
+    id: "cli-reply-is-stdout",
+    desktopOnly: true,
+    async probe() {
+      const reply = JSON.stringify({ text: "line one\nline two 中文 🧠" });
+      await cdp.eval(`window.quirkProbe.cliReply = ${JSON.stringify(reply)}; return true`);
+      const answered = instance.cli("quirk-probe");
+      expect(answered.status === 0 && answered.stdout === `${reply}\n`, "obsidian prints what a CLI handler returns, plus a newline", answered);
+      const missing = instance.cli("no-such-command");
+      expect(missing.status === 0 && missing.stdout.startsWith("Error:"), "a command nobody registered prints plain text and exits 0", missing);
+    },
+  },
+  {
     id: "app-id-is-a-string",
     async probe() {
       const seen = await cdp.eval(`return typeof app.appId`);

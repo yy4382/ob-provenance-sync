@@ -69,6 +69,21 @@ export type OpResult =
 export type OpResponse = { ok: true; result: OpResult } | { ok: false; code: OpErrorCode; message: string };
 export type OpErrorCode = "invalid" | "not-found" | "ambiguous" | "exists" | "unsupported" | "unavailable";
 
+const opResponseSchema = z.union([
+  z.object({ ok: z.literal(true), result: z.looseObject({ op: z.string() }) }),
+  z.object({ ok: z.literal(false), code: z.string(), message: z.string() }),
+]);
+
+/** Parses a vault host's answer; null if `text` isn't one, which means the host never saw the request. */
+export function parseOpResponse(text: string): OpResponse | null {
+  try {
+    const raw: unknown = JSON.parse(text);
+    return opResponseSchema.safeParse(raw).success ? (raw as OpResponse) : null;
+  } catch {
+    return null;
+  }
+}
+
 export class OpError extends Error {
   constructor(
     readonly code: OpErrorCode,

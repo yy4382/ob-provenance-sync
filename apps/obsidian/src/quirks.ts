@@ -124,3 +124,10 @@ export interface DailyNotes {
 export function dailyNotesPlugin(app: App): DailyNotes | null {
   return (internals(app).internalPlugins?.getEnabledPluginById?.("daily-notes") as DailyNotes | null | undefined) ?? null;
 }
+
+/**
+ * ob-provenance reads what a handler from registerCliHandler returns off the
+ * stdout of `obsidian`, which exits 0 even when the command failed.
+ *
+ * quirk: cli-reply-is-stdout
+ */
