@@ -88,16 +88,50 @@ jobs:
           OBSIDIAN_ARGS: --no-sandbox --password-store=basic
         run: |
           export OBSIDIAN_BIN="$RUNNER_TEMP/obsidian/squashfs-root/obsidian"
-          xvfb-run -a -s "-screen 0 1280x900x24" node apps/obsidian/e2e/compat.mjs test "$VERSION"
+          xvfb-run -a -s "-screen 0 1280x900x24" node apps/obsidian/e2e/compat.mjs test "$VERSION" linux
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: report-${{ matrix.version }}
-          path: reports/${{ matrix.version }}.json
+          name: report-${{ matrix.version }}-linux
+          path: reports/${{ matrix.version }}-linux.json
+          if-no-files-found: error
+
+  # Obsidian's emulated mobile mode turns on its iOS code paths only on a Mac.
+  test-ios-code-paths:
+    needs: versions
+    if: needs.versions.outputs.versions != '[]'
+    runs-on: macos-15
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.versions.outputs.versions) }}
+    env:
+      VERSION: ${{ matrix.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Download Obsidian
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "v$VERSION" -R obsidianmd/obsidian-releases -p "Obsidian-$VERSION.dmg" -D "$RUNNER_TEMP/obsidian"
+          hdiutil attach "$RUNNER_TEMP/obsidian/Obsidian-$VERSION.dmg" -nobrowse -mountpoint "$RUNNER_TEMP/obsidian/mount"
+      - name: Test
+        run: |
+          export OBSIDIAN_BIN="$RUNNER_TEMP/obsidian/mount/Obsidian.app/Contents/MacOS/Obsidian"
+          node apps/obsidian/e2e/compat.mjs test "$VERSION" macos
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-${{ matrix.version }}-macos
+          path: reports/${{ matrix.version }}-macos.json
           if-no-files-found: error
 
   record:
-    needs: [versions, test]
+    needs: [versions, test, test-ios-code-paths]
     if: always() && needs.versions.outputs.versions != '[]' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

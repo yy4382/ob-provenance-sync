@@ -5,12 +5,13 @@
 //   OBSIDIAN_BIN=/path/to/Obsidian MOBILE=1 QUIRKS_REPORT=report.json node apps/obsidian/e2e/quirks.mjs
 //
 // MOBILE=1 emulates the mobile UI inside the desktop app. It covers what the two share, which is
-// the editor and the vault, but not the mobile file system underneath them.
+// the editor and the vault, but not WebKit or the mobile file system. Obsidian's iOS code paths
+// only turn on when the emulating computer is a Mac.
 import { appendFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { eventually, obsidian, sleep } from "./harness.mjs";
+import { eventually, obsidian, older, sleep } from "./harness.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const mobile = process.env.MOBILE === "1";
@@ -47,6 +48,9 @@ async function openExisting(path) {
 
 /** Waits for Obsidian to have saved everything typed so far. */
 const settled = () => sleep(3000);
+
+/** For a probe whose behavior changed in `version`: the same test as requireApiVersion in quirks.ts. */
+const since = (version) => !older(report.version, version);
 
 /** Fails a probe with what was seen, so the report shows how the behavior changed. */
 function expect(ok, claim, seen) {
@@ -267,18 +271,20 @@ async function typeInSplitPanes() {
   return edits;
 }
 
-const report = { version: null, mobile, results: [] };
+const report = { version: null, mobile, iosBranches: false, results: [] };
 let failures = 0;
 try {
   cdp = await instance.open();
   if (!(await eventually(() => cdp.eval(`return !!window.quirkLog`), 10000))) throw new Error("quirk-probe did not load");
   report.version = await cdp.eval(`return window.quirkProbe.apiVersion`);
   if (mobile) {
-    await cdp.eval(`app.emulateMobile(true); return true`);
-    await sleep(1000);
-    if (!(await cdp.eval(`return app.isMobile && document.body.classList.contains("is-mobile")`))) throw new Error("the mobile UI did not turn on");
+    // It reloads the page, which loads the probe again in the new mode.
+    await cdp.eval(`app.emulateMobile(true); return true`).catch(() => undefined);
+    await eventually(() => cdp.eval(`return window.quirkProbe?.isMobile && app.workspace.layoutReady`), 15000);
+    if (!(await cdp.eval(`return window.quirkProbe?.isMobile && document.body.classList.contains("is-mobile")`))) throw new Error("the mobile UI did not turn on");
+    report.iosBranches = await cdp.eval(`return window.quirkProbe.isIosApp`);
   }
-  console.log(`Obsidian ${report.version}${mobile ? ", mobile UI" : ""}`);
+  console.log(`Obsidian ${report.version}${mobile ? `, mobile UI, iOS code paths ${report.iosBranches ? "on" : "off"}` : ""}`);
   for (const { id, desktopOnly, probe } of QUIRKS) {
     if (desktopOnly && mobile) {
       console.log(`SKIP  ${id}`);

@@ -11,6 +11,13 @@ const EXTRA_ARGS = process.env.OBSIDIAN_ARGS?.split(" ").filter(Boolean) ?? [];
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** Whether version `a` comes before version `b`. */
+export function older(a, b) {
+  const [x, y] = [a, b].map((v) => v.split(".").map(Number));
+  const i = x.findIndex((n, at) => n !== y[at]);
+  return i >= 0 && x[i] < y[i];
+}
+
 export const freePort = () =>
   new Promise((res) => {
     const s = createServer().listen(0, "127.0.0.1", () => {

@@ -1,6 +1,6 @@
 // Records what Obsidian does, and does nothing else, so a probe in e2e/quirks.mjs can only fail
 // because Obsidian changed. Plain CommonJS: it runs as is, without the plugin build.
-const { Plugin, TextFileView, apiVersion, editorInfoField } = require("obsidian");
+const { Platform, Plugin, TextFileView, apiVersion, editorInfoField } = require("obsidian");
 const { Transaction } = require("@codemirror/state");
 const { EditorView, ViewPlugin } = require("@codemirror/view");
 
@@ -55,6 +55,6 @@ module.exports = class QuirkProbe extends Plugin {
     });
     this.registerEvent(vault.on("modify", (file) => log.push({ kind: "modify-event", file: file.path })));
 
-    window.quirkProbe = { apiVersion, isEditorView: (cm) => cm instanceof EditorView };
+    window.quirkProbe = { apiVersion, isMobile: Platform.isMobile, isIosApp: Platform.isIosApp, isEditorView: (cm) => cm instanceof EditorView };
   }
 };

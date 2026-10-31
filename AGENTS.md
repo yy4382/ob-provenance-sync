@@ -6,7 +6,7 @@
 - You're free to commit and push to main. Pushing a semver tag needs human approval, but an alpha tag doesn't. When the user asks you to "release", you may push any semver tag that makes sense.
 - Normally this git commit sign is enabled through 1Password, but if it fails, you can continue by skipping the gpg sign.
 
-- Reliance on anything Obsidian doesn't document goes in `apps/obsidian/src/quirks.ts`, with a probe in `apps/obsidian/e2e/quirks.mjs`. Devices run different Obsidian versions, so a changed quirk gets a `requireApiVersion` branch there, not a replacement.
+- Reliance on anything Obsidian doesn't document goes in `apps/obsidian/src/quirks.ts`, with a probe in `apps/obsidian/e2e/quirks.mjs`. Devices run different Obsidian versions, so a changed quirk gets a `requireApiVersion` branch there, not a replacement. The README's Obsidian versions section has the steps for adding and dropping a version.
 
 ## Tech stack
 
