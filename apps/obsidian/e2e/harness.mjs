@@ -1,11 +1,27 @@
 // Starts a real Obsidian with an isolated profile, so it never sees your own vaults, and drives it
 // over the Chrome DevTools protocol. Shared by the end-to-end test and the quirk probes.
-import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-const OBSIDIAN = process.env.OBSIDIAN_BIN ?? "/Applications/Obsidian.app/Contents/MacOS/Obsidian";
+/**
+ * A copy of the app that macOS won't let become the active app, so a test run can't take
+ * the keyboard from whatever you're doing. Made once per Obsidian version.
+ */
+function backgroundCopy(app) {
+  const plist = (path, command) => execFileSync("/usr/libexec/PlistBuddy", ["-c", command, join(path, "Contents/Info.plist")], { encoding: "utf8" }).trim();
+  const copy = join(homedir(), ".cache/ob-provenance-sync", `Obsidian-${plist(app, "Print :CFBundleShortVersionString")}.app`);
+  if (existsSync(copy)) return copy;
+  const building = `${copy}.${process.pid}`;
+  cpSync(app, building, { recursive: true, verbatimSymlinks: true });
+  plist(building, "Add :LSBackgroundOnly bool true");
+  execFileSync("codesign", ["--force", "--deep", "--sign", "-", building], { stdio: "ignore" });
+  renameSync(building, copy);
+  return copy;
+}
+
 // Extra command-line flags, split on spaces. CI needs some that a desktop doesn't.
 const EXTRA_ARGS = process.env.OBSIDIAN_ARGS?.split(" ").filter(Boolean) ?? [];
 
@@ -39,6 +55,7 @@ export async function eventually(fn, ms = 8000) {
 
 /** One Obsidian with its own profile, opening `vault`. Restartable: `kill`, then `open` again. */
 export async function obsidian({ vault, profile }) {
+  const OBSIDIAN = process.env.OBSIDIAN_BIN ?? join(backgroundCopy("/Applications/Obsidian.app"), "Contents/MacOS/Obsidian");
   const cdpPort = await freePort();
   let child = null;
   mkdirSync(profile, { recursive: true });

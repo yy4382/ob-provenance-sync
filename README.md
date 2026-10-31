@@ -107,7 +107,7 @@ pnpm e2e             # end-to-end test in a real Obsidian (set OBSIDIAN_BIN off 
 pnpm quirks          # check that Obsidian still behaves the way the plugin assumes (MOBILE=1 for the mobile UI)
 ```
 
-`pnpm e2e` and `pnpm quirks` launch a separate Obsidian instance with its own profile. They work on a temporary vault, so they never open your own vaults.
+`pnpm e2e` and `pnpm quirks` launch a separate Obsidian instance with its own profile. They work on a temporary vault, so they never open your own vaults. On macOS they run a background-only copy of Obsidian, kept in `~/.cache/ob-provenance-sync` (about 530 MB per Obsidian version), so a run doesn't take focus from what you're doing.
 
 ### Obsidian versions
 
