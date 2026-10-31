@@ -4,30 +4,19 @@
 //
 //   pnpm e2e                      (from the repo root; builds everything first)
 //   OBSIDIAN_BIN=/path/to/Obsidian KEEP=1 node apps/obsidian/e2e/run.mjs
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { eventually, freePort, obsidian, sleep } from "./harness.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../../..");
-const OBSIDIAN = process.env.OBSIDIAN_BIN ?? "/Applications/Obsidian.app/Contents/MacOS/Obsidian";
 const DEVICE_TOKEN = "e2e-device-token-0123456789";
 const AGENT_TOKEN = "e2e-agent-token-0123456789";
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-const freePort = () =>
-  new Promise((res) => {
-    const s = createServer().listen(0, "127.0.0.1", () => {
-      const { port } = s.address();
-      s.close(() => res(port));
-    });
-  });
-
 const work = mkdtempSync(join(tmpdir(), "provenance-e2e-"));
 const vault = join(work, "vault");
 const profile = join(work, "profile");
@@ -37,15 +26,6 @@ let failures = 0;
 function check(name, ok, detail = "") {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${ok ? "" : `  ${detail}`}`);
   if (!ok) failures++;
-}
-
-async function eventually(fn, ms = 8000) {
-  const end = Date.now() + ms;
-  for (;;) {
-    const value = await fn().catch(() => undefined);
-    if (value || Date.now() > end) return value;
-    await sleep(200);
-  }
 }
 
 // --- fixtures ---------------------------------------------------------------
@@ -71,7 +51,6 @@ mkdirSync(pluginDir, { recursive: true });
 for (const f of ["main.js", "manifest.json", "styles.css"]) cpSync(join(repo, "apps/obsidian", f), join(pluginDir, f));
 
 const serverPort = await freePort();
-const cdpPort = await freePort();
 const api = `http://127.0.0.1:${serverPort}/api/vaults/e2e/ops`;
 writeFileSync(
   join(work, "server.json"),
@@ -90,8 +69,6 @@ writeFileSync(
   join(pluginDir, "data.json"),
   JSON.stringify({ serverUrl: `http://127.0.0.1:${serverPort}`, token: DEVICE_TOKEN, vaultId: "e2e", humanName: "tester", deviceName: "e2e-mac" }),
 );
-mkdirSync(profile, { recursive: true });
-writeFileSync(join(profile, "obsidian.json"), JSON.stringify({ vaults: { e2evault: { path: vault, ts: Date.now(), open: true } } }));
 
 // --- processes --------------------------------------------------------------
 
@@ -100,69 +77,7 @@ function startServer() {
   children.push(child);
 }
 
-let obsidian = null;
-function startObsidian() {
-  obsidian = spawn(OBSIDIAN, [`--user-data-dir=${profile}`, `--remote-debugging-port=${cdpPort}`], { stdio: "ignore" });
-  children.push(obsidian);
-}
-/** Kills by profile path: on macOS the launched process isn't always the one that keeps running. */
-async function killObsidian() {
-  obsidian?.kill("SIGKILL");
-  spawnSync("pkill", ["-9", "-f", `user-data-dir=${profile}`]);
-  await sleep(1500);
-}
-
-/** Trusting a vault opens the plugin settings in a window of its own. */
-async function closeSettingsWindows() {
-  await sleep(1000);
-  const targets = await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json();
-  for (const t of targets) if (t.type === "page" && t.title.startsWith("Settings")) await fetch(`http://127.0.0.1:${cdpPort}/json/close/${t.id}`);
-}
-
-// --- CDP --------------------------------------------------------------------
-
-async function page() {
-  const targets = await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json();
-  const target = targets.find((t) => t.type === "page" && t.title.includes("vault") && !t.title.startsWith("Settings"));
-  if (!target) throw new Error("no vault window yet");
-  const ws = new WebSocket(target.webSocketDebuggerUrl);
-  await new Promise((r, j) => {
-    ws.onopen = r;
-    ws.onerror = j;
-  });
-  let id = 0;
-  const call = (method, params) =>
-    new Promise((res) => {
-      const my = ++id;
-      const on = (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.id === my) {
-          ws.removeEventListener("message", on);
-          res(msg.result);
-        }
-      };
-      ws.addEventListener("message", on);
-      ws.send(JSON.stringify({ id: my, method, params }));
-    });
-  return {
-    async eval(body) {
-      const r = await call("Runtime.evaluate", { expression: `(async () => { ${body} })()`, awaitPromise: true, returnByValue: true });
-      if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description ?? "evaluation failed");
-      return r.result.value;
-    },
-    async type(text) {
-      for (const ch of text) await call("Input.insertText", { text: ch });
-    },
-    hover: (x, y) => call("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }),
-    /** Saves a screenshot to $SHOTS/<name>.png when SHOTS is set, for looking at the UI by eye. */
-    async shot(name) {
-      if (!process.env.SHOTS) return;
-      const r = await call("Page.captureScreenshot", { format: "png" });
-      writeFileSync(join(process.env.SHOTS, `${name}.png`), Buffer.from(r.data, "base64"));
-    },
-    close: () => ws.close(),
-  };
-}
+const instance = await obsidian({ vault, profile });
 
 const engineFile = (path) => `app.plugins.plugins["provenance-sync"].engine.fileAt(${JSON.stringify(path)})`;
 /** Distinct authors of the characters of `marker`, which may span several Yjs runs. */
@@ -224,17 +139,7 @@ async function mcpCall(name, args) {
 }
 
 async function openObsidian() {
-  startObsidian();
-  const cdp = await eventually(() => page(), 30000);
-  if (!cdp) throw new Error(`Obsidian did not open a window (OBSIDIAN_BIN=${OBSIDIAN})`);
-  if (!(await eventually(() => cdp.eval(`return !!window.app?.plugins && app.workspace.layoutReady`), 30000))) throw new Error("Obsidian never finished loading");
-  // First open of a vault with plugins asks whether to trust it; answer like a user would.
-  const trusted = await eventually(
-    () => cdp.eval(`const b = [...document.querySelectorAll(".modal button")].find(b => b.innerText.includes("Trust author")); b?.click(); return !!b`),
-    8000,
-  );
-  if (trusted) await closeSettingsWindows();
-  else await cdp.eval(`await app.plugins.setEnable(true); return true`);
+  const cdp = await instance.open();
   const synced = await eventually(() =>
     cdp.eval(`return document.querySelector(".status-bar")?.innerText.includes("Provenance: synced") && !!${engineFile("Welcome.md")}`),
   );
@@ -256,6 +161,12 @@ try {
   check(
     "legacy token moved into the keychain",
     await cdp.eval(`const p = app.plugins.plugins["provenance-sync"]; return !("token" in p.settings) && !!app.secretStorage.getSecret(p.settings.tokenSecret)`),
+  );
+
+  // Renaming these would leave every device's CRDT history behind and make it a fresh device.
+  check(
+    "local history stays under its database names",
+    await cdp.eval(`return (await indexedDB.databases()).some((d) => d.name.startsWith(\`provenance-sync/\${app.appId}/\`))`),
   );
 
   const plugin = `app.plugins.plugins["provenance-sync"]`;
@@ -441,7 +352,7 @@ try {
   await cdp.eval(`await app.plugins.plugins["provenance-sync"].engine.settle(); return true`);
   await sleep(1500);
   cdp.close();
-  await killObsidian();
+  await instance.kill();
 
   const roadmap = join(vault, "Projects/Roadmap.md");
   writeFileSync(join(vault, "Projects/Renamed.md"), readFileSync(roadmap, "utf8") + "OfflineEdit line.\n");
@@ -452,7 +363,7 @@ try {
 
   cdp = await openObsidian().catch(async () => {
     // Welcome.md is gone, so the readiness probe above can't use it.
-    return eventually(() => page(), 30000);
+    return eventually(() => instance.page(), 30000);
   });
   const files = await eventually(async () => {
     const r = await opsCall({ op: "list" });
@@ -474,7 +385,7 @@ try {
   check("run completed", false, e instanceof Error ? e.stack : String(e));
 } finally {
   for (const c of children) c.kill("SIGKILL");
-  await killObsidian();
+  await instance.kill();
   if (process.env.KEEP) console.log(`kept ${work}`);
   else rmSync(work, { recursive: true, force: true });
 }

@@ -27,7 +27,7 @@ import {
 } from "@provenance/core";
 import * as Y from "yjs";
 
-/** The vault's files as the engine sees them; Obsidian's vault API in the plugin, a Map in tests. */
+/** The vault's files as the engine sees them; the host's file API in the plugin, a Map in tests. */
 export interface Disk {
   /** Whether a path belongs to the synced vault (the config folder doesn't). */
   accepts(path: string): boolean;
@@ -48,7 +48,7 @@ export interface Blobs {
   get(hash: string): Promise<ArrayBuffer>;
 }
 
-/** Local storage for one document (IndexedDB in Obsidian), plus small per-document values. */
+/** Local storage for one document, plus small per-document values. */
 export interface Persistence {
   whenSynced: Promise<unknown>;
   destroy(): unknown;
@@ -115,7 +115,7 @@ const MIRROR_KEY = "on-disk";
  * diff(base, disk) on a fork taken at the base and merge the fork back, so
  * remote changes that haven't reached the disk yet are kept rather than
  * reverted. Disk writes are debounced and skipped while an editor is bound,
- * because then the editor owns saving. When Obsidian saves, `trackWrite`
+ * because then the editor owns saving. When it saves, `trackWrite`
  * learns the exact text it writes and finds in `editorStates` the state the
  * editor showed with that text; once the save lands, that state is the base.
  * Telling saves apart by comparing the text read back later is not enough:
@@ -245,7 +245,7 @@ export class MarkdownFile {
    * A modify event for this file. The text is merged against the base, so an
    * editor's save, whose state `trackWrite` already made the base, adds
    * nothing, and anything else is another program's edit, whether or not the
-   * file is open (the editor ignores Obsidian's reload). A read that a tracked
+   * file is open (editors don't push outside changes). A read that a tracked
    * write overlapped may hold the new text with the old base, so it reads again.
    */
   async onDiskModified(): Promise<void> {
@@ -262,7 +262,7 @@ export class MarkdownFile {
   }
 
   /**
-   * Obsidian is about to write `text` to this file, usually an editor saving.
+   * The host is about to write `text` to this file, usually an editor saving.
    * If the CRDT held that text, in its current state or one an editor showed,
    * that state becomes the base once the write lands.
    */
@@ -286,7 +286,7 @@ export class MarkdownFile {
   /**
    * Binds an editor, as a queued task, and resolves to its release function.
    * While any editor is bound, the editor saves the file. `loaded` is the text
-   * Obsidian loaded into the first editor; it may hold another program's edit
+   * the host loaded into the first editor; it may hold another program's edit
    * whose modify event is still pending, so it is merged like a disk change
    * before the editor is made to show the CRDT's text.
    */
@@ -433,7 +433,7 @@ function synced(provider: HocuspocusProvider): Promise<void> {
  * disk operation the engine performs updates the mirror first, so the vault
  * events it triggers find nothing to do. `syncTree` is the single,
  * idempotent pass that moves the disk toward the index. The mirror is also
- * persisted, so a file deleted while Obsidian was closed is recognised as
+ * persisted, so a file deleted while the engine wasn't running is recognised as
  * deleted on the next start rather than restored from the server.
  */
 export class SyncEngine implements VaultDocs {
@@ -1125,7 +1125,7 @@ export class SyncEngine implements VaultDocs {
     });
   }
 
-  /** Obsidian is about to write `text` to `path`; see MarkdownFile.trackWrite. */
+  /** The host is about to write `text` to `path`; see MarkdownFile.trackWrite. */
   trackWrite<T>(path: string, text: string, write: () => Promise<T>): Promise<T> {
     const file = this.fileAt(path);
     return file ? file.trackWrite(text, write) : write();

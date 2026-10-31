@@ -1,6 +1,6 @@
 ---
 name: verify-markdown-file-sync
-description: Model-check the sync engine in apps/obsidian/src/sync/engine.ts. Two checks. MarkdownFile.tla covers one note's file and CRDT (applyDisk, onDiskModified, trackWrite, writeNow, writeIfUnchanged, scheduleWrite, bindEditor, editorStates, the base snapshot, enqueue/onModify, binding.ts attach/loadFromCrdt, main.ts's vault.modify wrapper). VaultTree.tla covers which note sits at which path on two devices (scanDisk, detectRenames, syncTree, reconcileDisk, settleCollision, onCreate/onRename/onDelete, the mirror, and the conflict resolver's trash/rename actions). Use before and after changing any of these, and whenever a bug report says an outside edit was lost, undone or doubled, a note is on one device but not another, or a deleted note came back.
+description: Model-check the sync engine in apps/obsidian/src/sync/engine.ts. Two checks. MarkdownFile.tla covers one note's file and CRDT (applyDisk, onDiskModified, trackWrite, writeNow, writeIfUnchanged, scheduleWrite, bindEditor, editorStates, the base snapshot, enqueue/onModify, binding.ts attach/loadFromCrdt, quirks.ts wrapEditorSaves and replaceIfHolds). VaultTree.tla covers which note sits at which path on two devices (scanDisk, detectRenames, syncTree, reconcileDisk, settleCollision, onCreate/onRename/onDelete, the mirror, and the conflict resolver's trash/rename actions). Use before and after changing any of these, and whenever a bug report says an outside edit was lost, undone or doubled, a note is on one device but not another, or a deleted note came back.
 ---
 
 # Verify the sync engine
@@ -35,13 +35,13 @@ Both models were last confirmed to describe the code at **f61fea1** (sync commit
 | `MarkdownFile` ytext observer (constructor) | `Observe`, `ObservePane` |
 | `applyDisk` (three-way merge on a fork at `base`) | `ApplyDisk`, `NewItems`, `DelItems`, `MergedBase` |
 | `onDiskModified` (reads again when a tracked write overlapped) | `ReadStarts`, `ReadRetries`, `ReadMerges` |
-| `trackWrite`, `recordEditorState`, `editorStates`; `main.ts` `vault.modify` wrapper | `EditorSave`, `savedInRead` |
+| `trackWrite`, `recordEditorState`, `editorStates`; `quirks.ts` `wrapEditorSaves` | `EditorSave`, `savedInRead` |
 | `bindEditor` (queued; merges the loaded text first) and its release | `OpenPane`, `BindTask`, `Bind`, `ClosePane` |
-| `scheduleWrite`, `writeNow`, `flush`; `obsidian.ts` `writeIfUnchanged` | `ScheduleWrite`, `WriteTimerFires`, `WriteRuns` |
+| `scheduleWrite`, `writeNow`, `flush`; `obsidian.ts` `writeIfUnchanged`, `quirks.ts` `replaceIfHolds` | `ScheduleWrite`, `WriteTimerFires`, `WriteRuns` |
 | `SyncEngine.enqueue`, `onModify`, `trackWrite` | `queue`, `pc` |
 | `SyncEngine.check` (rereads a note through `onDiskModified`) | `CheckFires` |
 | `binding.ts` `attach` (`shownFile`) → `bindEditor(current)` + `loadFromCrdt`, `onYjs`, `push` | `OpenPane`, `BindTask`, `Observe`, `Type` |
-| `main.ts` vault `modify` event → `engine.onModify` | `EditorSave`, `WatcherFires`, `WriteRuns` |
+| `obsidian.ts` `watchVault` `modify` event → `engine.onModify` | `EditorSave`, `WatcherFires`, `WriteRuns` |
 
 | Code | VaultTree.tla |
 | --- | --- |
@@ -54,7 +54,7 @@ Both models were last confirmed to describe the code at **f61fea1** (sync commit
 | `createFromDisk`; `VaultIndex.idOf`, `conflicts`; core `conflictPath` (`repairedConflictPath` never applies: model paths carry one suffix) | `Create`, `IdOf`, `LosersOf`, `ConflictPath` |
 | `conflict-plan.ts` `applyPlan` (trash a copy, rename it back; never a blank copy onto a missing original) | `UDelete`, `URename` |
 
-Run `git diff <sync commit> -- apps/obsidian/src/sync apps/obsidian/src/editor/binding.ts apps/obsidian/src/main.ts apps/obsidian/src/conflict-plan.ts packages/core/src/vault.ts`. If a hunk touches a row above, the model may no longer describe the code: update it (below) before you trust a result.
+Run `git diff <sync commit> -- apps/obsidian/src/sync apps/obsidian/src/editor/binding.ts apps/obsidian/src/main.ts apps/obsidian/src/quirks.ts apps/obsidian/src/conflict-plan.ts packages/core/src/vault.ts`. If a hunk touches a row above, the model may no longer describe the code: update it (below) before you trust a result.
 
 ## Run it
 
@@ -85,7 +85,7 @@ MarkdownFile.tla's first run (at 63a3bcf) found four orderings, each now a regre
 - **F1: opening a note could wipe an outside edit** (NothingLost). Fix: `bindEditor` is a queued task that first merges the first pane's loaded text.
 - **F2: an outside revert to an earlier editor text was undone** (NothingLost). Fix: reads no longer guess saves from text (F4's fix).
 - **F3: writeNow overwrote an outside edit whose event was pending** (NothingLost). Fix: `writeNow` writes through `writeIfUnchanged` and otherwise rereads and merges.
-- **F4: a save and an outside edit read together doubled text** (NoDuplicate, NoRevert). Fix: `main.ts` wraps `vault.modify` so `trackWrite` knows the exact saved text; a read overlapping a tracked write reads again.
+- **F4: a save and an outside edit read together doubled text** (NoDuplicate, NoRevert). Fix: `quirks.ts` wraps `vault.modify` so `trackWrite` knows the exact saved text; a read overlapping a tracked write reads again.
 
 Live probes in a real Obsidian found three more, in `binding.ts`, each now a check in `apps/obsidian/e2e/run.mjs`. MarkdownFile.tla can't see them: `BindTask` takes the pane's text to be what Obsidian read from the file, and each of these bound a pane when it wasn't. The fix is that a pane binds only a file loaded into its editor state:
 

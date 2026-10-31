@@ -1,0 +1,126 @@
+name: Obsidian compatibility
+
+# Obsidian's repository can't notify this one, so a schedule looks for new
+# releases. A push that touches the checks tests every supported version.
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  push:
+    paths:
+      - apps/obsidian/src/quirks.ts
+      - apps/obsidian/src/sync/obsidian.ts
+      - apps/obsidian/e2e/**
+      - .github/workflows/obsidian-compat.yml
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Obsidian version to test; empty for every supported version"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: obsidian-compat-${{ github.ref }}
+
+jobs:
+  versions:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    outputs:
+      versions: ${{ steps.due.outputs.versions }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: due
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            versions=$(jq -cn --arg v "$INPUT_VERSION" '[$v]')
+          elif [ "$GITHUB_EVENT_NAME" = schedule ]; then
+            versions=$(node apps/obsidian/e2e/compat.mjs due)
+          else
+            versions=$(node apps/obsidian/e2e/compat.mjs due --all)
+          fi
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+          echo "Versions to test: $versions" >> "$GITHUB_STEP_SUMMARY"
+      # GitHub turns schedules off after 60 days without repository activity,
+      # and Obsidian has gone longer than that between stable releases.
+      - if: always() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/obsidian-compat.yml/enable"
+
+  test:
+    needs: versions
+    if: needs.versions.outputs.versions != '[]'
+    # Pinned: this runs unattended, and its package names change between Ubuntu releases.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.versions.outputs.versions) }}
+    env:
+      VERSION: ${{ matrix.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: sudo apt-get update && sudo apt-get install -y xvfb libasound2t64 libgbm1 libgtk-3-0t64 libnss3
+      - name: Download Obsidian
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "v$VERSION" -R obsidianmd/obsidian-releases -p "Obsidian-$VERSION.AppImage" -D "$RUNNER_TEMP/obsidian"
+          cd "$RUNNER_TEMP/obsidian"
+          chmod +x "Obsidian-$VERSION.AppImage"
+          "./Obsidian-$VERSION.AppImage" --appimage-extract > /dev/null
+      - name: Test
+        env:
+          OBSIDIAN_ARGS: --no-sandbox --password-store=basic
+        run: |
+          export OBSIDIAN_BIN="$RUNNER_TEMP/obsidian/squashfs-root/obsidian"
+          xvfb-run -a -s "-screen 0 1280x900x24" node apps/obsidian/e2e/compat.mjs test "$VERSION"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-${{ matrix.version }}
+          path: reports/${{ matrix.version }}.json
+          if-no-files-found: error
+
+  record:
+    needs: [versions, test]
+    if: always() && needs.versions.result == 'success' && needs.versions.outputs.versions != '[]' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: reports
+          pattern: report-*
+      - name: Record results
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          VERSIONS: ${{ needs.versions.outputs.versions }}
+        run: node apps/obsidian/e2e/compat.mjs record reports "$VERSIONS"
+      - name: Commit verified versions
+        run: |
+          git diff --quiet && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Record Obsidian versions verified by CI"
+          git pull --rebase
+          git push

@@ -1,15 +1,10 @@
 import { executeOp, handleOpRequest, OpError, type OpRequest, type OpResult } from "@provenance/core";
-import { Platform, prepareSimpleSearch, type App, type TFile } from "obsidian";
+import { Platform, prepareSimpleSearch, type App } from "obsidian";
+import { dailyNotesPlugin } from "./quirks";
 import type { SyncEngine } from "./sync/engine";
 
 /** How long a rename gets to finish before it counts as waiting on the human. */
 const RENAME_SETTLE_MS = 2000;
-
-/** Obsidian's core Daily notes plugin. These are internals, read defensively. */
-interface DailyNotes {
-  getDailyNote?(): Promise<TFile | null>;
-  options?: { folder?: string };
-}
 
 /**
  * The full-mode half of the vault ops: things only a running Obsidian knows
@@ -61,8 +56,7 @@ async function runFull(app: App, engine: SyncEngine, req: OpRequest): Promise<Op
       return { op: "search", paths };
     }
     case "daily": {
-      const internal = (app as unknown as { internalPlugins?: { getEnabledPluginById?(id: string): DailyNotes | null } }).internalPlugins;
-      const daily = internal?.getEnabledPluginById?.("daily-notes");
+      const daily = dailyNotesPlugin(app);
       if (!daily?.getDailyNote) throw new OpError("unsupported", "Obsidian's Daily notes plugin is turned off");
       const file = await daily.getDailyNote();
       if (!file) throw new OpError("not-found", `could not open today's daily note; check that its folder exists: ${daily.options?.folder ?? "(vault root)"}`);

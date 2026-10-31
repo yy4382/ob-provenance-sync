@@ -1,11 +1,54 @@
-import { normalizePath, requestUrl, TFile, type App } from "obsidian";
+import { normalizePath, requestUrl, TFile, type App, type Plugin, type TAbstractFile } from "obsidian";
 import { IndexeddbPersistence } from "y-indexeddb";
 import type * as Y from "yjs";
-import type { Blobs, Disk, Persistence } from "./engine";
+import { communityPluginOn, corePluginOn, deviceVaultId, replaceIfHolds, wrapEditorSaves } from "../quirks";
+import type { Blobs, Disk, Persistence, SyncEngine } from "./engine";
+
+const isBinary = (file: TFile) => file.extension !== "md";
 
 /** Whether a path belongs to the synced vault. The config folder's name is user-configurable, so ask Obsidian for it. */
 export function isSyncedPath(app: App, path: string): boolean {
   return !path.startsWith(`${app.vault.configDir}/`);
+}
+
+/**
+ * Other tools that sync this vault's files. Each turns this plugin's renames,
+ * trashes and writes on one device into file events on the others, which
+ * this plugin takes for the user's own and syncs again, so one mistake
+ * reaches every device.
+ */
+export function otherSyncs(app: App): string[] {
+  const found: string[] = [];
+  if (corePluginOn(app, "sync")) found.push("Obsidian Sync");
+  if (communityPluginOn(app, "remotely-save")) found.push("Remotely Save");
+  if (communityPluginOn(app, "obsidian-git")) found.push("Obsidian Git");
+  return found;
+}
+
+/** Feeds the vault's events and the editors' saves to whichever engine is running. */
+export function watchVault(plugin: Plugin, engine: () => SyncEngine | null) {
+  const { app } = plugin;
+  const forward = (fn: (engine: SyncEngine, file: TFile) => unknown) => (file: TAbstractFile) => {
+    const running = engine();
+    if (running && file instanceof TFile && isSyncedPath(app, file.path)) void fn(running, file);
+  };
+  plugin.registerEvent(app.vault.on("create", forward((e, f) => e.onCreate(f.path, isBinary(f)))));
+  plugin.registerEvent(app.vault.on("modify", forward((e, f) => e.onModify(f.path, isBinary(f)))));
+  plugin.registerEvent(app.vault.on("delete", forward((e, f) => e.onDelete(f.path))));
+  plugin.registerEvent(
+    app.vault.on("rename", (file, oldPath) => {
+      const running = engine();
+      if (running && file instanceof TFile && isSyncedPath(app, oldPath)) void running.onRename(oldPath, file.path);
+    }),
+  );
+  // An editor saves through vault.modify with the exact text it writes;
+  // the engine needs that text to tell the save from other programs' edits.
+  plugin.register(
+    wrapEditorSaves(app, (file, data, write) => {
+      const running = engine();
+      return running && isSyncedPath(app, file.path) && !isBinary(file) ? running.trackWrite(file.path, data, write) : write();
+    }),
+  );
 }
 
 /** The vault through Obsidian's API, so every write is seen by open views and other plugins. */
@@ -29,7 +72,7 @@ export class ObsidianDisk implements Disk {
     return this.app.vault
       .getFiles()
       .filter((f) => this.accepts(f.path))
-      .map((f) => ({ path: f.path, binary: f.extension !== "md" }));
+      .map((f) => ({ path: f.path, binary: isBinary(f) }));
   }
 
   async exists(path: string) {
@@ -55,13 +98,9 @@ export class ObsidianDisk implements Disk {
     }
   }
 
-  /** vault.process runs the check and the write as one step of Obsidian's file queue, and skips the write when nothing changes. */
   async writeIfUnchanged(path: string, expected: string, text: string) {
     const f = this.file(path);
-    if (!f) return false;
-    let wrote = false;
-    await this.app.vault.process(f, (data) => (data === expected ? ((wrote = true), text) : data));
-    return wrote;
+    return f ? replaceIfHolds(this.app, f, expected, text) : false;
   }
 
   async writeBinary(path: string, data: ArrayBuffer) {
@@ -100,6 +139,7 @@ export function httpBlobs(baseUrl: string, vault: string, token: string): Blobs 
   };
 }
 
-export function indexedDbPersistence(prefix: string) {
+export function indexedDbPersistence(app: App) {
+  const prefix = `provenance-sync/${deviceVaultId(app)}`;
   return (name: string, doc: Y.Doc): Persistence => new IndexeddbPersistence(`${prefix}/${name}`, doc);
 }

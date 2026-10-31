@@ -1,16 +1,15 @@
 import { errorMessage, humanId, reattribute, REATTRIBUTABLE } from "@provenance/core";
-import { MarkdownView, Notice, Platform, Plugin, TAbstractFile, TFile, type App, type Editor } from "obsidian";
-import type { EditorView } from "@codemirror/view";
-import { around } from "monkey-around";
+import { MarkdownView, Notice, Platform, Plugin, type Editor } from "obsidian";
 import { startBridge } from "./bridge";
 import { ConflictsModal } from "./conflicts";
 import { EVENT_LOG_VIEW, EventLog, EventLogView } from "./event-log";
 import { installMcpCli, localMcpCommand, type LocalMcpCommand } from "./mcp-cli";
 import { provenanceExtension, renderProvenance, segmentAt } from "./editor/binding";
+import { codeMirrorOf } from "./quirks";
 import { ReattributeModal, type Attribution, type Reattribution } from "./reattribute";
 import { defaultSettings, ProvenanceSettingTab, type ProvenanceSettings } from "./settings";
 import { SyncEngine, type SyncStatus } from "./sync/engine";
-import { httpBlobs, indexedDbPersistence, isSyncedPath, ObsidianDisk } from "./sync/obsidian";
+import { httpBlobs, indexedDbPersistence, isSyncedPath, ObsidianDisk, otherSyncs, watchVault } from "./sync/obsidian";
 
 const CHECK_EVERY = 10 * 60_000;
 const OTHER_SYNC_CHECK_EVERY = 5_000;
@@ -27,30 +26,9 @@ const STATUS_TEXT: Record<Status, string> = {
   error: "Provenance: error",
 };
 
-/**
- * Other tools that sync this vault's files. Each turns this plugin's renames,
- * trashes and writes on one device into file events on the others, which
- * this plugin takes for the user's own and syncs again, so one mistake
- * reaches every device. These are Obsidian internals, read defensively.
- */
-function otherSyncs(app: App): string[] {
-  const internal = (app as unknown as { internalPlugins?: { getEnabledPluginById?(id: string): unknown } }).internalPlugins;
-  const community = (app as unknown as { plugins?: { enabledPlugins?: Set<string> } }).plugins?.enabledPlugins;
-  const found: string[] = [];
-  if (internal?.getEnabledPluginById?.("sync")) found.push("Obsidian Sync");
-  if (community?.has("remotely-save")) found.push("Remotely Save");
-  if (community?.has("obsidian-git")) found.push("Obsidian Git");
-  return found;
-}
-
-function cmOf(view: MarkdownView): EditorView | null {
-  return (view.editor as unknown as { cm?: EditorView }).cm ?? null;
-}
-
 export default class ProvenancePlugin extends Plugin {
   declare settings: ProvenanceSettings;
   private engine: SyncEngine | null = null;
-  private disk: ObsidianDisk | null = null;
   private stopBridge: (() => Promise<void>) | null = null;
   private statusEl: HTMLElement | null = null;
   private status: Status = "connecting";
@@ -90,7 +68,7 @@ export default class ProvenancePlugin extends Plugin {
       id: "show-provenance-at-cursor",
       name: "Show who wrote the current sentence",
       editorCallback: (editor, ctx) => {
-        const cm = ctx instanceof MarkdownView ? cmOf(ctx) : null;
+        const cm = ctx instanceof MarkdownView ? codeMirrorOf(ctx) : null;
         const segment = cm ? segmentAt(cm, editor.posToOffset(editor.getCursor())) : null;
         if (!segment) new Notice("No provenance recorded here.");
         else {
@@ -111,30 +89,8 @@ export default class ProvenancePlugin extends Plugin {
     });
     this.addCommand({ id: "reconnect", name: "Reconnect sync", callback: () => void this.reconnect() });
 
-    const forward = (fn: (engine: SyncEngine, file: TFile) => unknown) => (file: TAbstractFile) => {
-      if (this.engine && this.disk && file instanceof TFile && this.disk.accepts(file.path)) void fn(this.engine, file);
-    };
     this.app.workspace.onLayoutReady(() => {
-      this.registerEvent(this.app.vault.on("create", forward((e, f) => e.onCreate(f.path, f.extension !== "md"))));
-      this.registerEvent(this.app.vault.on("modify", forward((e, f) => e.onModify(f.path, f.extension !== "md"))));
-      this.registerEvent(this.app.vault.on("delete", forward((e, f) => e.onDelete(f.path))));
-      this.registerEvent(
-        this.app.vault.on("rename", (file, oldPath) => {
-          if (this.engine && this.disk && file instanceof TFile && this.disk.accepts(oldPath)) void this.engine.onRename(oldPath, file.path);
-        }),
-      );
-      // An editor saves through vault.modify with the exact text it writes;
-      // the engine needs that text to tell the save from other programs' edits.
-      const vault = this.app.vault;
-      this.register(
-        around(vault, {
-          modify: (next) => (file, data, options) => {
-            const write = () => next.call(vault, file, data, options);
-            const tracked = this.engine && this.disk?.accepts(file.path) && file.extension === "md";
-            return tracked ? this.engine!.trackWrite(file.path, data, write) : write();
-          },
-        }),
-      );
+      watchVault(this, () => this.engine);
       void this.restartSync();
       // Another sync may be turned on or off at any time; Obsidian has no event for it.
       this.registerInterval(
@@ -178,7 +134,7 @@ export default class ProvenancePlugin extends Plugin {
     const from = editor.posToOffset(editor.getCursor("from"));
     const to = editor.posToOffset(editor.getCursor("to"));
     if (from < to) return { file, from, to, where: "the selection" };
-    const cm = cmOf(view);
+    const cm = codeMirrorOf(view);
     const segment = cm && segmentAt(cm, from);
     if (!segment) return "Select some text first.";
     return { file, from: segment.from, to: segment.to, where: "this sentence" };
@@ -302,14 +258,12 @@ export default class ProvenancePlugin extends Plugin {
     const { url: base, token } = this.serverSettings();
     if (base && !token) this.log.add({ level: "warn", message: "A server is set but there is no device token, so sync stays on this device." });
     this.log.add({ level: "info", message: `Starting sync of vault "${s.vaultId}" as ${s.deviceName}${base && token ? ` with ${base}` : ", this device only"}` });
-    this.disk = new ObsidianDisk(this.app);
-    const appId = (this.app as unknown as { appId?: string }).appId ?? this.app.vault.getName();
     const engine = new SyncEngine({
       vault: s.vaultId,
       author,
       device: s.deviceName,
-      disk: this.disk,
-      persist: indexedDbPersistence(`provenance-sync/${appId}`),
+      disk: new ObsidianDisk(this.app),
+      persist: indexedDbPersistence(this.app),
       onStatus: (status) => this.setStatus(status),
       onEvent: (event) => this.log.add(event),
       ...(base && token
@@ -336,7 +290,7 @@ export default class ProvenancePlugin extends Plugin {
   /** Editors attach to the engine on their next update; give them one. */
   private pokeEditors() {
     this.app.workspace.iterateAllLeaves((leaf) => {
-      if (leaf.view instanceof MarkdownView) cmOf(leaf.view)?.dispatch({});
+      if (leaf.view instanceof MarkdownView) codeMirrorOf(leaf.view)?.dispatch({});
     });
   }
 }

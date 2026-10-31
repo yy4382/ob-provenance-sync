@@ -22,6 +22,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Check the tag matches the manifest
         run: test "$(node -p 'require("./manifest.json").version')" = "$GITHUB_REF_NAME"
+      - name: Check that iPhones can still update
+        run: node apps/obsidian/e2e/compat.mjs ios
       - run: pnpm --filter "@provenance/obsidian..." build
       - name: Create release
         env:
