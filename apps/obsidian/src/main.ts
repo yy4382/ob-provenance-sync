@@ -1,10 +1,10 @@
 import { errorMessage, humanId, reattribute, REATTRIBUTABLE } from "@provenance/core";
 import { MarkdownView, Notice, Platform, Plugin, type Editor } from "obsidian";
+import { installCli, localMcpCommand, registerVault, unregisterVault, type LocalMcpCommand } from "./agent-cli";
 import { registerAgentCli } from "./agent-ops";
 import { startBridge } from "./bridge";
 import { ConflictsModal } from "./conflicts";
 import { EVENT_LOG_VIEW, EventLog, EventLogView } from "./event-log";
-import { installMcpCli, localMcpCommand, type LocalMcpCommand } from "./mcp-cli";
 import { provenanceExtension, renderProvenance, segmentAt } from "./editor/binding";
 import { codeMirrorOf } from "./quirks";
 import { ReattributeModal, type Attribution, type Reattribution } from "./reattribute";
@@ -35,7 +35,8 @@ export default class ProvenancePlugin extends Plugin {
   private status: Status = "connecting";
   /** The other sync tools that kept sync off at the last start, joined; "" if none. */
   private blockedBy = "";
-  private mcpCliPath: string | null = null;
+  private cliPath: string | null = null;
+  private agentCliUpdate: Promise<void> = Promise.resolve();
   /** Restarts run one after another, so two quick reconnects never leave two engines running. */
   private restarting: Promise<void> = Promise.resolve();
   private firstStartDone = () => {};
@@ -95,7 +96,7 @@ export default class ProvenancePlugin extends Plugin {
     registerAgentCli(this, async () => {
       await this.firstStart;
       await this.restarting;
-      return this.engine;
+      return this.settings.agentCli ? this.engine : null;
     });
 
     this.app.workspace.onLayoutReady(() => {
@@ -107,11 +108,7 @@ export default class ProvenancePlugin extends Plugin {
           if (otherSyncs(this.app).join(", ") !== this.blockedBy) void this.restartSync();
         }, OTHER_SYNC_CHECK_EVERY),
       );
-      if (Platform.isDesktopApp) {
-        installMcpCli(this.app, this.manifest.dir!)
-          .then((path) => (this.mcpCliPath = path))
-          .catch((e: unknown) => console.error("[provenance-sync] could not install the MCP server", e));
-      }
+      this.syncAgentCli();
     });
   }
 
@@ -193,11 +190,27 @@ export default class ProvenancePlugin extends Plugin {
     ];
   }
 
-  /** How an agent on this computer starts the local MCP server, with this vault's paths and server filled in. */
+  /** How an agent on this computer starts the local MCP server for this vault. */
   mcpCommand(): LocalMcpCommand | null {
-    if (!this.mcpCliPath) return null;
-    const { url, token } = this.serverSettings();
-    return localMcpCommand(this.app, this.mcpCliPath, url && token ? { url, vault: this.settings.vaultId, token } : null);
+    return this.cliPath ? localMcpCommand(this.app, this.cliPath) : null;
+  }
+
+  /** Brings the installed CLI and this vault's entry in line with the settings. The entry is what lets agents reach this vault. */
+  syncAgentCli() {
+    if (!Platform.isDesktopApp) return;
+    const update = async () => {
+      if (!this.settings.agentCli) {
+        this.cliPath = null;
+        return unregisterVault(this.app);
+      }
+      this.cliPath = await installCli();
+      const { url, token } = this.serverSettings();
+      await registerVault(this.app, url && token ? { url, vault: this.settings.vaultId, token } : null);
+    };
+    // Settings can change faster than files are written, and the last write must reflect the last change.
+    this.agentCliUpdate = this.agentCliUpdate.then(update).catch((e: unknown) => {
+      this.log.add({ level: "error", message: `Could not update the agent CLI: ${errorMessage(e)}` });
+    });
   }
 
   /** The server URL without a trailing slash ("" if none), and the device token from the keychain. */

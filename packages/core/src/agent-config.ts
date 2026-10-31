@@ -13,3 +13,13 @@ export type VaultEntry = z.infer<typeof vaultEntrySchema>;
 export function agentPaths(home: string, xdgConfigHome?: string) {
   return { bin: `${home}/.local/bin/${AGENT_CLI}`, vaults: `${xdgConfigHome || `${home}/.config`}/${AGENT_CLI}/vaults` };
 }
+
+/** Whether release `a` is newer than `b`, with a prerelease before its release. */
+export function isNewerVersion(a: string, b: string): boolean {
+  const order = (x: string, y: string) => x.localeCompare(y, "en", { numeric: true });
+  const [baseA = "", preA] = a.split(/-(.*)/);
+  const [baseB = "", preB] = b.split(/-(.*)/);
+  if (order(baseA, baseB) !== 0) return order(baseA, baseB) > 0;
+  if (preA && preB) return order(preA, preB) > 0;
+  return !preA && !!preB;
+}

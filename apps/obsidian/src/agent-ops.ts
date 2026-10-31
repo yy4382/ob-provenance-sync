@@ -96,7 +96,7 @@ export function registerAgentCli(plugin: Plugin, engineReady: () => Promise<Sync
     { request: { value: "<path>", description: "JSON file holding the operation", required: true } },
     async ({ request }) => {
       const engine = await engineReady();
-      if (!engine) return "Provenance sync isn't running in this vault.";
+      if (!engine) return "This vault isn't serving agents: Agent CLI is off, or sync isn't running.";
       return JSON.stringify(await handleOpRequest(engine, readRequest(request!), (op) => runFull(plugin.app, engine, op)));
     },
   );

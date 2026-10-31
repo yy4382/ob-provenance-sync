@@ -5,7 +5,7 @@
 //   pnpm e2e                      (from the repo root; builds everything first)
 //   OBSIDIAN_BIN=/path/to/Obsidian KEEP=1 node apps/obsidian/e2e/run.mjs
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -125,12 +125,12 @@ async function opsCall(body) {
   return res.json();
 }
 
-/** The command the plugin's settings hand out for local agents, with its embedded MCP server. */
+/** The command the plugin's settings hand out for local agents. */
 let mcpCommand = null;
 
 async function mcpCall(name, args) {
   const client = new Client({ name: "e2e client", version: "0" });
-  await client.connect(new StdioClientTransport({ ...mcpCommand, env: { ...process.env, ...mcpCommand.env } }));
+  await client.connect(new StdioClientTransport({ ...mcpCommand, env: { ...instance.env, ...mcpCommand.env } }));
   try {
     return await client.callTool({ name, arguments: args });
   } finally {
@@ -155,12 +155,6 @@ function cliCall(body) {
 /** Runs the built ob-provenance as an agent would, with this instance's HOME and `obsidian`. */
 const ob = (args, opts = {}) =>
   spawnSync(process.execPath, [join(repo, "apps/cli/dist/cli.js"), ...args], { env: instance.env, cwd: work, encoding: "utf8", timeout: 30000, maxBuffer: 1 << 26, ...opts });
-
-function registerVault() {
-  const dir = join(instance.env.HOME, ".config/ob-provenance/vaults");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "e2evault.json"), JSON.stringify({ name: "vault", path: vault, server: { url: `http://127.0.0.1:${serverPort}`, vault: "e2e", token: DEVICE_TOKEN } }));
-}
 
 async function openObsidian() {
   const cdp = await instance.open();
@@ -245,8 +239,17 @@ try {
   });
   check("another program's edit to an open file is unknown", JSON.stringify(external) === '["unknown"]', JSON.stringify(external));
 
+  const entry = join(instance.env.HOME, ".config/ob-provenance/vaults/e2evault.json");
+  const bin = join(instance.env.HOME, ".local/bin/ob-provenance");
+  check("Agent CLI starts off: nothing outside the vault", !existsSync(bin) && !existsSync(entry));
+  // Settings open in a window of their own, so this calls what the toggle calls.
+  const setAgentCli = (on) => cdp.eval(`await app.setting.pluginTabs.find((t) => t.id === "provenance-sync").setControlValue("agentCli", ${on}); return true`);
+  await setAgentCli(true);
   mcpCommand = await eventually(() => cdp.eval(`return app.plugins.plugins["provenance-sync"].mcpCommand()`));
-  check("settings offer a local MCP command", mcpCommand?.args.includes(vault) && mcpCommand.args[0].endsWith("provenance-mcp.mjs"), JSON.stringify(mcpCommand));
+  check("settings offer a local MCP command", mcpCommand?.args[0] === bin && mcpCommand.args.join(" ").endsWith("vault=e2evault mcp") && !JSON.stringify(mcpCommand).includes(DEVICE_TOKEN), JSON.stringify(mcpCommand));
+  await eventually(async () => existsSync(entry));
+  check("the installed CLI can run and its entry is private", (statSync(bin).mode & 0o777) === 0o755 && (statSync(entry).mode & 0o777) === 0o600, JSON.stringify([statSync(bin).mode, statSync(entry).mode]));
+  check("the entry names this vault and its server", JSON.parse(readFileSync(entry, "utf8")).server?.token === DEVICE_TOKEN);
   const edit = await mcpCall("append_to_file", { path: "Projects/Roadmap.md", text: "- AgentBridge line.\n", why: "agent", note: "e2e note" });
   check("local MCP edits through the plugin bridge", !edit.isError, JSON.stringify(edit.content));
   const links = await mcpCall("get_backlinks", { path: "Welcome.md" });
@@ -327,7 +330,6 @@ try {
   const big = "A long line of a long note.\n".repeat(190_000);
   check("a 5 MB note goes through a request file", cliCall({ op: "create", path: "Cli/big.md", content: big, by }).ok === true && cliCall({ op: "read", path: "Cli/big.md" }).result?.content === big);
 
-  registerVault();
   check("ob-provenance lists the registered vault", ob(["vaults"]).stdout.startsWith("vault\t"));
   check("ob-provenance reaches Obsidian", ob(["status"]).stdout.includes("Obsidian: reachable"), JSON.stringify(ob(["status"])));
   const written = ob(["create", "path=Cli/shell.md", "content=From the shell.", "why=agent", "agent=shell-agent"]);
@@ -348,6 +350,27 @@ try {
   await mcpClient.close();
   check("ob-provenance mcp serves the full tools through Obsidian", !overMcp.isError && overMcp.content[0].text.includes("Projects/Roadmap.md"), JSON.stringify(overMcp.content));
   check("ob-provenance mcp names the agent after the MCP client", !mcpWrite.isError && ob(["read", "path=Cli/shell.md", "provenance"]).stdout.includes("[agent agent:shell-client] Over MCP."), JSON.stringify(mcpWrite.content));
+
+  const other = join(dirname(entry), "othervault.json");
+  mkdirSync(join(work, "other"));
+  writeFileSync(other, JSON.stringify({ name: "other", path: join(work, "other"), server: null }));
+  const notesBefore = ob(["vault=vault", "list"]).stdout;
+  const ambiguous = ob(["append", "path=Cli/shell.md", "text=lost", "why=agent", "agent=shell-agent"]);
+  check("with two vaults and neither named, ob-provenance refuses and lists them", ambiguous.status === 2 && /vault=<name>.*vault.*other/.test(ambiguous.stderr), JSON.stringify(ambiguous));
+  check("the refused call changed nothing", ob(["vault=vault", "list"]).stdout === notesBefore && !ob(["vault=vault", "read", "path=Cli/shell.md"]).stdout.includes("lost"));
+  check("inside a vault's folder, ob-provenance needs no name", ob(["list", "prefix=Cli/"], { cwd: join(vault, "Projects") }).status === 0);
+  rmSync(other);
+  await sleep(100);
+  writeFileSync(bin, "// ob-provenance 99.0.0\n");
+  await setAgentCli(false);
+  await eventually(async () => !existsSync(entry));
+  check("turning Agent CLI off removes this vault's entry", !existsSync(entry));
+  await setAgentCli(true);
+  await eventually(async () => existsSync(entry));
+  check("an older plugin leaves a newer CLI alone", readFileSync(bin, "utf8") === "// ob-provenance 99.0.0\n");
+  rmSync(bin);
+  await cdp.eval(`app.plugins.plugins["provenance-sync"].syncAgentCli(); return true`);
+  check("the plugin reinstalls a missing CLI", !!(await eventually(async () => existsSync(bin))));
 
   await opsCall({ op: "append", path: "Welcome.md", text: "RemoteAgent line.", by: { agent: "agent:andy", why: "agent" } });
   const remote = await eventually(async () => {

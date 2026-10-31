@@ -12,13 +12,13 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = process.argv[2] === "production";
 
-// The local MCP server ships inside the plugin, gzipped, so BRAT installs it too.
-const mcpCli = {
-  name: "mcp-cli",
+// The agent CLI ships inside the plugin, gzipped, so BRAT installs it too.
+const agentCli = {
+  name: "agent-cli",
   setup(build) {
-    build.onResolve({ filter: /^virtual:mcp-cli$/ }, () => ({ path: "mcp-cli", namespace: "mcp-cli" }));
-    build.onLoad({ filter: /.*/, namespace: "mcp-cli" }, () => {
-      const cli = new URL("../../packages/mcp/dist/cli.js", import.meta.url);
+    build.onResolve({ filter: /^virtual:agent-cli$/ }, () => ({ path: "agent-cli", namespace: "agent-cli" }));
+    build.onLoad({ filter: /.*/, namespace: "agent-cli" }, () => {
+      const cli = new URL("../cli/dist/cli.js", import.meta.url);
       return { contents: `export default ${JSON.stringify(gzipSync(readFileSync(cli)).toString("base64"))};`, loader: "js" };
     });
   },
@@ -29,7 +29,7 @@ const context = await esbuild.context({
     js: banner,
   },
   entryPoints: ["src/main.ts"],
-  plugins: [mcpCli],
+  plugins: [agentCli],
   bundle: true,
   external: [
     "obsidian",
