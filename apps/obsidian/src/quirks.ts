@@ -124,17 +124,3 @@ export interface DailyNotes {
 export function dailyNotesPlugin(app: App): DailyNotes | null {
   return (internals(app).internalPlugins?.getEnabledPluginById?.("daily-notes") as DailyNotes | null | undefined) ?? null;
 }
-
-/**
- * The internals above that this Obsidian doesn't have. Reads of them fall back
- * quietly, and the fallbacks are the risky direction: an unreadable plugin list
- * looks like no other sync tool running, so a gap is reported rather than guessed around.
- */
-export function missingInternals(app: App): string[] {
-  const { appId, internalPlugins, plugins } = internals(app);
-  return [
-    ...(typeof appId === "string" ? [] : ["app.appId"]),
-    ...(typeof internalPlugins?.getEnabledPluginById === "function" ? [] : ["app.internalPlugins"]),
-    ...(plugins?.enabledPlugins instanceof Set ? [] : ["app.plugins.enabledPlugins"]),
-  ];
-}

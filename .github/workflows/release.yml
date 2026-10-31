@@ -22,6 +22,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Check the tag matches the manifest
         run: test "$(node -p 'require("./manifest.json").version')" = "$GITHUB_REF_NAME"
+      - name: Check that phones can still update
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node apps/obsidian/e2e/compat.mjs phones
       - run: pnpm --filter "@provenance/obsidian..." build
       - name: Create release
         env:

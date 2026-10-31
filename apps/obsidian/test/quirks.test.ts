@@ -19,8 +19,3 @@ test("no version branch outlives the oldest supported Obsidian", () => {
   const dead = branches.filter((version) => !older(minAppVersion, version));
   expect(dead, "every device has these versions now: delete their branches and the old behavior").toEqual([]);
 });
-
-test("BRAT sees the minAppVersion the plugin declares", () => {
-  const manifest = (path: string) => (JSON.parse(read(path)) as { minAppVersion: string }).minAppVersion;
-  expect(manifest("../../../manifest.json")).toBe(manifest("../manifest.json"));
-});

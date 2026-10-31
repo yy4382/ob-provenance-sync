@@ -180,14 +180,6 @@ try {
   check("two overlapping reconnects leave one engine running", JSON.stringify(engines) === '["stopped","current"]', JSON.stringify(engines));
   await eventually(() => cdp.eval(`return document.querySelector(".status-bar")?.innerText.includes("Provenance: synced")`));
 
-  await cdp.eval(`const lookup = app.internalPlugins.getEnabledPluginById; app.internalPlugins.getEnabledPluginById = undefined;
-    await ${plugin}.restartSync(); app.internalPlugins.getEnabledPluginById = lookup; return true`);
-  check(
-    "an internal that went missing is reported",
-    await cdp.eval(`return ${plugin}.log.entries.some((e) => e.level === "error" && e.message.includes("no longer has app.internalPlugins"))`),
-  );
-  await eventually(() => cdp.eval(`return document.querySelector(".status-bar")?.innerText.includes("Provenance: synced")`));
-
   await cdp.eval(`app.commands.executeCommandById("provenance-sync:resolve-conflicts"); return true`);
   const modal = await eventually(() => cdp.eval(`const t = document.querySelector(".modal")?.innerText; return t?.includes("Apply all") ? t : undefined`));
   check("the conflict resolver finds every copy safe to resolve", !!modal?.includes("5 copies: 4 can be resolved safely, 1 wait"), JSON.stringify(modal));

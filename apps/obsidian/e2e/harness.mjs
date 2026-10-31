@@ -14,8 +14,10 @@ export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** Whether version `a` comes before version `b`. */
 export function older(a, b) {
   const [x, y] = [a, b].map((v) => v.split(".").map(Number));
-  const i = x.findIndex((n, at) => n !== y[at]);
-  return i >= 0 && x[i] < y[i];
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) < (y[i] ?? 0);
+  }
+  return false;
 }
 
 export const freePort = () =>

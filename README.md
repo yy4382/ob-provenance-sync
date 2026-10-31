@@ -99,10 +99,10 @@ pnpm quirks          # check that Obsidian still behaves the way the plugin assu
 
 The plugin relies on some behavior Obsidian doesn't document. All of it is in `apps/obsidian/src/quirks.ts`, and each piece has a probe in `apps/obsidian/e2e/quirks.mjs`. One plugin build runs on every device, so it supports every stable Obsidian from `minAppVersion` up.
 
-The [Obsidian compatibility](.github/workflows/obsidian-compat.yml) workflow looks for new stable releases every six hours and tests each supported version: on Linux, the quirks on the desktop UI, the quirks on the emulated mobile UI, and `pnpm e2e`; on a Mac, the quirks with Obsidian's iOS code paths on. Versions that pass go in `apps/obsidian/e2e/verified-versions.json`. A version that fails gets an issue naming what changed.
+The [Obsidian compatibility](.github/workflows/obsidian-compat.yml) workflow looks for new stable releases every six hours and tests each supported version on Linux: the quirks on the desktop UI, the quirks on the emulated mobile UI, and `pnpm e2e`. Versions that pass go in `apps/obsidian/e2e/verified-versions.json`. A version that fails gets an issue naming what changed.
 
 These runs use the desktop app, so they don't cover WebKit, the mobile file system or the app being suspended. Nothing here runs on a real phone.
 
 **To add a version**, do nothing: the workflow picks it up. If it fails, keep the old behavior for devices that haven't updated: branch on `requireApiVersion` in the function in `quirks.ts`, and give its probe the same branch with `since`.
 
-**To drop a version**, raise `minAppVersion` in `apps/obsidian/manifest.json`, run `pnpm test`, delete the branches it names, and release. The release copies the manifest to the root, where BRAT reads it. BRAT stops updating devices below `minAppVersion`, so they keep their last working build. The workflow fails if `minAppVersion` passes what iOS or Android are on.
+**To drop a version**, raise `minAppVersion` in `apps/obsidian/manifest.json`, run `pnpm test`, delete the branches it names, and release. The release copies the manifest to the root, where BRAT reads it. BRAT stops updating devices below `minAppVersion`, so they keep their last working build. A release fails if `minAppVersion` passes what iOS or Android are on.

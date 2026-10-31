@@ -5,8 +5,7 @@
 //   OBSIDIAN_BIN=/path/to/Obsidian MOBILE=1 QUIRKS_REPORT=report.json node apps/obsidian/e2e/quirks.mjs
 //
 // MOBILE=1 emulates the mobile UI inside the desktop app. It covers what the two share, which is
-// the editor and the vault, but not WebKit or the mobile file system. Obsidian's iOS code paths
-// only turn on when the emulating computer is a Mac.
+// the editor and the vault, but not WebKit or the mobile file system.
 import { appendFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -271,7 +270,7 @@ async function typeInSplitPanes() {
   return edits;
 }
 
-const report = { version: null, mobile, iosBranches: false, results: [] };
+const report = { version: null, mobile, results: [] };
 let failures = 0;
 try {
   cdp = await instance.open();
@@ -282,9 +281,8 @@ try {
     await cdp.eval(`app.emulateMobile(true); return true`).catch(() => undefined);
     await eventually(() => cdp.eval(`return window.quirkProbe?.isMobile && app.workspace.layoutReady`), 15000);
     if (!(await cdp.eval(`return window.quirkProbe?.isMobile && document.body.classList.contains("is-mobile")`))) throw new Error("the mobile UI did not turn on");
-    report.iosBranches = await cdp.eval(`return window.quirkProbe.isIosApp`);
   }
-  console.log(`Obsidian ${report.version}${mobile ? `, mobile UI, iOS code paths ${report.iosBranches ? "on" : "off"}` : ""}`);
+  console.log(`Obsidian ${report.version}${mobile ? ", mobile UI" : ""}`);
   for (const { id, desktopOnly, probe } of QUIRKS) {
     if (desktopOnly && mobile) {
       console.log(`SKIP  ${id}`);

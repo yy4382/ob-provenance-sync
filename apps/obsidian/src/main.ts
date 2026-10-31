@@ -5,7 +5,7 @@ import { ConflictsModal } from "./conflicts";
 import { EVENT_LOG_VIEW, EventLog, EventLogView } from "./event-log";
 import { installMcpCli, localMcpCommand, type LocalMcpCommand } from "./mcp-cli";
 import { provenanceExtension, renderProvenance, segmentAt } from "./editor/binding";
-import { codeMirrorOf, communityPluginOn, corePluginOn, deviceVaultId, missingInternals, wrapEditorSaves } from "./quirks";
+import { codeMirrorOf, communityPluginOn, corePluginOn, deviceVaultId, wrapEditorSaves } from "./quirks";
 import { ReattributeModal, type Attribution, type Reattribution } from "./reattribute";
 import { defaultSettings, ProvenanceSettingTab, type ProvenanceSettings } from "./settings";
 import { SyncEngine, type SyncStatus } from "./sync/engine";
@@ -270,8 +270,6 @@ export default class ProvenancePlugin extends Plugin {
 
   private async startSync() {
     await this.stopSync();
-    const missing = missingInternals(this.app);
-    if (missing.length) this.log.add({ level: "error", message: `This Obsidian version no longer has ${missing.join(", ")}. Provenance Sync can't see every other sync tool on it; update the plugin.` });
     const others = otherSyncs(this.app);
     this.blockedBy = others.join(", ");
     if (others.length) {
