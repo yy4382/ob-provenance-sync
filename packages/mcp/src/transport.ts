@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { errorMessage, FULL_ONLY_OPS, type OpResponse } from "@provenance/core";
 import { z } from "zod";
-import type { OpsTransport } from "./server";
+import type { OpsTransport } from "@provenance/tools";
 
 export const PLUGIN_ID = "provenance-sync";
 
