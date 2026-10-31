@@ -1,0 +1,27 @@
+{
+  "name": "@provenance/cli",
+  "version": "0.1.0-alpha.10",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "ob-provenance": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p . && node build.mjs",
+    "test": "vitest run",
+    "lint": "tsc -p ."
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@provenance/core": "workspace:*",
+    "@provenance/mcp": "workspace:*",
+    "@provenance/tools": "workspace:*",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "esbuild": "0.25.5",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5"
+  }
+}

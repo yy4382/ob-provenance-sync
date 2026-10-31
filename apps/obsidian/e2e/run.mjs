@@ -4,7 +4,7 @@
 //
 //   pnpm e2e                      (from the repo root; builds everything first)
 //   OBSIDIAN_BIN=/path/to/Obsidian KEEP=1 node apps/obsidian/e2e/run.mjs
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -150,6 +150,16 @@ function cliCall(body) {
   } catch {
     return { unparsed: r.stdout, stderr: r.stderr, status: r.status };
   }
+}
+
+/** Runs the built ob-provenance as an agent would, with this instance's HOME and `obsidian`. */
+const ob = (args, opts = {}) =>
+  spawnSync(process.execPath, [join(repo, "apps/cli/dist/cli.js"), ...args], { env: instance.env, cwd: work, encoding: "utf8", timeout: 30000, maxBuffer: 1 << 26, ...opts });
+
+function registerVault() {
+  const dir = join(instance.env.HOME, ".config/ob-provenance/vaults");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "e2evault.json"), JSON.stringify({ name: "vault", path: vault, server: { url: `http://127.0.0.1:${serverPort}`, vault: "e2e", token: DEVICE_TOKEN } }));
 }
 
 async function openObsidian() {
@@ -317,6 +327,28 @@ try {
   const big = "A long line of a long note.\n".repeat(190_000);
   check("a 5 MB note goes through a request file", cliCall({ op: "create", path: "Cli/big.md", content: big, by }).ok === true && cliCall({ op: "read", path: "Cli/big.md" }).result?.content === big);
 
+  registerVault();
+  check("ob-provenance lists the registered vault", ob(["vaults"]).stdout.startsWith("vault\t"));
+  check("ob-provenance reaches Obsidian", ob(["status"]).stdout.includes("Obsidian: reachable"), JSON.stringify(ob(["status"])));
+  const written = ob(["create", "path=Cli/shell.md", "content=From the shell.", "why=agent", "agent=shell-agent"]);
+  check("ob-provenance writes as the agent it names", written.status === 0 && ob(["read", "path=Cli/shell.md", "provenance"]).stdout === "[agent agent:shell-agent] From the shell.\n", JSON.stringify(written));
+  const anonymous = ob(["append", "path=Cli/shell.md", "text=x", "why=agent"]);
+  check("ob-provenance refuses a write with no identity", anonymous.status === 1 && anonymous.stderr.includes("agent=<name>"), JSON.stringify(anonymous));
+  const piped = "two lines\nwith \"quotes\" and a trailing newline\n";
+  ob(["create", "path=Cli/piped.md", "why=agent", "agent=shell-agent", "--stdin=content"], { input: piped });
+  check("ob-provenance takes a field from stdin", ob(["read", "path=Cli/piped.md"]).stdout === piped);
+  const unknownVault = ob(["vault=Nope", "list"]);
+  check("ob-provenance names the vaults it knows", unknownVault.status === 2 && unknownVault.stderr.includes("vault (id e2evault"), JSON.stringify(unknownVault));
+  check("ob-provenance prints an op error and exits 1", ob(["read", "path=Cli/missing.md"]).status === 1);
+  check("ob-provenance searches", ob(["search", "query=AgentBridge"]).stdout.includes("Projects/Roadmap.md"));
+  const mcpClient = new Client({ name: "shell client", version: "0" });
+  await mcpClient.connect(new StdioClientTransport({ command: process.execPath, args: [join(repo, "apps/cli/dist/cli.js"), "vault=e2evault", "mcp"], env: instance.env, cwd: work }));
+  const overMcp = await mcpClient.callTool({ name: "get_backlinks", arguments: { path: "Welcome.md" } });
+  const mcpWrite = await mcpClient.callTool({ name: "append_to_file", arguments: { path: "Cli/shell.md", text: " Over MCP.", why: "agent" } });
+  await mcpClient.close();
+  check("ob-provenance mcp serves the full tools through Obsidian", !overMcp.isError && overMcp.content[0].text.includes("Projects/Roadmap.md"), JSON.stringify(overMcp.content));
+  check("ob-provenance mcp names the agent after the MCP client", !mcpWrite.isError && ob(["read", "path=Cli/shell.md", "provenance"]).stdout.includes("[agent agent:shell-client] Over MCP."), JSON.stringify(mcpWrite.content));
+
   await opsCall({ op: "append", path: "Welcome.md", text: "RemoteAgent line.", by: { agent: "agent:andy", why: "agent" } });
   const remote = await eventually(async () => {
     const counts = await cdp.eval(`return app.workspace.getLeavesOfType("markdown").map(l => l.view.editor.getValue().split("RemoteAgent").length - 1)`);
@@ -417,6 +449,11 @@ try {
   unlinkSync(join(vault, "Welcome.md"));
   const fallback = await mcpCall("append_to_file", { path: "Projects/Roadmap.md", text: "- WhileClosed line.\n", why: "agent" });
   check("with Obsidian closed, local MCP falls back to the server", !fallback.isError, JSON.stringify(fallback.content));
+  const closedWrite = ob(["append", "path=Projects/Roadmap.md", "text=- ClosedShell line.\n", "why=agent", "agent=shell-agent"]);
+  check("with Obsidian closed, ob-provenance writes through the server", closedWrite.status === 0, JSON.stringify(closedWrite));
+  const closedSearch = ob(["search", "query=x"]);
+  check("with Obsidian closed, ob-provenance says why it can't search", closedSearch.status === 1 && closedSearch.stderr.includes("unable to find Obsidian"), JSON.stringify(closedSearch));
+  check("ob-provenance status shows the server route", /Obsidian: not reachable[\s\S]*Sync server: \S+ reachable/.test(ob(["status"]).stdout), ob(["status"]).stdout);
 
   cdp = await openObsidian().catch(async () => {
     // Welcome.md is gone, so the readiness probe above can't use it.

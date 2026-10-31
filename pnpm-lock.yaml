@@ -166,6 +166,37 @@ importers:
 
   .: {}
 
+  apps/cli:
+    dependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.32.2
+        version: 1.32.2(supports-color@7.2.0)(zod@4.6.7)
+      '@provenance/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@provenance/mcp':
+        specifier: workspace:*
+        version: link:../../packages/mcp
+      '@provenance/tools':
+        specifier: workspace:*
+        version: link:../../packages/tools
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
+    devDependencies:
+      '@types/node':
+        specifier: ^26.6.5
+        version: 26.6.5
+      esbuild:
+        specifier: 0.25.5
+        version: 0.25.5
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^5.0.5
+        version: 5.0.5(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.25.5)(jiti@2.7.0)(yaml@2.9.1))
+
   apps/obsidian:
     dependencies:
       '@hocuspocus/provider':

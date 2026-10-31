@@ -1,6 +1,6 @@
 import { FULL_ONLY_OPS, opRequestSchema, type OpName } from "@provenance/core";
 import { describe, expect, it } from "vitest";
-import { recordsAuthor, runTool, TOOLS, toolsFor } from "../src";
+import { instructions, recordsAuthor, runTool, TOOLS, toolsFor } from "../src";
 
 const ops = opRequestSchema.options.map((o) => o.shape.op.value as OpName);
 
@@ -14,6 +14,16 @@ describe("TOOLS", () => {
   it("offers only what a host without Obsidian can do in limited mode", () => {
     expect(toolsFor("limited").map((t) => t.op)).toEqual(ops.filter((op) => !FULL_ONLY_OPS.has(op)));
     expect(toolsFor("full")).toEqual(TOOLS);
+  });
+});
+
+describe("instructions", () => {
+  it("speaks the CLI's command names on the CLI, and MCP's over MCP", () => {
+    const cli = instructions("cli");
+    for (const t of TOOLS) if (t.mcpName !== t.command) expect(cli).not.toContain(t.mcpName);
+    expect(cli).toContain("agent=<your name>");
+    expect(instructions("full")).toContain("edit_file");
+    expect(instructions("full")).not.toContain("agent=<your name>");
   });
 });
 
