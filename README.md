@@ -77,19 +77,19 @@ Edits made to files outside Obsidian are never lost. When the plugin next sees t
 
 **On the computer running Obsidian,** do these in each vault agents should reach. A vault with **Agent CLI** off is invisible to them.
 
-1. In the plugin's settings, turn on **Agent CLI**. It installs `ob-provenance` to `~/.local/bin` and records this vault in `~/.config/ob-provenance`, including the server and device token, in a file only your user can read. It needs Node.js 22 or later.
+1. In the plugin's settings, turn on **Agent CLI**. It installs `ob-provenance` to `~/.local/bin` and records this vault in `~/.config/ob-provenance`, including the server and device token, in a file only your user can read. It needs Node.js 22.12 or later.
 2. In Obsidian's General settings, turn on **Command line interface** and register it, so the `obsidian` command is on your `PATH`. Without it, agents get reading and editing through the server, but not the commands that need Obsidian.
 
-Agents can then run the command, which needs `~/.local/bin` on the `PATH`. `ob-provenance help` tells an agent everything it needs:
+Agents can then run the command, which needs `~/.local/bin` on the `PATH`. `ob-provenance --help` tells an agent everything it needs, and `ob-provenance <command> --help` shows a command's fields and examples:
 
 ```sh
-ob-provenance vault=Notes read path=today.md
-ob-provenance vault=Notes append path=today.md text="A note." why=agent agent=claude-code
+ob-provenance --vault Notes read --path today.md
+ob-provenance --vault Notes append --path today.md --text "A note." --why agent --agent claude-code
 ```
 
-Each write has to name its agent, with `agent=<name>` or `OB_PROVENANCE_AGENT`. To use MCP instead, use **Copy Claude Code command** or **Copy MCP JSON config** in the plugin's settings. The copied command starts `ob-provenance mcp`, fixed to this vault. Edits are attributed to the name each MCP client reports in its handshake, so several agents can share one configuration (`agent=<name>` pins a name instead). MCP commands copied before this version no longer work, so copy them again.
+Each write has to name its agent, with `--agent <name>` or `OB_PROVENANCE_AGENT`. To use MCP instead, use **Copy Claude Code command** or **Copy MCP JSON config** in the plugin's settings. The copied command starts `ob-provenance mcp`, fixed to this vault. Edits are attributed to the name each MCP client reports in its handshake, so several agents can share one configuration (`--agent <name>` pins a name instead). MCP commands copied before this version no longer work, so copy them again.
 
-`ob-provenance` picks a vault the way the Obsidian CLI does, with `vault=<name or id>` as the first argument or by the vault folder it runs in. Outside a vault it doesn't follow window focus: it uses `OB_PROVENANCE_VAULT`, or your only vault, and otherwise it stops and lists them. That way a call means the same vault whether or not Obsidian is open.
+`ob-provenance` picks a vault the way the Obsidian CLI does, with `--vault <name or id>` or by the vault folder it runs in. Outside a vault it doesn't follow window focus: it uses `OB_PROVENANCE_VAULT`, or your only vault, and otherwise it stops and lists them. That way a call means the same vault whether or not Obsidian is open.
 
 While Obsidian answers, every operation goes through the plugin. A vault that's registered but closed opens in a new window. When Obsidian can't answer, reads and writes go to the server instead, and `rename`, `delete`, `links`, `backlinks`, `search`, `daily` and `create-daily` fail with the reason. If the server is also unreachable, the agent is told the vault is unavailable. `ob-provenance status` shows which way a call would go.
 

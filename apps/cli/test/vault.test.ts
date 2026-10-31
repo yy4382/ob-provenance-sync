@@ -7,12 +7,12 @@ const work = vault("bbb", "Work", "/v/Work");
 const from = (over: Partial<Parameters<typeof selectVault>[1]> = {}) => ({ arg: null, env: undefined, cwd: "/elsewhere", ...over });
 
 describe("selectVault", () => {
-  it("takes vault= by name in any case, or by id", () => {
+  it("takes --vault by name in any case, or by id", () => {
     expect(selectVault([notes, work], from({ arg: "work" }))).toEqual({ ok: true, vault: work });
     expect(selectVault([notes, work], from({ arg: "aaa" }))).toEqual({ ok: true, vault: notes });
   });
 
-  it("prefers vault= to the environment, and the environment to the working directory", () => {
+  it("prefers --vault to the environment, and the environment to the working directory", () => {
     expect(selectVault([notes, work], from({ arg: "Notes", env: "Work" }))).toEqual({ ok: true, vault: notes });
     expect(selectVault([notes, work], from({ env: "Work", cwd: "/v/Notes" }))).toEqual({ ok: true, vault: work });
   });
@@ -29,7 +29,7 @@ describe("selectVault", () => {
   });
 
   it("refuses to guess between vaults and names them", () => {
-    expect(selectVault([notes, work], from())).toEqual({ ok: false, message: expect.stringMatching(/vault=<name>.*Notes.*Work/) });
+    expect(selectVault([notes, work], from())).toEqual({ ok: false, message: expect.stringMatching(/--vault <name>.*Notes.*Work/) });
     expect(selectVault([notes, work], from({ arg: "Nope" }))).toEqual({ ok: false, message: expect.stringMatching(/Nope.*Notes.*Work/) });
     expect(selectVault([], from())).toEqual({ ok: false, message: expect.stringMatching(/Agent CLI/) });
   });

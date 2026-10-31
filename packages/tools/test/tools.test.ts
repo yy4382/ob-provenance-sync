@@ -21,9 +21,13 @@ describe("instructions", () => {
   it("speaks the CLI's command names on the CLI, and MCP's over MCP", () => {
     const cli = instructions("cli");
     for (const t of TOOLS) if (t.mcpName !== t.command) expect(cli).not.toContain(t.mcpName);
-    expect(cli).toContain("agent=<your name>");
+    expect(cli).toContain("--agent <your name>");
+    expect(cli).toContain("--why human-via-agent");
+    expect(cli).toContain("--provenance");
+    expect(cli).not.toMatch(/\b(agent|vault|why|path|provenance)=/);
     expect(instructions("full")).toContain("edit_file");
-    expect(instructions("full")).not.toContain("agent=<your name>");
+    expect(instructions("full")).toContain("why=human-via-agent");
+    expect(instructions("full")).not.toContain("--agent");
   });
 });
 

@@ -25,7 +25,7 @@ export function createMcpServer(opts: { ops: OpsTransport; agent: AgentId | null
   for (const t of toolsFor(opts.mode)) {
     const { description, input: inputSchema, annotations } = t;
     server.registerTool(t.mcpName, { description, inputSchema, ...(annotations ? { annotations } : {}) }, async (args: unknown): Promise<CallToolResult> => {
-      const { text, isError } = await runTool(t, args, { ops: opts.ops, agent: identity(), noAgent: "this MCP client sent no name; start the server with agent=<name>" });
+      const { text, isError } = await runTool(t, args, { ops: opts.ops, agent: identity(), noAgent: "this MCP client sent no name; start the server with --agent <name>" });
       return { ...(isError ? { isError } : {}), content: [{ type: "text", text }] };
     });
   }

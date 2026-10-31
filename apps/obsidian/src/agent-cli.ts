@@ -63,7 +63,7 @@ export interface LocalMcpCommand {
 
 /** The vault is pinned by id, so an agent's writes can't drift to another vault with its working directory. */
 export function localMcpCommand(app: App, cliPath: string): LocalMcpCommand {
-  return { command: "node", args: [cliPath, `vault=${deviceVaultId(app)}`, "mcp"], env: {} };
+  return { command: "node", args: [cliPath, "--vault", deviceVaultId(app), "mcp"], env: {} };
 }
 
 const quote = (s: string) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);

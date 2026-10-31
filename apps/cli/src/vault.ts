@@ -26,5 +26,5 @@ export function selectVault(vaults: RegisteredVault[], from: { arg: string | nul
   if (inside[0]) return { ok: true, vault: inside[0] };
   if (vaults.length === 1) return { ok: true, vault: vaults[0]! };
   if (vaults.length === 0) return { ok: false, message: "no vault has Agent CLI turned on. The human turns it on in the Provenance Sync plugin's settings in Obsidian." };
-  return { ok: false, message: `more than one vault has Agent CLI turned on, so pass vault=<name> as the first argument: ${describe(vaults)}` };
+  return { ok: false, message: `more than one vault has Agent CLI turned on, so pass --vault <name>: ${describe(vaults)}` };
 }

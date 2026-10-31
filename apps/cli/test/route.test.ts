@@ -112,8 +112,8 @@ describe("agentOps", () => {
   });
 
   it("passes on a selection that failed", async () => {
-    const ops = agentOps({ select: async () => ({ ok: false, message: "pass vault=<name>" }), obsidian: "/nonexistent" });
-    expect(await ops({ op: "list" })).toEqual({ ok: false, code: "invalid", message: "pass vault=<name>" });
+    const ops = agentOps({ select: async () => ({ ok: false, message: "pass --vault <name>" }), obsidian: "/nonexistent" });
+    expect(await ops({ op: "list" })).toEqual({ ok: false, code: "invalid", message: "pass --vault <name>" });
   });
 });
 
