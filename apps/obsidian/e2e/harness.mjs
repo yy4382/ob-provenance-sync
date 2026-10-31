@@ -51,7 +51,8 @@ export async function obsidian({ vault, profile }) {
   const clientCommand = existsSync(client) ? [client] : [OBSIDIAN, `--user-data-dir=${profile}`, ...EXTRA_ARGS];
   mkdirSync(join(home, "bin"));
   writeFileSync(join(home, "bin/obsidian"), `#!/bin/sh\nexec ${clientCommand.map((a) => JSON.stringify(a)).join(" ")} "$@"\n`, { mode: 0o755 });
-  const env = { ...process.env, HOME: home, XDG_RUNTIME_DIR: home, PATH: `${join(home, "bin")}:${process.env.PATH}` };
+  // The XDG paths win over HOME where they're set, as on GitHub's runners.
+  const env = { ...process.env, HOME: home, XDG_RUNTIME_DIR: home, XDG_CONFIG_HOME: join(home, ".config"), PATH: `${join(home, "bin")}:${process.env.PATH}` };
   // Without this, macOS looks for a login keychain in the new HOME and Obsidian hangs.
   const keychainArgs = process.platform === "darwin" ? ["--use-mock-keychain"] : [];
   // A run must stay on the version it was started with, or a restart could test a newer one.
