@@ -56,7 +56,8 @@ jobs:
   test:
     needs: versions
     if: needs.versions.outputs.versions != '[]'
-    runs-on: ubuntu-latest
+    # Pinned: this runs unattended, and its package names change between Ubuntu releases.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -112,7 +113,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: node apps/obsidian/e2e/compat.mjs record reports
+          VERSIONS: ${{ needs.versions.outputs.versions }}
+        run: node apps/obsidian/e2e/compat.mjs record reports "$VERSIONS"
       - name: Commit verified versions
         run: |
           git diff --quiet && exit 0

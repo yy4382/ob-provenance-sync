@@ -4,7 +4,7 @@
 //
 //   compat.mjs due [--all]        prints the versions to test, as JSON: those not verified yet, or all of them
 //   compat.mjs test <version>     runs every suite against OBSIDIAN_BIN and writes reports/<version>.json
-//   compat.mjs record <dir>       notes what passed in verified-versions.json and opens issues for what failed
+//   compat.mjs record <dir> <versions>  notes what passed in verified-versions.json and opens issues for what failed
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -75,12 +75,20 @@ function issueBody({ version, suites }) {
   return lines.join("\n");
 }
 
-function record(dir) {
+function record(dir, tested) {
   const verified = JSON.parse(readFileSync(verifiedFile, "utf8"));
   const openIssue = (title) => JSON.parse(gh("issue", "list", "--state", "open", "--search", `"${title}" in:title`, "--json", "number,title")).find((i) => i.title === title);
+  const reports = new Map(
+    readdirSync(dir, { recursive: true })
+      .map(String)
+      .filter((f) => /(^|\/)\d+\.\d+\.\d+\.json$/.test(f))
+      .map((f) => JSON.parse(readFileSync(join(dir, f), "utf8")))
+      .map((r) => [r.version, r]),
+  );
   let failed = 0;
-  for (const name of readdirSync(dir, { recursive: true }).map(String).filter((f) => /(^|\/)\d+\.\d+\.\d+\.json$/.test(f))) {
-    const report = JSON.parse(readFileSync(join(dir, name), "utf8"));
+  for (const version of tested) {
+    // A job that died before reporting, as when a release has no AppImage, must not pass unnoticed.
+    const report = reports.get(version) ?? { version, passed: false, suites: [{ name: "setup", ok: false, detail: "The job ended without a report.", failed: [] }] };
     const title = `Obsidian ${report.version} changed something the plugin relies on`;
     const issue = openIssue(title);
     if (report.passed) {
@@ -99,5 +107,5 @@ function record(dir) {
 const [command, argument] = process.argv.slice(2);
 if (command === "due") await due(argument === "--all");
 else if (command === "test") test(argument);
-else if (command === "record") record(argument);
-else throw new Error("usage: compat.mjs due [--all] | test <version> | record <dir>");
+else if (command === "record") record(argument, JSON.parse(process.argv[4]));
+else throw new Error("usage: compat.mjs due [--all] | test <version> | record <dir> <versions as JSON>");
