@@ -145,7 +145,7 @@ Type ==
         /\ UNCHANGED <<dels, base, disk, editors, opening, binds, queue, pc, held, savedInRead,
                        pendingExt, intentDel, extDeletes, checks>>
 
-\* engine.ts:285-286 binds, then loadFromCrdt (binding.ts:106) replaces the text Obsidian
+\* engine.ts:285-286 binds, then loadFromCrdt (binding.ts:127) replaces the text Obsidian
 \* loaded from disk with the CRDT's.
 Bind(is, ds) ==
     LET t == TextOf([items |-> is, dels |-> ds])
@@ -154,7 +154,7 @@ Bind(is, ds) ==
        /\ editorText' = t
        /\ dirty' = (dirty \/ t /= disk)
 
-\* binding.ts attach() -> file.bindEditor(current), binding.ts:102: binding is a queued task.
+\* binding.ts attach() -> file.bindEditor(current), binding.ts:117: binding is a queued task.
 OpenPane ==
     /\ editors = 0 /\ ~opening
     /\ binds < MaxBinds

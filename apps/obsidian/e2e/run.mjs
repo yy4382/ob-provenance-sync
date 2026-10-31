@@ -179,6 +179,13 @@ async function focusPane(cdp, index, line = 0) {
   await sleep(300);
 }
 
+/** Opens `path` in the active pane and focuses it; `focusPane` can't, as this pane's index depends on what ran before. */
+async function openAndFocus(cdp, path, line = 0) {
+  await cdp.eval(`const l = app.workspace.getLeaf(false); await l.openFile(app.vault.getFileByPath(${JSON.stringify(path)})); await new Promise(r => setTimeout(r, 500));
+    app.workspace.setActiveLeaf(l, { focus: true }); l.view.editor.setCursor({ line: ${line}, ch: 0 }); l.view.editor.cm.focus();`);
+  await sleep(300);
+}
+
 /** Selects `marker` in the active editor, runs a reattribution command, fills its modal and returns the notice it shows. */
 async function reattributeVia(cdp, command, marker, { why, agent }) {
   await cdp.eval(`document.querySelectorAll(".notice").forEach((n) => n.remove());
@@ -351,6 +358,54 @@ try {
   const tooltip = await eventually(() => cdp.eval(`return document.querySelector(".prov-tooltip")?.innerText`), 3000);
   check("hover shows the agent and its note", !!tooltip?.includes("agent:e2e-client") && tooltip.includes("e2e note"), JSON.stringify(tooltip));
 
+  // Leaving a note with an edit not saved yet: Obsidian blanks the editor while the pane still
+  // names the note. Before the fix that blank was merged as the note's text, deleting what the
+  // last save held. A save has to land first, and the agent's text has to arrive after it.
+  writeFileSync(join(vault, "Left.md"), "");
+  await eventually(() => cdp.eval(`return !!${engineFile("Left.md")}`));
+  await openAndFocus(cdp, "Left.md");
+  await cdp.type("Hand ");
+  check("typed text is saved before the agent writes", !!(await eventually(async () => readFileSync(join(vault, "Left.md"), "utf8") === "Hand ")), JSON.stringify(readFileSync(join(vault, "Left.md"), "utf8")));
+  const dictated = await mcpCall("append_to_file", { path: "Left.md", text: "dictated.", why: "human-via-agent" });
+  check("an agent appends to a note open in a pane", !dictated.isError, JSON.stringify(dictated.content));
+  await eventually(() => cdp.eval(`return ${engineFile("Left.md")}.ytext.toJSON() === "Hand dictated."`));
+  await cdp.eval(`await app.workspace.getLeaf(false).openFile(app.vault.getFileByPath("Projects/Roadmap.md")); return true`);
+  await sleep(1000);
+  appendFileSync(join(vault, "Left.md"), "\nOutsideWrite line.\n");
+  await sleep(1500);
+  const leftText = readFileSync(join(vault, "Left.md"), "utf8");
+  check("leaving a note before its save loses nothing", leftText === "Hand dictated.\nOutsideWrite line.\n", JSON.stringify(leftText));
+  check("the typed text stays the human's", JSON.stringify(await authorsOf(cdp, "Left.md", "Hand")) === '["human:tester"]', JSON.stringify(await authorsOf(cdp, "Left.md", "Hand")));
+
+  // Between files the pane names the new note while the editor still holds the old one, for as
+  // long as the read takes. Any update then bound the new note to the old note's text, and the
+  // real load only put the words back as unknown. The read is slowed to hold that window open.
+  const placed = await mcpCall("create_file", { path: "Next.md", content: "AgentOwned line.\n", why: "agent" });
+  check("an agent creates a note", !placed.isError, JSON.stringify(placed.content));
+  await eventually(() => cdp.eval(`return ${engineFile("Next.md")}?.ytext.length > 0`));
+  await cdp.eval(`const read = app.vault.read;
+    app.vault.read = async function (f) { if (f.path === "Next.md") await new Promise((r) => setTimeout(r, 400)); return read.call(this, f); };
+    const leaf = app.workspace.getLeaf(false);
+    const opening = leaf.openFile(app.vault.getFileByPath("Next.md"));
+    await new Promise((r) => setTimeout(r, 100));
+    leaf.view.editor.cm.dispatch({});
+    await opening; app.vault.read = read; return true`);
+  await sleep(500);
+  const owned = await authorsOf(cdp, "Next.md", "AgentOwned");
+  check("opening a note keeps its authors while the read is pending", owned.length === 1 && owned[0].startsWith("agent:"), JSON.stringify(owned));
+
+  // A rename is not a load: the pane's unsaved text is already in the CRDT, so rebinding merged it twice.
+  writeFileSync(join(vault, "Move.md"), "Before.\n");
+  await eventually(() => cdp.eval(`return !!${engineFile("Move.md")}`));
+  await openAndFocus(cdp, "Move.md", 1);
+  await cdp.type("Typed ");
+  await cdp.eval(`await app.vault.rename(app.vault.getFileByPath("Move.md"), "Moved.md"); return true`);
+  await sleep(100);
+  await cdp.type("More ");
+  await sleep(3000);
+  const movedText = readFileSync(join(vault, "Moved.md"), "utf8");
+  check("renaming a note with unsaved text keeps it single", movedText === "Before.\nTyped More ", JSON.stringify(movedText));
+
   await cdp.eval(`await app.plugins.plugins["provenance-sync"].engine.settle(); return true`);
   await sleep(1500);
   cdp.close();
@@ -369,7 +424,7 @@ try {
   });
   const files = await eventually(async () => {
     const r = await opsCall({ op: "list" });
-    const notes = r.result.files.filter((f) => !f.startsWith("Bulk/") && f !== "Lost.md" && f !== "pixel.png");
+    const notes = r.result.files.filter((f) => !f.startsWith("Bulk/") && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md"].includes(f));
     return notes.join(",") === "Projects/Renamed.md" ? notes : undefined;
   }, 15000);
   check("an offline delete stays deleted and an offline rename keeps the file", !!files, JSON.stringify((await opsCall({ op: "list" })).result));

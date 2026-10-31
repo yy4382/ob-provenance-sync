@@ -2,7 +2,7 @@ import { Annotation, EditorSelection, RangeSetBuilder, StateEffect, Transaction,
 import { Decoration, EditorView, hoverTooltip, layer, RectangleMarker, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { attribute, insertText, type Segment } from "@provenance/core";
 import diff from "fast-diff";
-import { editorInfoField } from "obsidian";
+import { editorInfoField, TextFileView, type TFile } from "obsidian";
 import type * as Y from "yjs";
 import type { MarkdownFile, SyncEngine } from "../sync/engine";
 
@@ -68,13 +68,22 @@ class ProvenanceView {
   /** Runs of one kind on one line, drawn by the band layer. */
   bands: Band[] = [];
   file: MarkdownFile | null = null;
-  private path: string | null = null;
+  /**
+   * The file whose text this editor state holds. Obsidian loads each file into
+   * a new state, and with it a new ProvenanceView, so the pane's file on arrival
+   * is the file. It is null for the blank state Obsidian installs when leaving
+   * a file with unsaved edits, while the pane still names that file: the state
+   * holds no file's text, and binding it would merge the blank as a deletion.
+   */
+  private readonly loaded: TFile | null;
   release: (() => void) | null = null;
   /** Identifies the current attachment, so a binding that resolves after the pane moved on is released. */
   private attached: object | null = null;
   private readonly observer = (event: Y.YTextEvent, tr: Y.Transaction) => this.onYjs(event, tr);
 
   constructor(readonly view: EditorView) {
+    const info = view.state.field(editorInfoField, false);
+    this.loaded = info instanceof TextFileView && info.data === null ? null : (info?.file ?? null);
     this.attach();
   }
 
@@ -82,17 +91,20 @@ class ProvenanceView {
     return this.file !== null && panes.get(this.file)?.values().next().value === this;
   }
 
-  private currentPath(): string | null {
-    return this.view.state.field(editorInfoField, false)?.file?.path ?? null;
+  /** The pane's file, unless the pane has moved on and the next file's state hasn't arrived. */
+  private shownFile(): TFile | null {
+    const file = this.view.state.field(editorInfoField, false)?.file ?? null;
+    return file === this.loaded ? file : null;
   }
 
-  /** Editors are reused when a pane opens another file, so this runs on every update. */
+  /** The engine may start, or learn the file, after the pane opened it, so this runs on every update. */
   private attach() {
-    const path = this.currentPath();
-    const file = path ? (engine()?.fileAt(path) ?? null) : null;
-    if (path === this.path && file === this.file) return;
+    const shown = this.shownFile();
+    // A rename is not a load: the pane's text may hold unsaved edits the CRDT already has.
+    if (shown && this.file && engine()?.files.get(this.file.id) === this.file) return;
+    const file = shown ? (engine()?.fileAt(shown.path) ?? null) : null;
+    if (file === this.file) return;
     this.detach();
-    this.path = path;
     if (!file) return;
     this.file = file;
     let set = panes.get(file);
