@@ -346,6 +346,8 @@ try {
   check("ob-provenance takes a field from stdin", ob(["read", "--path", "Cli/piped.md"]).stdout === piped);
   const unknownVault = ob(["--vault", "Nope", "list"]);
   check("ob-provenance names the vaults it knows", unknownVault.status === 2 && unknownVault.stderr.includes("vault (id e2evault"), JSON.stringify(unknownVault));
+  const closedPipe = spawnSync("sh", ["-c", `"${process.execPath}" "${join(repo, "apps/cli/dist/cli.js")}" --help | true`], { encoding: "utf8" });
+  check("ob-provenance stays quiet when the reader of its output goes away", closedPipe.stderr === "", closedPipe.stderr);
   check("ob-provenance prints an op error and exits 1", ob(["read", "--path", "Cli/missing.md"]).status === 1);
   check("ob-provenance searches", ob(["search", "--query", "AgentBridge"]).stdout.includes("Projects/Roadmap.md"));
   check("a read ignores a bad agent name", ob(["read", "--path", "Cli/shell.md"], { env: { ...instance.env, OB_PROVENANCE_AGENT: "Claude Code" } }).status === 0);

@@ -55,7 +55,7 @@ module.exports = class QuirkProbe extends Plugin {
     });
     this.registerEvent(vault.on("modify", (file) => log.push({ kind: "modify-event", file: file.path })));
 
-    window.quirkProbe = { apiVersion, isMobile: Platform.isMobile, isEditorView: (cm) => cm instanceof EditorView, cliReply: "" };
+    window.quirkProbe = { apiVersion, isMobile: Platform.isMobile, isEditorView: (cm) => cm instanceof EditorView, cliReply: this.app.vault.getName() };
     if (Platform.isDesktopApp) this.registerCliHandler("quirk-probe", "Answers e2e/quirks.mjs", null, () => window.quirkProbe.cliReply);
   }
 };

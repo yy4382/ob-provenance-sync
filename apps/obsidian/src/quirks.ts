@@ -146,3 +146,10 @@ export function dailyNotePath(app: App, daily: DailyNotes): string | null {
  *
  * quirk: cli-reply-is-stdout
  */
+
+/**
+ * Each vault's plugin registers the same CLI command, and `obsidian vault=<id>`
+ * runs the one in that vault, so ob-provenance reaches the vault it selected.
+ *
+ * quirk: cli-handler-runs-in-named-vault
+ */
