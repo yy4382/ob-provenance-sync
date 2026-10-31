@@ -31,7 +31,7 @@ export function render(res: OpResponse): Rendered {
       text = r.linksPending ? "renamed. Links from other notes are not updated yet: Obsidian is asking the human whether to update them." : "ok";
       break;
     case "daily":
-      text = r.path;
+      text = r.exists ? r.path : `${r.path}\n(not created yet)`;
       break;
     default:
       text = "ok";

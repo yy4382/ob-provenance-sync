@@ -154,10 +154,23 @@ export const TOOLS: readonly ToolDef[] = [
     command: "daily",
     op: "daily",
     description:
-      "Return the path of today's daily note, creating it from the vault's template if needed. Use this instead of guessing the path. " +
-      "Fails if the Daily notes plugin is off or its folder doesn't exist. A new note starts as author unknown. Requires Obsidian running.",
+      "Return the path of today's daily note without creating it. Use this instead of guessing the path. " +
+      "If the note doesn't exist yet, a second line says (not created yet). " +
+      "Fails if the Daily notes plugin is off or its folder doesn't exist. Requires Obsidian running.",
     input: {},
+    annotations: { readOnlyHint: true },
     request: () => ({ op: "daily" }),
+  }),
+  tool({
+    mcpName: "create_daily_note",
+    command: "create-daily",
+    op: "daily",
+    description:
+      "Create today's daily note from the vault's template and return its path. Does nothing if it already exists. " +
+      "Call this only when you are about to write to the note, because an empty note clutters the human's vault. " +
+      "Template text starts as author unknown. Fails if the Daily notes plugin is off, or its folder or template doesn't exist. Requires Obsidian running.",
+    input: {},
+    request: () => ({ op: "daily", create: true }),
   }),
 ];
 

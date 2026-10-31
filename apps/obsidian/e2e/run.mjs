@@ -263,15 +263,28 @@ try {
     return r.content[0].text.includes("Target2") ? r.content[0].text : undefined;
   });
   check("the human's answer updates the link", !!relinked);
+  const setDaily = (options) => cdp.eval(`app.internalPlugins.getEnabledPluginById("daily-notes").options = ${JSON.stringify(options)}; return true`);
   const daily = await mcpCall("get_daily_note", {});
-  const dailyRead = await eventually(async () => {
-    const r = await mcpCall("read_file", { path: daily.content[0].text });
-    return r.isError ? undefined : r;
-  });
-  check("get_daily_note returns a note the agent can read", !daily.isError && !!dailyRead, JSON.stringify(daily.content));
-  await cdp.eval(`app.internalPlugins.getEnabledPluginById("daily-notes").options = { folder: "NoSuchFolder" }; return true`);
+  const [dailyPath, dailyPending] = daily.content[0].text.split("\n");
+  check("get_daily_note reports a missing note without creating it", !daily.isError && dailyPending === "(not created yet)" && !existsSync(join(vault, dailyPath)), JSON.stringify(daily.content));
+  await setDaily({ template: "NoSuchTemplate" });
+  const noTemplate = await mcpCall("create_daily_note", {});
+  check("create_daily_note fails on a missing template", noTemplate.isError && noTemplate.content[0].text.includes("template") && !existsSync(join(vault, dailyPath)), JSON.stringify(noTemplate.content));
+  await mcpCall("create_file", { path: "DailyTemplate.md", content: "Template line.\n", why: "agent" });
+  await eventually(async () => existsSync(join(vault, "DailyTemplate.md")));
+  await setDaily({ template: "DailyTemplate" });
+  const created = await mcpCall("create_daily_note", {});
+  const dailyWrite = await mcpCall("append_to_file", { path: dailyPath, text: "AgentDaily line.\n", why: "agent" });
+  check("create_daily_note returns a note the agent can write at once", !created.isError && created.content[0].text === dailyPath && !dailyWrite.isError, JSON.stringify([created.content, dailyWrite.content]));
+  const dailyAuthors = await mcpCall("read_file", { path: dailyPath, provenance: true });
+  check("the daily template is unknown and the agent's text is the agent's", /^\[unknown\] Template line\.\n\[agent agent:.*\] AgentDaily line\./.test(dailyAuthors.content[0].text), dailyAuthors.content[0].text);
+  await mcpCall("create_daily_note", {});
+  const dailyAgain = await mcpCall("read_file", { path: dailyPath });
+  check("create_daily_note leaves an existing note alone", dailyAgain.content[0].text === "Template line.\nAgentDaily line.\n", dailyAgain.content[0].text);
+  check("get_daily_note prints the bare path once the note exists", (await mcpCall("get_daily_note", {})).content[0].text === dailyPath);
+  await setDaily({ folder: "NoSuchFolder" });
   const noFolder = await mcpCall("get_daily_note", {});
-  await cdp.eval(`app.internalPlugins.getEnabledPluginById("daily-notes").options = {}; return true`);
+  await setDaily({});
   check("get_daily_note names a missing folder", noFolder.isError && noFolder.content[0].text.includes("NoSuchFolder"), JSON.stringify(noFolder.content));
 
   const by = { agent: "agent:cli-e2e", why: "agent" };
@@ -294,7 +307,7 @@ try {
   check("the handler searches", cliCall({ op: "search", query: "AgentBridge" }).result?.paths.includes("Projects/Roadmap.md"));
   check("the handler follows links", cliCall({ op: "links", path: "Linker.md" }).result?.paths.includes("McpMoved/Deep/Target2.md"));
   check("the handler follows backlinks", cliCall({ op: "backlinks", path: "McpMoved/Deep/Target2.md" }).result?.paths.includes("Linker.md"));
-  check("the handler finds the daily note", cliCall({ op: "daily" }).result?.path === daily.content[0].text);
+  check("the handler finds the daily note", cliCall({ op: "daily" }).result?.path === dailyPath);
   await eventually(async () => existsSync(join(vault, "Cli/ops.md")));
   const cliRenamed = cliCall({ op: "rename", from: "Cli/ops.md", to: "Cli/renamed.md" });
   await eventually(async () => existsSync(join(vault, "Cli/renamed.md")));
@@ -412,7 +425,7 @@ try {
   const files = await eventually(async () => {
     const r = await opsCall({ op: "list" });
     const notes = r.result.files.filter(
-      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Linker.md"].includes(f),
+      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Linker.md", "DailyTemplate.md"].includes(f),
     );
     return notes.join(",") === "Projects/Renamed.md" ? notes : undefined;
   }, 15000);

@@ -244,8 +244,24 @@ const QUIRKS = [
     id: "daily-notes-internals",
     async probe() {
       const seen = await cdp.eval(`const d = app.internalPlugins.getEnabledPluginById("daily-notes");
-        return { getDailyNote: typeof d?.getDailyNote, options: typeof d?.options }`);
-      expect(seen.getDailyNote === "function" && seen.options === "object", "the daily notes plugin has getDailyNote() and options", seen);
+        return { getDailyNote: typeof d?.getDailyNote, getFormat: typeof d?.getFormat, options: typeof d?.options }`);
+      expect(seen.getDailyNote === "function" && seen.getFormat === "function" && seen.options === "object", "the daily notes plugin has getDailyNote(), getFormat() and options", seen);
+      await cdp.eval(`await app.vault.createFolder("Journal"); return true`);
+      for (const options of [{}, { folder: "Journal" }, { format: "YYYY/MM/YYYY-MM-DD" }]) {
+        const paths = await cdp.eval(`const d = app.internalPlugins.getEnabledPluginById("daily-notes");
+          d.options = ${JSON.stringify(options)};
+          const name = window.moment().format(d.getFormat()).trim();
+          const folder = d.options.folder ? app.vault.getFolderByPath(d.options.folder) : app.fileManager.getNewFileParent("");
+          const worked = (folder.isRoot() ? "" : folder.path + "/") + name + ".md";
+          const before = app.vault.getFileByPath(worked);
+          return { worked, before: !!before, created: (await d.getDailyNote())?.path }`);
+        expect(!paths.before && paths.created === paths.worked, "getDailyNote() puts today's note where its options say", { options, paths });
+        if (!mobile) {
+          const told = instance.cli("daily:path").stdout.trim();
+          expect(told === paths.worked, "daily:path agrees with getDailyNote()", { options, told, paths });
+        }
+      }
+      await cdp.eval(`app.internalPlugins.getEnabledPluginById("daily-notes").options = {}; return true`);
     },
   },
   {

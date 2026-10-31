@@ -1,6 +1,6 @@
 import { executeOp, handleOpRequest, OpError, type OpRequest, type OpResult } from "@provenance/core";
 import { Platform, prepareSimpleSearch, type App, type Plugin } from "obsidian";
-import { dailyNotesPlugin } from "./quirks";
+import { dailyNotePath, dailyNotesPlugin } from "./quirks";
 import type { SyncEngine } from "./sync/engine";
 
 /** How long a rename gets to finish before it counts as waiting on the human. */
@@ -58,9 +58,14 @@ export async function runFull(app: App, engine: SyncEngine, req: OpRequest): Pro
     case "daily": {
       const daily = dailyNotesPlugin(app);
       if (!daily?.getDailyNote) throw new OpError("unsupported", "Obsidian's Daily notes plugin is turned off");
+      const path = dailyNotePath(app, daily);
+      if (!path) throw new OpError("not-found", `the daily notes folder doesn't exist: ${daily.options?.folder}`);
+      if (!req.create) return { op: "daily", path, exists: !!app.vault.getFileByPath(path) };
       const file = await daily.getDailyNote();
-      if (!file) throw new OpError("not-found", `could not open today's daily note; check that its folder exists: ${daily.options?.folder ?? "(vault root)"}`);
-      return { op: "daily", path: file.path };
+      if (!file) throw new OpError("not-found", `could not create today's daily note; check that its template exists: ${path}`);
+      // The engine hears of a new file from a vault event that may come later, and the agent's next write must find it.
+      await engine.onCreate(file.path, false);
+      return { op: "daily", path: file.path, exists: true };
     }
     default:
       return executeOp(engine, req);

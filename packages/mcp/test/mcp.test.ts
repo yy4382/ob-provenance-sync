@@ -103,10 +103,22 @@ describe("MCP tools", () => {
     expect((await answer(true)).content).toEqual([{ type: "text", text: expect.stringMatching(/asking the human/) }]);
   });
 
-  it("returns today's daily note path", async () => {
-    const client = await connect(async () => ({ ok: true, result: { op: "daily", path: "Journal/2026-10-31.md" } }), "full");
-    const res = await client.callTool({ name: "get_daily_note", arguments: {} });
-    expect(res.content).toEqual([{ type: "text", text: "Journal/2026-10-31.md" }]);
+  it("returns today's daily note path, and says when it isn't created yet", async () => {
+    const answer = async (exists: boolean) => {
+      const client = await connect(async () => ({ ok: true, result: { op: "daily", path: "Journal/2026-10-31.md", exists } }), "full");
+      return client.callTool({ name: "get_daily_note", arguments: {} });
+    };
+    expect((await answer(true)).content).toEqual([{ type: "text", text: "Journal/2026-10-31.md" }]);
+    expect((await answer(false)).content).toEqual([{ type: "text", text: "Journal/2026-10-31.md\n(not created yet)" }]);
+  });
+
+  it("creates the daily note only through its own tool", async () => {
+    const seen: OpRequest[] = [];
+    const ops: OpsTransport = async (req) => (seen.push(req), { ok: true, result: { op: "daily", path: "a.md", exists: true } });
+    const client = await connect(ops, "full");
+    await client.callTool({ name: "get_daily_note", arguments: {} });
+    await client.callTool({ name: "create_daily_note", arguments: {} });
+    expect(seen).toEqual([{ op: "daily" }, { op: "daily", create: true }]);
   });
 });
 

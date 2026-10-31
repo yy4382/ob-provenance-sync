@@ -19,7 +19,7 @@ export function instructions(mode: Mode): string {
     "Finding notes",
     `- Don't guess paths. Wikilinks like [[Note]] are not paths. Use ${full ? "search, list_files, get_links or get_backlinks" : "list_files"}.`,
     "- If AGENTS.md exists at the vault root, read it before your first write. It holds this vault's conventions.",
-    full ? "- For today's journal, use get_daily_note." : "- If AGENTS.md doesn't say where daily notes live, ask the human.",
+    full ? "- For today's journal, use get_daily_note. If it isn't created yet and you have something to write, call create_daily_note first." : "- If AGENTS.md doesn't say where daily notes live, ask the human.",
     "",
     "Errors",
     ...(full ? ["- If a tool says Obsidian isn't running, ask the human to open it instead of retrying. Reading, listing, editing, appending and creating may still work."] : []),

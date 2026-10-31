@@ -43,7 +43,7 @@ export const opRequestSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("links"), path: markdownPath }),
   z.object({ op: z.literal("backlinks"), path: markdownPath }),
   z.object({ op: z.literal("search"), query: z.string().min(1) }),
-  z.object({ op: z.literal("daily") }),
+  z.object({ op: z.literal("daily"), create: z.boolean().optional() }),
 ]);
 export type OpRequest = z.infer<typeof opRequestSchema>;
 export type OpName = OpRequest["op"];
@@ -64,7 +64,7 @@ export type OpResult =
   | { op: "append" | "create" | "delete" }
   | { op: "rename"; linksPending?: boolean }
   | { op: "links" | "backlinks" | "search"; paths: string[] }
-  | { op: "daily"; path: string };
+  | { op: "daily"; path: string; exists: boolean };
 
 export type OpResponse = { ok: true; result: OpResult } | { ok: false; code: OpErrorCode; message: string };
 export type OpErrorCode = "invalid" | "not-found" | "ambiguous" | "exists" | "unsupported" | "unavailable";
