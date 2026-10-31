@@ -49,6 +49,8 @@ writeFileSync(corePlugins, JSON.stringify({ ...(existsSync(corePlugins) ? JSON.p
 const pluginDir = join(vault, ".obsidian/plugins/provenance-sync");
 mkdirSync(pluginDir, { recursive: true });
 for (const f of ["main.js", "manifest.json", "styles.css"]) cpSync(join(repo, "apps/obsidian", f), join(pluginDir, f));
+// What a version before ob-provenance leaves behind.
+for (const f of ["bridge.json", "provenance-mcp.mjs"]) writeFileSync(join(pluginDir, f), "old");
 
 const serverPort = await freePort();
 const api = `http://127.0.0.1:${serverPort}/api/vaults/e2e/ops`;
@@ -67,7 +69,7 @@ writeFileSync(
 // A plain token here also exercises the move into Obsidian's keychain.
 writeFileSync(
   join(pluginDir, "data.json"),
-  JSON.stringify({ serverUrl: `http://127.0.0.1:${serverPort}`, token: DEVICE_TOKEN, vaultId: "e2e", humanName: "tester", deviceName: "e2e-mac" }),
+  JSON.stringify({ serverUrl: `http://127.0.0.1:${serverPort}`, token: DEVICE_TOKEN, vaultId: "e2e", humanName: "tester", deviceName: "e2e-mac", enableBridge: true }),
 );
 
 // --- processes --------------------------------------------------------------
@@ -239,6 +241,8 @@ try {
   });
   check("another program's edit to an open file is unknown", JSON.stringify(external) === '["unknown"]', JSON.stringify(external));
 
+  const pluginFiles = (name) => join(vault, ".obsidian/plugins/provenance-sync", name);
+  check("old agent files are gone from the plugin folder", !existsSync(pluginFiles("bridge.json")) && !existsSync(pluginFiles("provenance-mcp.mjs")));
   const entry = join(instance.env.HOME, ".config/ob-provenance/vaults/e2evault.json");
   const bin = join(instance.env.HOME, ".local/bin/ob-provenance");
   check("Agent CLI starts off: nothing outside the vault", !existsSync(bin) && !existsSync(entry));
@@ -251,7 +255,7 @@ try {
   check("the installed CLI can run and its entry is private", (statSync(bin).mode & 0o777) === 0o755 && (statSync(entry).mode & 0o777) === 0o600, JSON.stringify([statSync(bin).mode, statSync(entry).mode]));
   check("the entry names this vault and its server", JSON.parse(readFileSync(entry, "utf8")).server?.token === DEVICE_TOKEN);
   const edit = await mcpCall("append_to_file", { path: "Projects/Roadmap.md", text: "- AgentBridge line.\n", why: "agent", note: "e2e note" });
-  check("local MCP edits through the plugin bridge", !edit.isError, JSON.stringify(edit.content));
+  check("local MCP edits through the plugin", !edit.isError, JSON.stringify(edit.content));
   const links = await mcpCall("get_backlinks", { path: "Welcome.md" });
   check("full mode answers backlinks", !links.isError && links.content[0].text.includes("Projects/Roadmap.md"), JSON.stringify(links.content));
 

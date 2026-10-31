@@ -22,7 +22,7 @@ const bySchema = z.object({
 });
 
 /**
- * The one protocol every vault host speaks: the plugin's localhost bridge, the
+ * The one protocol every vault host speaks: the plugin's CLI handler, the
  * server's HTTP API, and the in-process remote MCP all accept these requests.
  */
 export const opRequestSchema = z.discriminatedUnion("op", [

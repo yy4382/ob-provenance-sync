@@ -2,7 +2,6 @@ import { errorMessage, humanId, reattribute, REATTRIBUTABLE } from "@provenance/
 import { MarkdownView, Notice, Platform, Plugin, type Editor } from "obsidian";
 import { installCli, localMcpCommand, registerVault, unregisterVault, type LocalMcpCommand } from "./agent-cli";
 import { registerAgentCli } from "./agent-ops";
-import { startBridge } from "./bridge";
 import { ConflictsModal } from "./conflicts";
 import { EVENT_LOG_VIEW, EventLog, EventLogView } from "./event-log";
 import { provenanceExtension, renderProvenance, segmentAt } from "./editor/binding";
@@ -30,7 +29,6 @@ const STATUS_TEXT: Record<Status, string> = {
 export default class ProvenancePlugin extends Plugin {
   declare settings: ProvenanceSettings;
   private engine: SyncEngine | null = null;
-  private stopBridge: (() => Promise<void>) | null = null;
   private statusEl: HTMLElement | null = null;
   private status: Status = "connecting";
   /** The other sync tools that kept sync off at the last start, joined; "" if none. */
@@ -109,6 +107,7 @@ export default class ProvenancePlugin extends Plugin {
         }, OTHER_SYNC_CHECK_EVERY),
       );
       this.syncAgentCli();
+      void this.removeOldAgentFiles();
     });
   }
 
@@ -190,6 +189,15 @@ export default class ProvenancePlugin extends Plugin {
     ];
   }
 
+  /** What versions before ob-provenance left in the plugin folder. */
+  private async removeOldAgentFiles() {
+    const { adapter } = this.app.vault;
+    for (const name of ["bridge.json", "provenance-mcp.mjs"]) {
+      const path = `${this.manifest.dir}/${name}`;
+      if (await adapter.exists(path)) await adapter.remove(path);
+    }
+  }
+
   /** How an agent on this computer starts the local MCP server for this vault. */
   mcpCommand(): LocalMcpCommand | null {
     return this.cliPath ? localMcpCommand(this.app, this.cliPath) : null;
@@ -234,8 +242,6 @@ export default class ProvenancePlugin extends Plugin {
   }
 
   private async stopSync() {
-    await this.stopBridge?.();
-    this.stopBridge = null;
     if (this.engine) {
       await this.engine.settle();
       this.engine.destroy();
@@ -304,9 +310,6 @@ export default class ProvenancePlugin extends Plugin {
     }
     if (this.engine !== engine) return;
     this.pokeEditors();
-    if (Platform.isDesktopApp && s.enableBridge) {
-      this.stopBridge = await startBridge(this.app, engine, `${this.manifest.dir}/bridge.json`);
-    }
   }
 
   /** Editors attach to the engine on their next update; give them one. */

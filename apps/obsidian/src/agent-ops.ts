@@ -10,7 +10,7 @@ const RENAME_SETTLE_MS = 2000;
  * The full-mode half of the vault ops: things only a running Obsidian knows
  * (links, search, the daily note) or does better (renames that rewrite links, trash).
  */
-export async function runFull(app: App, engine: SyncEngine, req: OpRequest): Promise<OpResult> {
+async function runFull(app: App, engine: SyncEngine, req: OpRequest): Promise<OpResult> {
   const fileAt = (path: string) => {
     const f = app.vault.getFileByPath(path);
     if (!f) throw new OpError("not-found", `no such file: ${path}`);

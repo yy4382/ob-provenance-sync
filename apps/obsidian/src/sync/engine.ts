@@ -1173,7 +1173,7 @@ export class SyncEngine implements VaultDocs {
     });
   }
 
-  // VaultDocs, for agent edits arriving through the bridge.
+  // VaultDocs, for agent edits arriving through the CLI handler.
 
   async updateIndex(fn: (index: VaultIndex) => void): Promise<void> {
     this.vaultIndex.doc.transact(() => fn(this.vaultIndex));

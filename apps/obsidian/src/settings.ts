@@ -12,7 +12,6 @@ export interface ProvenanceSettings {
   humanName: string;
   deviceName: string;
   showColors: boolean;
-  enableBridge: boolean;
   /** Installs ob-provenance and lets agents on this computer reach this vault. Off by default: it puts the device token on disk. */
   agentCli: boolean;
   /** Last agent named when marking text as an agent's, offered again next time. */
@@ -28,14 +27,10 @@ export function defaultSettings(app: App): ProvenanceSettings {
     humanName: "me",
     deviceName: `${Platform.isMobile ? "mobile" : "desktop"}-${suffix}`,
     showColors: true,
-    enableBridge: true,
     agentCli: false,
     lastAgentName: "chatgpt",
   };
 }
-
-/** Changing these needs a fresh connection; the Reconnect action applies them. */
-const RESTART_KEYS = new Set<keyof ProvenanceSettings>(["enableBridge"]);
 
 export class ProvenanceSettingTab extends PluginSettingTab {
   constructor(
@@ -93,12 +88,6 @@ export class ProvenanceSettingTab extends PluginSettingTab {
         heading: "Agents",
         items: [
           {
-            name: "Local agent bridge",
-            desc: "Let local agents edit this vault through provenance-mcp while Obsidian is running.",
-            visible: Platform.isDesktopApp,
-            control: { type: "toggle", key: "enableBridge" },
-          },
-          {
             name: "Agent CLI",
             desc: "Lets agents on this computer use this vault through the ob-provenance command. Installs it to ~/.local/bin and stores this vault's path, server and device token in ~/.config/ob-provenance, readable only by your user. Needs Node.js 22 or later. While Obsidian runs, agents get every feature only if Command line interface is on in Obsidian's General settings. Otherwise they get reading and editing through the server.",
             visible: Platform.isDesktopApp,
@@ -130,7 +119,6 @@ export class ProvenanceSettingTab extends PluginSettingTab {
   async setControlValue(key: string, value: unknown): Promise<void> {
     await super.setControlValue(key, typeof value === "string" ? value.trim() : value);
     if (key === "showColors") this.plugin.applyColors();
-    if (RESTART_KEYS.has(key as keyof ProvenanceSettings)) await this.plugin.restartSync();
     this.plugin.syncAgentCli();
   }
 }

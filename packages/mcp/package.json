@@ -4,23 +4,18 @@
   "private": true,
   "type": "module",
   "exports": "./src/index.ts",
-  "bin": {
-    "provenance-mcp": "dist/cli.js"
-  },
   "scripts": {
-    "build": "tsc -p . && node build.mjs",
+    "build": "tsc -p .",
     "test": "vitest run",
     "lint": "tsc -p ."
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@provenance/core": "workspace:*",
-    "@provenance/tools": "workspace:*",
-    "zod": "^4.6.7"
+    "@provenance/tools": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
-    "esbuild": "0.25.5",
     "typescript": "^5.9.3",
     "vitest": "^5.0.5"
   }

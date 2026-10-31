@@ -12,10 +12,10 @@ import { selectVault, type Selection } from "./vault";
 const USAGE = `ob-provenance [vault=<name>] <command> [key=value ...] [--stdin=<field>]
 
 Commands
-${TOOLS.map((t) => `  ${t.command}`).join("\n")}
-  vaults        List the vaults you can use
-  status        Show whether a call would reach Obsidian or the sync server
-  mcp           Serve these commands as an MCP server on stdio
+${TOOLS.map((t) => `  ${t.command.padEnd(16)}${t.description.split(". ")[0]!.replace(/\.$/, "")}`).join("\n")}
+  vaults          List the vaults you can use
+  status          Show whether a call would reach Obsidian or the sync server
+  mcp             Serve these commands as an MCP server on stdio
   help <command>  Show a command's fields`;
 
 function commandHelp(t: ToolDef): string {
