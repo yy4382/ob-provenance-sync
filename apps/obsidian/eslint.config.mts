@@ -46,7 +46,11 @@ export default defineConfig(
   },
   {
     // The engine is DOM-free and also runs under Node in tests; its timers belong to no window.
+    // It knows Obsidian only through the Disk, Blobs and Persistence that sync/obsidian.ts implements.
     files: ["src/sync/engine.ts"],
-    rules: { "obsidianmd/prefer-window-timers": "off" },
+    rules: {
+      "obsidianmd/prefer-window-timers": "off",
+      "no-restricted-imports": ["error", { paths: ["obsidian"], patterns: ["**/quirks", "**/sync/obsidian", "./obsidian"] }],
+    },
   },
 );
