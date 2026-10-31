@@ -41,7 +41,7 @@ Both models were last confirmed to describe the code at **f61fea1** (sync commit
 | `SyncEngine.enqueue`, `onModify`, `trackWrite` | `queue`, `pc` |
 | `SyncEngine.check` (rereads a note through `onDiskModified`) | `CheckFires` |
 | `binding.ts` `attach` (`shownFile`) → `bindEditor(current)` + `loadFromCrdt`, `onYjs`, `push` | `OpenPane`, `BindTask`, `Observe`, `Type` |
-| `main.ts` vault `modify` event → `engine.onModify` | `EditorSave`, `WatcherFires`, `WriteRuns` |
+| `obsidian.ts` `watchVault` `modify` event → `engine.onModify` | `EditorSave`, `WatcherFires`, `WriteRuns` |
 
 | Code | VaultTree.tla |
 | --- | --- |

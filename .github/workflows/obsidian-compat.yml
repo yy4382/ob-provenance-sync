@@ -8,6 +8,7 @@ on:
   push:
     paths:
       - apps/obsidian/src/quirks.ts
+      - apps/obsidian/src/sync/obsidian.ts
       - apps/obsidian/e2e/**
       - .github/workflows/obsidian-compat.yml
   workflow_dispatch:
