@@ -163,6 +163,12 @@ try {
     await cdp.eval(`const p = app.plugins.plugins["provenance-sync"]; return !("token" in p.settings) && !!app.secretStorage.getSecret(p.settings.tokenSecret)`),
   );
 
+  // Renaming these would leave every device's CRDT history behind and make it a fresh device.
+  check(
+    "local history stays under its database names",
+    await cdp.eval(`return (await indexedDB.databases()).some((d) => d.name.startsWith(\`provenance-sync/\${app.appId}/\`))`),
+  );
+
   const plugin = `app.plugins.plugins["provenance-sync"]`;
   await sleep(3000);
   const drops = await cdp.eval(`return ${plugin}.log.entries.filter(e => e.message.startsWith("Disconnected")).length`);
