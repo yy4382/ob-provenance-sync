@@ -35,6 +35,8 @@ export default class ProvenancePlugin extends Plugin {
   private blockedBy = "";
   private cliPath: string | null = null;
   private agentCliUpdate: Promise<void> = Promise.resolve();
+  /** Stopping waits for these: a write that reaches a stopped engine lands in the file with no author. */
+  private readonly agentCalls = new Set<Promise<unknown>>();
   /** Restarts run one after another, so two quick reconnects never leave two engines running. */
   private restarting: Promise<void> = Promise.resolve();
   private firstStartDone = () => {};
@@ -91,10 +93,21 @@ export default class ProvenancePlugin extends Plugin {
       editorCallback: (editor, ctx) => ctx instanceof MarkdownView && this.reattribute(editor, ctx, "recover"),
     });
     this.addCommand({ id: "reconnect", name: "Reconnect sync", callback: () => void this.reconnect() });
-    registerAgentCli(this, async () => {
+    registerAgentCli(this, async (run) => {
       await this.firstStart;
-      await this.restarting;
-      return this.settings.agentCli ? this.engine : null;
+      // A restart queued during the wait goes first, or this call would start on the engine it's about to stop.
+      for (let seen; seen !== this.restarting; ) {
+        seen = this.restarting;
+        await seen;
+      }
+      if (!this.engine || !this.settings.agentCli) return null;
+      const call = run(this.engine);
+      this.agentCalls.add(call);
+      try {
+        return await call;
+      } finally {
+        this.agentCalls.delete(call);
+      }
     });
 
     this.app.workspace.onLayoutReady(() => {
@@ -242,6 +255,7 @@ export default class ProvenancePlugin extends Plugin {
   }
 
   private async stopSync() {
+    await Promise.allSettled(this.agentCalls);
     if (this.engine) {
       await this.engine.settle();
       this.engine.destroy();

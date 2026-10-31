@@ -1,4 +1,4 @@
-import { executeOp, handleOpRequest, OpError, type OpRequest, type OpResult } from "@provenance/core";
+import { executeOp, handleOpRequest, OpError, type OpRequest, type OpResponse, type OpResult } from "@provenance/core";
 import { Platform, prepareSimpleSearch, type App, type Plugin } from "obsidian";
 import { dailyNotePath, dailyNotesPlugin } from "./quirks";
 import type { SyncEngine } from "./sync/engine";
@@ -78,7 +78,7 @@ async function runFull(app: App, engine: SyncEngine, req: OpRequest): Promise<Op
  * tells the CLI this vault can't serve the request and to try the sync server.
  * Desktop only: Node's fs module is loaded lazily so the plugin still loads on mobile.
  */
-export function registerAgentCli(plugin: Plugin, engineReady: () => Promise<SyncEngine | null>) {
+export function registerAgentCli(plugin: Plugin, serve: (run: (engine: SyncEngine) => Promise<OpResponse>) => Promise<OpResponse | null>) {
   if (!Platform.isDesktop) return;
   // eslint-disable-next-line @typescript-eslint/no-require-imports, no-undef -- Obsidian provides require on desktop; loaded lazily so mobile never evaluates it
   const fs = require("node:fs") as typeof import("node:fs");
@@ -95,9 +95,8 @@ export function registerAgentCli(plugin: Plugin, engineReady: () => Promise<Sync
     "Run a vault operation for ob-provenance",
     { request: { value: "<path>", description: "JSON file holding the operation", required: true } },
     async ({ request }) => {
-      const engine = await engineReady();
-      if (!engine) return "This vault isn't serving agents: Agent CLI is off, or sync isn't running.";
-      return JSON.stringify(await handleOpRequest(engine, readRequest(request!), (op) => runFull(plugin.app, engine, op)));
+      const answer = await serve((engine) => handleOpRequest(engine, readRequest(request!), (op) => runFull(plugin.app, engine, op)));
+      return answer ? JSON.stringify(answer) : "This vault isn't serving agents: Agent CLI is off, or sync isn't running.";
     },
   );
 }

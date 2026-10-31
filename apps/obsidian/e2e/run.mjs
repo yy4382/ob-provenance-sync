@@ -355,6 +355,21 @@ try {
   check("ob-provenance mcp serves the full tools through Obsidian", !overMcp.isError && overMcp.content[0].text.includes("Projects/Roadmap.md"), JSON.stringify(overMcp.content));
   check("ob-provenance mcp names the agent after the MCP client", !mcpWrite.isError && ob(["read", "path=Cli/shell.md", "provenance"]).stdout.includes("[agent agent:shell-client] Over MCP."), JSON.stringify(mcpWrite.content));
 
+  // The delay holds the write open, so the restart below arrives while it's in flight.
+  await cdp.eval(`const e = app.plugins.plugins["provenance-sync"].engine; const update = e.updateText;
+    e.updateText = async function (...args) { await new Promise((r) => setTimeout(r, 1500)); return update.apply(this, args); }; return true`);
+  const inFlight = new Promise((resolve) => {
+    const child = spawn(process.execPath, [join(repo, "apps/cli/dist/cli.js"), "append", "path=Cli/shell.md", "text= During a restart.", "why=agent", "agent=shell-agent"], { env: instance.env, cwd: work, stdio: "ignore" });
+    child.on("close", resolve);
+  });
+  await sleep(500);
+  await cdp.eval(`await app.plugins.plugins["provenance-sync"].restartSync(); return true`);
+  const inFlightCode = await inFlight;
+  const afterRestart = await eventually(async () => {
+    const text = ob(["read", "path=Cli/shell.md", "provenance"]).stdout;
+    return text.includes("During a restart.") ? text : undefined;
+  });
+  check("a restart waits for a write in flight and keeps its author", inFlightCode === 0 && afterRestart?.includes("[agent agent:shell-agent] During a restart."), JSON.stringify([inFlightCode, afterRestart]));
   const other = join(dirname(entry), "othervault.json");
   mkdirSync(join(work, "other"));
   writeFileSync(other, JSON.stringify({ name: "other", path: join(work, "other"), server: null }));
