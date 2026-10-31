@@ -90,6 +90,15 @@ pnpm install
 pnpm build && pnpm lint && pnpm test
 pnpm vault:install   # build the plugin into test-vault/ to try it in Obsidian
 pnpm e2e             # end-to-end test in a real Obsidian (set OBSIDIAN_BIN off macOS)
+pnpm quirks          # check that Obsidian still behaves the way the plugin assumes (MOBILE=1 for the mobile UI)
 ```
 
-`pnpm e2e` launches a separate Obsidian instance with its own profile. It works on a temporary copy of `test-vault`, so it never opens your own vaults.
+`pnpm e2e` and `pnpm quirks` launch a separate Obsidian instance with its own profile. They work on a temporary vault, so they never open your own vaults.
+
+### Obsidian versions
+
+The plugin relies on some behavior Obsidian doesn't document. All of it is in `apps/obsidian/src/quirks.ts`, and each piece has a probe in `apps/obsidian/e2e/quirks.mjs`. One plugin build runs on every device, so it has to work from `minAppVersion` through the newest desktop release, including the newest Android build, which lags desktop and skips some versions.
+
+The [Obsidian compatibility](.github/workflows/obsidian-compat.yml) workflow looks for new stable releases every six hours and tests each supported version on Linux: the quirks on the desktop UI, the quirks on the emulated mobile UI, and `pnpm e2e`. Versions that pass go in `apps/obsidian/e2e/verified-versions.json`. A version that fails gets an issue naming what changed.
+
+When a release changes a quirk, keep the old behavior for devices that haven't updated: branch on `requireApiVersion` in the function in `quirks.ts`, give its probe the same branch, and remove both once `minAppVersion` passes that release. Don't raise `minAppVersion` past the newest Android build, or phones can't install the plugin. The workflow fails if it is.
