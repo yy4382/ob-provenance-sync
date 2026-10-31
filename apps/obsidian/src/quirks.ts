@@ -1,7 +1,7 @@
 import { Transaction } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import { around } from "monkey-around";
-import { editorInfoField, TextFileView, type App, type MarkdownView, type TFile } from "obsidian";
+import { editorInfoField, moment, normalizePath, TextFileView, type App, type MarkdownView, type TFile } from "obsidian";
 
 /**
  * What this plugin relies on that Obsidian doesn't promise. Each `quirk:` line
@@ -116,7 +116,9 @@ export function deviceVaultId(app: App): string {
 }
 
 export interface DailyNotes {
-  getDailyNote?(): Promise<TFile | null>;
+  /** Creates today's note from the template if it's missing. Resolves to nothing if it can't. */
+  getDailyNote?(): Promise<TFile | null | undefined>;
+  getFormat?(): string;
   options?: { folder?: string };
 }
 
@@ -124,3 +126,30 @@ export interface DailyNotes {
 export function dailyNotesPlugin(app: App): DailyNotes | null {
   return (internals(app).internalPlugins?.getEnabledPluginById?.("daily-notes") as DailyNotes | null | undefined) ?? null;
 }
+
+/**
+ * Where getDailyNote() puts today's note, without creating it, or null if the
+ * configured folder is missing.
+ *
+ * quirk: daily-notes-internals
+ */
+export function dailyNotePath(app: App, daily: DailyNotes): string | null {
+  const name = moment().format(daily.getFormat?.()).trim();
+  const folder = daily.options?.folder ? app.vault.getFolderByPath(normalizePath(daily.options.folder)) : app.fileManager.getNewFileParent("");
+  if (!folder) return null;
+  return `${folder.isRoot() ? "" : `${folder.path}/`}${name}.md`;
+}
+
+/**
+ * ob-provenance reads what a handler from registerCliHandler returns off the
+ * stdout of `obsidian`, which exits 0 even when the command failed.
+ *
+ * quirk: cli-reply-is-stdout
+ */
+
+/**
+ * Each vault's plugin registers the same CLI command, and `obsidian vault=<id>`
+ * runs the one in that vault, so ob-provenance reaches the vault it selected.
+ *
+ * quirk: cli-handler-runs-in-named-vault
+ */

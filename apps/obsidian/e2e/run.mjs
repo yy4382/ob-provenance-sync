@@ -4,8 +4,8 @@
 //
 //   pnpm e2e                      (from the repo root; builds everything first)
 //   OBSIDIAN_BIN=/path/to/Obsidian KEEP=1 node apps/obsidian/e2e/run.mjs
-import { spawn } from "node:child_process";
-import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,6 +49,8 @@ writeFileSync(corePlugins, JSON.stringify({ ...(existsSync(corePlugins) ? JSON.p
 const pluginDir = join(vault, ".obsidian/plugins/provenance-sync");
 mkdirSync(pluginDir, { recursive: true });
 for (const f of ["main.js", "manifest.json", "styles.css"]) cpSync(join(repo, "apps/obsidian", f), join(pluginDir, f));
+// What a version before ob-provenance leaves behind.
+for (const f of ["bridge.json", "provenance-mcp.mjs"]) writeFileSync(join(pluginDir, f), "old");
 
 const serverPort = await freePort();
 const api = `http://127.0.0.1:${serverPort}/api/vaults/e2e/ops`;
@@ -67,7 +69,7 @@ writeFileSync(
 // A plain token here also exercises the move into Obsidian's keychain.
 writeFileSync(
   join(pluginDir, "data.json"),
-  JSON.stringify({ serverUrl: `http://127.0.0.1:${serverPort}`, token: DEVICE_TOKEN, vaultId: "e2e", humanName: "tester", deviceName: "e2e-mac" }),
+  JSON.stringify({ serverUrl: `http://127.0.0.1:${serverPort}`, token: DEVICE_TOKEN, vaultId: "e2e", humanName: "tester", deviceName: "e2e-mac", enableBridge: true }),
 );
 
 // --- processes --------------------------------------------------------------
@@ -75,6 +77,7 @@ writeFileSync(
 function startServer() {
   const child = spawn(process.execPath, [join(repo, "apps/server/dist/server.js"), join(work, "server.json")], { stdio: "ignore" });
   children.push(child);
+  return child;
 }
 
 const instance = await obsidian({ vault, profile });
@@ -125,18 +128,36 @@ async function opsCall(body) {
   return res.json();
 }
 
-/** The command the plugin's settings hand out for local agents, with its embedded MCP server. */
+/** The command the plugin's settings hand out for local agents. */
 let mcpCommand = null;
 
 async function mcpCall(name, args) {
   const client = new Client({ name: "e2e client", version: "0" });
-  await client.connect(new StdioClientTransport({ ...mcpCommand, env: { ...process.env, ...mcpCommand.env } }));
+  await client.connect(new StdioClientTransport({ ...mcpCommand, env: { ...instance.env, ...mcpCommand.env } }));
   try {
     return await client.callTool({ name, arguments: args });
   } finally {
     await client.close();
   }
 }
+
+let requests = 0;
+
+/** One op through `obsidian provenance-sync`, the way ob-provenance sends it. */
+function cliCall(body) {
+  const file = join(work, `request-${++requests}.json`);
+  writeFileSync(file, JSON.stringify(body));
+  const r = instance.cli("provenance-sync", `request=${file}`);
+  try {
+    return JSON.parse(r.stdout);
+  } catch {
+    return { unparsed: r.stdout, stderr: r.stderr, status: r.status };
+  }
+}
+
+/** Runs the built ob-provenance as an agent would, with this instance's HOME and `obsidian`. */
+const ob = (args, opts = {}) =>
+  spawnSync(process.execPath, [join(repo, "apps/cli/dist/cli.js"), ...args], { env: instance.env, cwd: work, encoding: "utf8", timeout: 30000, maxBuffer: 1 << 26, ...opts });
 
 async function openObsidian() {
   const cdp = await instance.open();
@@ -155,7 +176,7 @@ async function openObsidian() {
 // --- scenarios ----------------------------------------------------------------
 
 try {
-  startServer();
+  const serverProcess = startServer();
   let cdp = await openObsidian();
   check("plugin loads and syncs", true);
   check(
@@ -221,10 +242,21 @@ try {
   });
   check("another program's edit to an open file is unknown", JSON.stringify(external) === '["unknown"]', JSON.stringify(external));
 
+  const pluginFiles = (name) => join(vault, ".obsidian/plugins/provenance-sync", name);
+  check("old agent files are gone from the plugin folder", !existsSync(pluginFiles("bridge.json")) && !existsSync(pluginFiles("provenance-mcp.mjs")));
+  const entry = join(instance.env.HOME, ".config/ob-provenance/vaults/e2evault.json");
+  const bin = join(instance.env.HOME, ".local/bin/ob-provenance");
+  check("Agent CLI starts off: nothing outside the vault", !existsSync(bin) && !existsSync(entry));
+  // Settings open in a window of their own, so this calls what the toggle calls.
+  const setAgentCli = (on) => cdp.eval(`await app.setting.pluginTabs.find((t) => t.id === "provenance-sync").setControlValue("agentCli", ${on}); return true`);
+  await setAgentCli(true);
   mcpCommand = await eventually(() => cdp.eval(`return app.plugins.plugins["provenance-sync"].mcpCommand()`));
-  check("settings offer a local MCP command", mcpCommand?.args.includes(vault) && mcpCommand.args[0].endsWith("provenance-mcp.mjs"), JSON.stringify(mcpCommand));
+  check("settings offer a local MCP command", mcpCommand?.args[0] === bin && mcpCommand.args.join(" ").endsWith("--vault e2evault mcp") && !JSON.stringify(mcpCommand).includes(DEVICE_TOKEN), JSON.stringify(mcpCommand));
+  await eventually(async () => existsSync(entry));
+  check("the installed CLI can run and its entry is private", (statSync(bin).mode & 0o777) === 0o755 && (statSync(entry).mode & 0o777) === 0o600, JSON.stringify([statSync(bin).mode, statSync(entry).mode]));
+  check("the entry names this vault and its server", JSON.parse(readFileSync(entry, "utf8")).server?.token === DEVICE_TOKEN);
   const edit = await mcpCall("append_to_file", { path: "Projects/Roadmap.md", text: "- AgentBridge line.\n", why: "agent", note: "e2e note" });
-  check("local MCP edits through the plugin bridge", !edit.isError, JSON.stringify(edit.content));
+  check("local MCP edits through the plugin", !edit.isError, JSON.stringify(edit.content));
   const links = await mcpCall("get_backlinks", { path: "Welcome.md" });
   check("full mode answers backlinks", !links.isError && links.content[0].text.includes("Projects/Roadmap.md"), JSON.stringify(links.content));
 
@@ -249,16 +281,147 @@ try {
     return r.content[0].text.includes("Target2") ? r.content[0].text : undefined;
   });
   check("the human's answer updates the link", !!relinked);
+  const setDaily = (options) => cdp.eval(`app.internalPlugins.getEnabledPluginById("daily-notes").options = ${JSON.stringify(options)}; return true`);
   const daily = await mcpCall("get_daily_note", {});
-  const dailyRead = await eventually(async () => {
-    const r = await mcpCall("read_file", { path: daily.content[0].text });
-    return r.isError ? undefined : r;
-  });
-  check("get_daily_note returns a note the agent can read", !daily.isError && !!dailyRead, JSON.stringify(daily.content));
-  await cdp.eval(`app.internalPlugins.getEnabledPluginById("daily-notes").options = { folder: "NoSuchFolder" }; return true`);
+  const [dailyPath, dailyPending] = daily.content[0].text.split("\n");
+  check("get_daily_note reports a missing note without creating it", !daily.isError && dailyPending === "(not created yet)" && !existsSync(join(vault, dailyPath)), JSON.stringify(daily.content));
+  await setDaily({ template: "NoSuchTemplate" });
+  const noTemplate = await mcpCall("create_daily_note", {});
+  check("create_daily_note fails on a missing template", noTemplate.isError && noTemplate.content[0].text.includes("template") && !existsSync(join(vault, dailyPath)), JSON.stringify(noTemplate.content));
+  await mcpCall("create_file", { path: "DailyTemplate.md", content: "Template line.\n", why: "agent" });
+  await eventually(async () => existsSync(join(vault, "DailyTemplate.md")));
+  await setDaily({ template: "DailyTemplate" });
+  const created = await mcpCall("create_daily_note", {});
+  const dailyWrite = await mcpCall("append_to_file", { path: dailyPath, text: "AgentDaily line.\n", why: "agent" });
+  check("create_daily_note returns a note the agent can write at once", !created.isError && created.content[0].text === dailyPath && !dailyWrite.isError, JSON.stringify([created.content, dailyWrite.content]));
+  const dailyAuthors = await mcpCall("read_file", { path: dailyPath, provenance: true });
+  check("the daily template is unknown and the agent's text is the agent's", /^\[unknown\] Template line\.\n\[agent agent:.*\] AgentDaily line\./.test(dailyAuthors.content[0].text), dailyAuthors.content[0].text);
+  await mcpCall("create_daily_note", {});
+  const dailyAgain = await mcpCall("read_file", { path: dailyPath });
+  check("create_daily_note leaves an existing note alone", dailyAgain.content[0].text === "Template line.\nAgentDaily line.\n", dailyAgain.content[0].text);
+  check("get_daily_note prints the bare path once the note exists", (await mcpCall("get_daily_note", {})).content[0].text === dailyPath);
+  await setDaily({ folder: "NoSuchFolder" });
   const noFolder = await mcpCall("get_daily_note", {});
-  await cdp.eval(`app.internalPlugins.getEnabledPluginById("daily-notes").options = {}; return true`);
+  await setDaily({});
   check("get_daily_note names a missing folder", noFolder.isError && noFolder.content[0].text.includes("NoSuchFolder"), JSON.stringify(noFolder.content));
+
+  const by = { agent: "agent:cli-e2e", why: "agent" };
+  const strings = [`quote"s and 'single'`, "line1\nline2\r\nline3", "tab\there", "back\\slash \\n literal", "emoji 🧠 中文 العربية", "a=b=c", "control\x01\x02\x1f", "--looks-like-flag", "path/that.md", "", "  spaces  ", "obsidian://open", "\u2028sep\u2029"];
+  const garbled = strings.filter((content, i) => {
+    const path = `Cli/string${i}.md`;
+    return cliCall({ op: "create", path, content, by }).ok !== true || cliCall({ op: "read", path }).result?.content !== content;
+  });
+  check("obsidian provenance-sync keeps every string intact", garbled.length === 0, JSON.stringify(garbled));
+  cliCall({ op: "create", path: "Cli/ops.md", content: "First.", by });
+  const edited = cliCall({ op: "edit", path: "Cli/ops.md", oldString: "First", newString: "Second", by });
+  const appended = cliCall({ op: "append", path: "Cli/ops.md", text: " Third.", by });
+  const provenance = cliCall({ op: "read", path: "Cli/ops.md", provenance: true });
+  check(
+    "writes through the handler are attributed to the agent",
+    edited.result?.replaced === 1 && appended.ok && provenance.result?.content === "Second. Third." && provenance.result.sentences.every((s) => s.authors.join() === "agent:cli-e2e"),
+    JSON.stringify(provenance),
+  );
+  check("the handler lists", cliCall({ op: "list", prefix: "Cli/" }).result?.files.includes("Cli/ops.md"));
+  check("the handler searches", cliCall({ op: "search", query: "AgentBridge" }).result?.paths.includes("Projects/Roadmap.md"));
+  check("the handler follows links", cliCall({ op: "links", path: "Linker.md" }).result?.paths.includes("McpMoved/Deep/Target2.md"));
+  check("the handler follows backlinks", cliCall({ op: "backlinks", path: "McpMoved/Deep/Target2.md" }).result?.paths.includes("Linker.md"));
+  check("the handler finds the daily note", cliCall({ op: "daily" }).result?.path === dailyPath);
+  await eventually(async () => existsSync(join(vault, "Cli/ops.md")));
+  const cliRenamed = cliCall({ op: "rename", from: "Cli/ops.md", to: "Cli/renamed.md" });
+  await eventually(async () => existsSync(join(vault, "Cli/renamed.md")));
+  check("the handler renames and deletes", cliRenamed.ok === true && cliCall({ op: "delete", path: "Cli/renamed.md" }).ok === true, JSON.stringify(cliRenamed));
+  const invalid = cliCall({ op: "read", path: "../outside.md" });
+  check("the handler rejects a bad request as an op response", invalid.ok === false && invalid.code === "invalid", JSON.stringify(invalid));
+  const big = "A long line of a long note.\n".repeat(190_000);
+  check("a 5 MB note goes through a request file", cliCall({ op: "create", path: "Cli/big.md", content: big, by }).ok === true && cliCall({ op: "read", path: "Cli/big.md" }).result?.content === big);
+
+  check("ob-provenance lists the registered vault", ob(["vaults"]).stdout.startsWith("vault\t"));
+  check("ob-provenance reaches Obsidian", ob(["status"]).stdout.includes("Obsidian: reachable"), JSON.stringify(ob(["status"])));
+  const written = ob(["create", "--path", "Cli/shell.md", "--content", "From the shell.", "--why", "agent", "--agent", "shell-agent"]);
+  check("ob-provenance writes as the agent it names", written.status === 0 && ob(["read", "--path", "Cli/shell.md", "--provenance"]).stdout === "[agent agent:shell-agent] From the shell.\n", JSON.stringify(written));
+  const anonymous = ob(["append", "--path", "Cli/shell.md", "--text", "x", "--why", "agent"]);
+  check("ob-provenance refuses a write with no identity", anonymous.status === 2 && anonymous.stderr.includes("--agent <name>"), JSON.stringify(anonymous));
+  const piped = "two lines\nwith \"quotes\" and a trailing newline\n";
+  ob(["create", "--path", "Cli/piped.md", "--why", "agent", "--agent", "shell-agent", "--stdin", "content"], { input: piped });
+  check("ob-provenance takes a field from stdin", ob(["read", "--path", "Cli/piped.md"]).stdout === piped);
+  const unknownVault = ob(["--vault", "Nope", "list"]);
+  check("ob-provenance names the vaults it knows", unknownVault.status === 2 && unknownVault.stderr.includes("vault (id e2evault"), JSON.stringify(unknownVault));
+  const closedPipe = spawnSync("sh", ["-c", `"${process.execPath}" "${join(repo, "apps/cli/dist/cli.js")}" --help | true`], { encoding: "utf8" });
+  check("ob-provenance stays quiet when the reader of its output goes away", closedPipe.stderr === "", closedPipe.stderr);
+  check("ob-provenance prints an op error and exits 1", ob(["read", "--path", "Cli/missing.md"]).status === 1);
+  check("ob-provenance searches", ob(["search", "--query", "AgentBridge"]).stdout.includes("Projects/Roadmap.md"));
+  check("a read ignores a bad agent name", ob(["read", "--path", "Cli/shell.md"], { env: { ...instance.env, OB_PROVENANCE_AGENT: "Claude Code" } }).status === 0);
+  const mcpClient = new Client({ name: "shell client", version: "0" });
+  await mcpClient.connect(new StdioClientTransport({ command: process.execPath, args: [join(repo, "apps/cli/dist/cli.js"), "--vault", "e2evault", "mcp"], env: instance.env, cwd: work }));
+  const overMcp = await mcpClient.callTool({ name: "get_backlinks", arguments: { path: "Welcome.md" } });
+  const mcpWrite = await mcpClient.callTool({ name: "append_to_file", arguments: { path: "Cli/shell.md", text: " Over MCP.", why: "agent" } });
+  await mcpClient.close();
+  check("ob-provenance mcp serves the full tools through Obsidian", !overMcp.isError && overMcp.content[0].text.includes("Projects/Roadmap.md"), JSON.stringify(overMcp.content));
+  check("ob-provenance mcp names the agent after the MCP client", !mcpWrite.isError && ob(["read", "--path", "Cli/shell.md", "--provenance"]).stdout.includes("[agent agent:shell-client] Over MCP."), JSON.stringify(mcpWrite.content));
+
+  // The delay holds the write open, so the restart below arrives while it's in flight.
+  await cdp.eval(`const e = app.plugins.plugins["provenance-sync"].engine; const update = e.updateText;
+    e.updateText = async function (...args) { await new Promise((r) => setTimeout(r, 1500)); return update.apply(this, args); }; return true`);
+  const inFlight = new Promise((resolve) => {
+    const child = spawn(process.execPath, [join(repo, "apps/cli/dist/cli.js"), "append", "--path", "Cli/shell.md", "--text", " During a restart.", "--why", "agent", "--agent", "shell-agent"], { env: instance.env, cwd: work, stdio: "ignore" });
+    child.on("close", resolve);
+  });
+  await sleep(500);
+  await cdp.eval(`await app.plugins.plugins["provenance-sync"].restartSync(); return true`);
+  const inFlightCode = await inFlight;
+  const afterRestart = await eventually(async () => {
+    const text = ob(["read", "--path", "Cli/shell.md", "--provenance"]).stdout;
+    return text.includes("During a restart.") ? text : undefined;
+  });
+  check("a restart waits for a write in flight and keeps its author", inFlightCode === 0 && afterRestart?.includes("[agent agent:shell-agent] During a restart."), JSON.stringify([inFlightCode, afterRestart]));
+
+  const restarted = () => cdp.eval(`return await Promise.race([${plugin}.restartSync().then(() => true), new Promise((r) => setTimeout(() => r(false), 25000))])`);
+
+  // Settled first, so the error reaches the new engine's start and not the old one's shutdown.
+  await cdp.eval(`await ${plugin}.engine.settle(); const g = app.vault.getFiles; app.vault.getFiles = () => { throw new Error("simulated disk error"); };
+    try { await ${plugin}.restartSync(); } finally { app.vault.getFiles = g; } return true`);
+  const failedStatus = ob(["status"]).stdout;
+  check("after a failed sync start, the plugin leaves agents to the server", failedStatus.includes("Obsidian: not reachable: This vault isn't serving agents"), failedStatus);
+  const failedRename = ob(["rename", "--from", "Cli/shell.md", "--to", "Cli/moved.md"]);
+  check("after a failed sync start, a rename is refused", failedRename.status === 1 && ob(["read", "--path", "Cli/shell.md"]).status === 0, JSON.stringify(failedRename));
+  await restarted();
+  check("the plugin serves agents again after a good start", await eventually(async () => ob(["status"]).stdout.includes("Obsidian: reachable")));
+
+  // The stalled server never sends this note's text, as when a connection drops just after an index update.
+  serverProcess.kill("SIGSTOP");
+  await sleep(300);
+  const ghost = await cdp.eval(`const e = ${plugin}.engine; const id = crypto.randomUUID(); e.vaultIndex.doc.transact(() => e.vaultIndex.set(id, { type: "markdown", path: "Ghost.md" }), "from-another-device"); return id`);
+  const ghostRead = ob(["read", "--path", "Ghost.md"]);
+  await cdp.eval(`const e = ${plugin}.engine; e.vaultIndex.doc.transact(() => e.vaultIndex.delete(${JSON.stringify(ghost)}), "from-another-device"); return true`);
+  serverProcess.kill("SIGCONT");
+  check("a note whose text never arrives gets an answer, not a hang", ghostRead.status === 1 && ghostRead.stderr.includes("hasn't reached this device"), JSON.stringify(ghostRead));
+  check("a sync restart goes ahead after that call", await restarted());
+
+  await cdp.eval(`${plugin}.agentCalls.add(new Promise(() => {})); return true`);
+  check("a stuck agent call can't hold up a sync restart forever", await restarted());
+  await cdp.eval(`${plugin}.agentCalls.clear(); return true`);
+  await eventually(async () => ob(["status"]).stdout.includes("Obsidian: reachable"));
+
+  const other = join(dirname(entry), "othervault.json");
+  mkdirSync(join(work, "other"));
+  writeFileSync(other, JSON.stringify({ name: "other", path: join(work, "other"), server: null }));
+  const notesBefore = ob(["--vault", "vault", "list"]).stdout;
+  const ambiguous = ob(["append", "--path", "Cli/shell.md", "--text", "lost", "--why", "agent", "--agent", "shell-agent"]);
+  check("with two vaults and neither named, ob-provenance refuses and lists them", ambiguous.status === 2 && /--vault <name>.*vault.*other/.test(ambiguous.stderr), JSON.stringify(ambiguous));
+  check("the refused call changed nothing", ob(["--vault", "vault", "list"]).stdout === notesBefore && !ob(["--vault", "vault", "read", "--path", "Cli/shell.md"]).stdout.includes("lost"));
+  check("inside a vault's folder, ob-provenance needs no name", ob(["list", "--prefix", "Cli/"], { cwd: join(vault, "Projects") }).status === 0);
+  rmSync(other);
+  await sleep(100);
+  writeFileSync(bin, "// ob-provenance 99.0.0\n");
+  await setAgentCli(false);
+  await eventually(async () => !existsSync(entry));
+  check("turning Agent CLI off removes this vault's entry", !existsSync(entry));
+  await setAgentCli(true);
+  await eventually(async () => existsSync(entry));
+  check("an older plugin leaves a newer CLI alone", readFileSync(bin, "utf8") === "// ob-provenance 99.0.0\n");
+  rmSync(bin);
+  await cdp.eval(`app.plugins.plugins["provenance-sync"].syncAgentCli(); return true`);
+  check("the plugin reinstalls a missing CLI", !!(await eventually(async () => existsSync(bin))));
 
   await opsCall({ op: "append", path: "Welcome.md", text: "RemoteAgent line.", by: { agent: "agent:andy", why: "agent" } });
   const remote = await eventually(async () => {
@@ -351,8 +514,30 @@ try {
 
   await cdp.eval(`await app.plugins.plugins["provenance-sync"].engine.settle(); return true`);
   await sleep(1500);
+  ob(["create", "--path", "Cli/late.md", "--content", "Base.\n", "--why", "agent", "--agent", "shell-agent"]);
+  const late = join(work, "late-request.json");
+  writeFileSync(late, JSON.stringify({ op: "append", path: "Cli/late.md", text: "Late.\n", by: { agent: "agent:shell-agent", why: "agent" } }));
+  writeFileSync(`${late}.taken`, "");
+  instance.cli("provenance-sync", `request=${late}`);
+  const lateText = ob(["read", "--path", "Cli/late.md"]).stdout;
+  check("a request ob-provenance gave up on doesn't run when it reaches the plugin", lateText.includes("Base.") && !lateText.includes("Late."), lateText);
+  ob(["create", "--path", "Cli/crash.md", "--content", "Base.\n", "--why", "agent", "--agent", "shell-agent"]);
+  await sleep(1000);
+  // The delay holds the reply back after the write, so the crash below lands between the two.
+  await cdp.eval(`const e = ${plugin}.engine; const update = e.updateText;
+    e.updateText = async function (...args) { const out = await update.apply(this, args); await new Promise((r) => setTimeout(r, 6000)); return out; }; return true`);
+  const crashed = new Promise((resolve) => {
+    const child = spawn(process.execPath, [join(repo, "apps/cli/dist/cli.js"), "append", "--path", "Cli/crash.md", "--text", "Once.\n", "--why", "agent", "--agent", "shell-agent"], { env: instance.env, cwd: work, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (status) => resolve({ status, stderr }));
+  });
+  await sleep(2500);
   cdp.close();
   await instance.kill();
+  const crash = await crashed;
+  check("a write cut off by a crash says so", crash.status === 1 && crash.stderr.includes("may have landed"), JSON.stringify(crash));
+  check("a write cut off by a crash isn't sent to the server again", (await opsCall({ op: "read", path: "Cli/crash.md" })).result?.content === "Base.\nOnce.\n");
 
   const roadmap = join(vault, "Projects/Roadmap.md");
   writeFileSync(join(vault, "Projects/Renamed.md"), readFileSync(roadmap, "utf8") + "OfflineEdit line.\n");
@@ -360,6 +545,11 @@ try {
   unlinkSync(join(vault, "Welcome.md"));
   const fallback = await mcpCall("append_to_file", { path: "Projects/Roadmap.md", text: "- WhileClosed line.\n", why: "agent" });
   check("with Obsidian closed, local MCP falls back to the server", !fallback.isError, JSON.stringify(fallback.content));
+  const closedWrite = ob(["append", "--path", "Projects/Roadmap.md", "--text", "- ClosedShell line.\n", "--why", "agent", "--agent", "shell-agent"]);
+  check("with Obsidian closed, ob-provenance writes through the server", closedWrite.status === 0, JSON.stringify(closedWrite));
+  const closedSearch = ob(["search", "--query", "x"]);
+  check("with Obsidian closed, ob-provenance says why it can't search", closedSearch.status === 1 && closedSearch.stderr.includes("unable to find Obsidian"), JSON.stringify(closedSearch));
+  check("ob-provenance status shows the server route", /Obsidian: not reachable[\s\S]*Sync server: \S+ reachable/.test(ob(["status"]).stdout), ob(["status"]).stdout);
 
   cdp = await openObsidian().catch(async () => {
     // Welcome.md is gone, so the readiness probe above can't use it.
@@ -368,7 +558,7 @@ try {
   const files = await eventually(async () => {
     const r = await opsCall({ op: "list" });
     const notes = r.result.files.filter(
-      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Linker.md"].includes(f),
+      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Linker.md", "DailyTemplate.md"].includes(f),
     );
     return notes.join(",") === "Projects/Renamed.md" ? notes : undefined;
   }, 15000);
@@ -380,6 +570,14 @@ try {
   }, 15000);
   check("edits made on both sides while closed are merged", !!merged);
   check("the merged note is written back to disk", existsSync(join(vault, "Projects/Renamed.md")) && readFileSync(join(vault, "Projects/Renamed.md"), "utf8").includes("WhileClosed"));
+
+  // Closing the last window ends the app off macOS, so a cold call can't be tested there.
+  if (process.platform === "darwin") {
+    await cdp.eval(`window.close(); return true`).catch(() => undefined);
+    await sleep(1500);
+    const cold = cliCall({ op: "list", prefix: "Projects/" });
+    check("a call to a closed vault opens it and waits for sync to start", cold.result?.files.includes("Projects/Renamed.md"), JSON.stringify(cold));
+  }
   cdp?.close();
 } catch (e) {
   check("run completed", false, e instanceof Error ? e.stack : String(e));

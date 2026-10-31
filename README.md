@@ -19,12 +19,12 @@ This project has 3 main parts (4 if we want to split server/client):
    - Uses the CRDT client to sync
    - Shows the inferred info in the app, with background color decoration for the author (human, agent or mixed) and hover (tentative, more interaction methods to be decided) to show details.
    - Sends the user's input into the editor as CRDT requests with author metadata, etc.
-3. The MCP server
-   - The interface for AI to make changes in the vault, similar to traditional Edit tools but with the "why" metadata (enum for now) required
-   - Wraps around the Obsidian CLI? To be determined.
-   - Two versions: a local (full) version which has access to Obsidian directly so it can use Obsidian CLI features like viewing links/backlinks, and a remote (limited) subset version that runs on a server (which can, and usually will, run together with the CRDT server) which only has edit / append features for long-running agents like Grok bot to access when the computer is down. (Or we can use obsidian-headless remotely to get the full version.)
+3. The agent interface
+   - How AI changes the vault: Edit-like operations with the "why" metadata (enum for now) required.
+   - One table of tools (`packages/tools`) behind three surfaces: the `ob-provenance` CLI, a local MCP server (`ob-provenance mcp`), and a remote MCP server inside the sync server.
+   - The CLI talks to the running plugin through the official Obsidian CLI, which adds what only Obsidian knows, like links and search. When Obsidian can't answer, it goes to the sync server, which has a limited subset for edits and reads, so long-running agents can work when the computer is down.
 
-The split above is by responsibility. By artifact, we'll have 1 CRDT server (saves the data), 1 Obsidian plugin (which doesn't persist data, only a local cache) and 1 MCP server (checks the Obsidian CLI to determine full/limited mode).
+The split above is by responsibility. By artifact, we'll have 1 CRDT server (saves the data, serves the remote MCP), 1 Obsidian plugin (which doesn't persist data, only a local cache), and 1 CLI that the plugin installs.
 
 This plugin requires a server, so it may not be in the official plugin list, but I do want to be able to use [BRAT](https://community.obsidian.md/plugins/obsidian42-brat) to install and update it easily.
 
@@ -73,15 +73,29 @@ Two commands change who text is attributed to without changing the text. Both wo
 
 Edits made to files outside Obsidian are never lost. When the plugin next sees them, they are recorded as `unknown` and merged with everyone else's changes. Don't run another sync tool (Obsidian Sync, remotely-save, iCloud) on the same vault. Their edits would show up as unknown, and they can fight with this plugin.
 
-### 3. Connect agents (MCP)
+### 3. Connect agents
 
-**Local, full mode.** The MCP server ships inside the plugin. On the computer running Obsidian, open the plugin's settings and use **Copy Claude Code command** or **Copy MCP JSON config**. The copied command has this vault's path, the server and the device token filled in, and it needs Node.js 22 or later. Edits are attributed to the name each MCP client reports in its handshake, so several agents can share one configuration (`--agent <name>` pins a name instead).
+**On the computer running Obsidian,** do these in each vault agents should reach. A vault with **Agent CLI** off is invisible to them.
 
-While Obsidian runs, edits go through the plugin. Full mode adds `rename_file`, `delete_file`, `get_links`, `get_backlinks`, `get_daily_note` and `search`. When Obsidian is closed, writes go to the server instead. If the server is also unreachable, the agent is told the vault is unavailable.
+1. In the plugin's settings, turn on **Agent CLI**. It installs `ob-provenance` to `~/.local/bin` and records this vault in `~/.config/ob-provenance`, including the server and device token, in a file only your user can read. It needs Node.js 22.12 or later.
+2. In Obsidian's General settings, turn on **Command line interface** and register it, so the `obsidian` command is on your `PATH`. Without it, agents get reading and editing through the server, but not the commands that need Obsidian.
+
+Agents can then run the command, which needs `~/.local/bin` on the `PATH`. `ob-provenance --help` tells an agent everything it needs, and `ob-provenance <command> --help` shows a command's fields and examples:
+
+```sh
+ob-provenance --vault Notes read --path today.md
+ob-provenance --vault Notes append --path today.md --text "A note." --why agent --agent claude-code
+```
+
+Each write has to name its agent, with `--agent <name>` or `OB_PROVENANCE_AGENT`. To use MCP instead, use **Copy Claude Code command** or **Copy MCP JSON config** in the plugin's settings. The copied command starts `ob-provenance mcp`, fixed to this vault. Edits are attributed to the name each MCP client reports in its handshake, so several agents can share one configuration (`--agent <name>` pins a name instead). MCP commands copied before this version no longer work, so copy them again.
+
+`ob-provenance` picks a vault in this order: `--vault <name or id>`, the vault folder it runs in, `OB_PROVENANCE_VAULT`, then your only vault. If that doesn't settle it, the call stops and lists them. It never follows window focus, so a call means the same vault whether or not Obsidian is open. It also stops if it runs inside a vault that has **Agent CLI** off, or if another registered vault can't be read right now, rather than guess.
+
+While Obsidian answers, every operation goes through the plugin. A vault that's registered but closed opens in a new window. When Obsidian can't answer, reads and writes go to the server instead, and `rename`, `delete`, `links`, `backlinks`, `search`, `daily` and `create-daily` fail with the reason. If the server is also unreachable, the agent is told the vault is unavailable. A call the plugin started and never finished, by a timeout or by Obsidian crashing, isn't sent to the server, because the write may already have landed: the agent is told to read the note first. `ob-provenance status` shows which way a call would go.
 
 **Remote, limited mode.** Long-running agents connect to the server over Streamable HTTP at `https://sync.example.com/mcp/<vault-id>`, sending `Authorization: Bearer <agent token>`. Add `?agent=<name>` if the token doesn't pin an identity. Limited mode offers `list_files`, `read_file`, `edit_file`, `append_to_file` and `create_file`.
 
-Every write tool requires `why`. Use `agent` when the agent wrote the content itself, and `human-via-agent` when the agent is inserting words the human dictated. Writes also accept an optional one-sentence `note`.
+Every write requires `why`. Use `agent` when the agent wrote the content itself, and `human-via-agent` when the agent is inserting words the human dictated. Writes also accept an optional one-sentence `note`.
 
 ## Development
 
@@ -93,7 +107,7 @@ pnpm e2e             # end-to-end test in a real Obsidian (set OBSIDIAN_BIN off 
 pnpm quirks          # check that Obsidian still behaves the way the plugin assumes (MOBILE=1 for the mobile UI)
 ```
 
-`pnpm e2e` and `pnpm quirks` launch a separate Obsidian instance with its own profile. They work on a temporary vault, so they never open your own vaults.
+`pnpm e2e` and `pnpm quirks` launch a separate Obsidian instance with its own profile. They work on a temporary vault, so they never open your own vaults. On macOS they run a background-only copy of Obsidian, kept in `~/.cache/ob-provenance-sync` (about 530 MB per Obsidian version), so a run doesn't take focus from what you're doing.
 
 ### Obsidian versions
 

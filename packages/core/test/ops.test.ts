@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { conflictOriginal, conflictPath, difference, repairedConflictPath, handleOpRequest, TEXT_KEY, VaultIndex, type FileId, type VaultDocs } from "../src";
+import { conflictOriginal, conflictPath, difference, repairedConflictPath, handleOpRequest, isNewerVersion, parseOpResponse, TEXT_KEY, VaultIndex, type FileId, type VaultDocs } from "../src";
 
 function memoryVault(): VaultDocs & { files: Map<FileId, Y.Doc> } {
   const index = new VaultIndex(new Y.Doc());
@@ -74,6 +74,25 @@ describe("handleOpRequest", () => {
     await handleOpRequest(vault, { op: "rename", from: "a.md", to: "b.md" });
     expect((await vault.index()).idOf("b.md")).toBe(id);
     expect(await handleOpRequest(vault, { op: "create", path: "b.md", content: "", by })).toMatchObject({ ok: false, code: "exists" });
+  });
+});
+
+describe("parseOpResponse", () => {
+  it("accepts answers from a vault host and nothing else", () => {
+    expect(parseOpResponse('{"ok":true,"result":{"op":"list","files":["a.md"]}}\n')).toEqual({ ok: true, result: { op: "list", files: ["a.md"] } });
+    expect(parseOpResponse('{"ok":false,"code":"not-found","message":"no such file"}')).toMatchObject({ ok: false, code: "not-found" });
+    for (const text of ["", "Vault not found.\n", 'Error: Command "x" not found.', "null", '{"ok":true}', '["ok"]']) expect(parseOpResponse(text)).toBeNull();
+  });
+});
+
+describe("isNewerVersion", () => {
+  it("orders numerically, with a prerelease before its release", () => {
+    expect(isNewerVersion("0.1.0-alpha.10", "0.1.0-alpha.9")).toBe(true);
+    expect(isNewerVersion("0.1.0-alpha.9", "0.1.0-alpha.10")).toBe(false);
+    expect(isNewerVersion("0.1.0", "0.1.0-alpha.10")).toBe(true);
+    expect(isNewerVersion("0.1.0-alpha.10", "0.1.0")).toBe(false);
+    expect(isNewerVersion("0.1.0", "0.1.0")).toBe(false);
+    expect(isNewerVersion("0.10.0", "0.9.0")).toBe(true);
   });
 });
 

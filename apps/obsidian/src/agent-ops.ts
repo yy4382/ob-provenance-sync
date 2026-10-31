@@ -1,6 +1,6 @@
-import { executeOp, handleOpRequest, OpError, type OpRequest, type OpResult } from "@provenance/core";
-import { Platform, prepareSimpleSearch, type App } from "obsidian";
-import { dailyNotesPlugin } from "./quirks";
+import { executeOp, handleOpRequest, OpError, takenMarker, type OpRequest, type OpResponse, type OpResult } from "@provenance/core";
+import { Platform, prepareSimpleSearch, type App, type Plugin } from "obsidian";
+import { dailyNotePath, dailyNotesPlugin } from "./quirks";
 import type { SyncEngine } from "./sync/engine";
 
 /** How long a rename gets to finish before it counts as waiting on the human. */
@@ -58,63 +58,47 @@ async function runFull(app: App, engine: SyncEngine, req: OpRequest): Promise<Op
     case "daily": {
       const daily = dailyNotesPlugin(app);
       if (!daily?.getDailyNote) throw new OpError("unsupported", "Obsidian's Daily notes plugin is turned off");
+      const path = dailyNotePath(app, daily);
+      if (!path) throw new OpError("not-found", `the daily notes folder doesn't exist: ${daily.options?.folder}`);
+      if (!req.create) return { op: "daily", path, exists: !!app.vault.getFileByPath(path) };
       const file = await daily.getDailyNote();
-      if (!file) throw new OpError("not-found", `could not open today's daily note; check that its folder exists: ${daily.options?.folder ?? "(vault root)"}`);
-      return { op: "daily", path: file.path };
+      if (!file) throw new OpError("not-found", `could not create today's daily note; check that its template exists: ${path}`);
+      // The engine hears of a new file from a vault event that may come later, and the agent's next write must find it.
+      await engine.onCreate(file.path, false);
+      return { op: "daily", path: file.path, exists: true };
     }
     default:
       return executeOp(engine, req);
   }
 }
 
-function randomToken(): string {
-  return [...crypto.getRandomValues(new Uint8Array(24))].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
 /**
- * Localhost HTTP endpoint for the local MCP server. Desktop only: Node's http
- * module is loaded lazily so the plugin still loads on mobile. The port and a
- * per-launch token go to bridge.json in the plugin folder, which the MCP CLI
- * reads; the file is removed on unload.
+ * Lets ob-provenance run vault ops here through `obsidian provenance-sync`.
+ * Without an engine the answer is plain text rather than an op response, which
+ * tells the CLI this vault can't serve the request and to try the sync server.
+ * Desktop only: Node's fs module is loaded lazily so the plugin still loads on mobile.
  */
-export async function startBridge(app: App, engine: SyncEngine, bridgeFile: string): Promise<() => Promise<void>> {
-  if (!Platform.isDesktop) throw new Error("the agent bridge needs the desktop app");
+export function registerAgentCli(plugin: Plugin, serve: (run: (engine: SyncEngine) => Promise<OpResponse>) => Promise<OpResponse | null>) {
+  if (!Platform.isDesktop) return;
   // eslint-disable-next-line @typescript-eslint/no-require-imports, no-undef -- Obsidian provides require on desktop; loaded lazily so mobile never evaluates it
-  const http = require("node:http") as typeof import("node:http");
-  type IncomingMessage = InstanceType<typeof http.IncomingMessage>;
-  type ServerResponse = InstanceType<typeof http.ServerResponse>;
-  const token = randomToken();
-
-  const handle = async (req: IncomingMessage, res: ServerResponse) => {
-    const reply = (status: number, body: unknown) => {
-      res.writeHead(status, { "content-type": "application/json" });
-      res.end(JSON.stringify(body));
-    };
-    if (req.method !== "POST" || req.url !== "/ops") return reply(404, { error: "not found" });
-    if (req.headers.authorization !== `Bearer ${token}`) return reply(401, { error: "unauthorized" });
-    let body = "";
-    for await (const chunk of req) body += String(chunk);
-    let parsed: unknown;
+  const fs = require("node:fs") as typeof import("node:fs");
+  // The request travels as a file: a note can exceed what a command line holds, and arguments show up in `ps`.
+  const takeRequest = (path: string): unknown => {
     try {
-      parsed = JSON.parse(body);
+      // Fails if ob-provenance gave up on this request and may have sent it to the server.
+      fs.writeFileSync(takenMarker(path), "", { flag: "wx" });
+      return JSON.parse(fs.readFileSync(path, "utf8"));
     } catch {
-      return reply(400, { error: "invalid JSON" });
+      return null;
     }
-    reply(200, await handleOpRequest(engine, parsed, (op) => runFull(app, engine, op)));
   };
-
-  const server = http.createServer((req, res) => {
-    handle(req, res).catch((e: unknown) => {
-      console.error("[provenance-sync] bridge", e);
-      if (!res.headersSent) res.writeHead(500).end();
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address() as { port: number };
-  await app.vault.adapter.write(bridgeFile, JSON.stringify({ port, token }));
-
-  return async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    if (await app.vault.adapter.exists(bridgeFile)) await app.vault.adapter.remove(bridgeFile);
-  };
+  plugin.registerCliHandler(
+    plugin.manifest.id,
+    "Run a vault operation for ob-provenance",
+    { request: { value: "<path>", description: "JSON file holding the operation", required: true } },
+    async ({ request }) => {
+      const answer = await serve((engine) => handleOpRequest(engine, takeRequest(request!), (op) => runFull(plugin.app, engine, op)));
+      return answer ? JSON.stringify(answer) : "This vault isn't serving agents: Agent CLI is off, or sync isn't running.";
+    },
+  );
 }

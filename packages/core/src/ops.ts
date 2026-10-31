@@ -22,7 +22,7 @@ const bySchema = z.object({
 });
 
 /**
- * The one protocol every vault host speaks: the plugin's localhost bridge, the
+ * The one protocol every vault host speaks: the plugin's CLI handler, the
  * server's HTTP API, and the in-process remote MCP all accept these requests.
  */
 export const opRequestSchema = z.discriminatedUnion("op", [
@@ -43,7 +43,7 @@ export const opRequestSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("links"), path: markdownPath }),
   z.object({ op: z.literal("backlinks"), path: markdownPath }),
   z.object({ op: z.literal("search"), query: z.string().min(1) }),
-  z.object({ op: z.literal("daily") }),
+  z.object({ op: z.literal("daily"), create: z.boolean().optional() }),
 ]);
 export type OpRequest = z.infer<typeof opRequestSchema>;
 export type OpName = OpRequest["op"];
@@ -64,10 +64,25 @@ export type OpResult =
   | { op: "append" | "create" | "delete" }
   | { op: "rename"; linksPending?: boolean }
   | { op: "links" | "backlinks" | "search"; paths: string[] }
-  | { op: "daily"; path: string };
+  | { op: "daily"; path: string; exists: boolean };
 
 export type OpResponse = { ok: true; result: OpResult } | { ok: false; code: OpErrorCode; message: string };
 export type OpErrorCode = "invalid" | "not-found" | "ambiguous" | "exists" | "unsupported" | "unavailable";
+
+const opResponseSchema = z.union([
+  z.object({ ok: z.literal(true), result: z.looseObject({ op: z.string() }) }),
+  z.object({ ok: z.literal(false), code: z.string(), message: z.string() }),
+]);
+
+/** Parses a vault host's answer; null if `text` isn't one, which means the host never saw the request. */
+export function parseOpResponse(text: string): OpResponse | null {
+  try {
+    const raw: unknown = JSON.parse(text);
+    return opResponseSchema.safeParse(raw).success ? (raw as OpResponse) : null;
+  } catch {
+    return null;
+  }
+}
 
 export class OpError extends Error {
   constructor(

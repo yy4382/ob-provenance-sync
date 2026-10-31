@@ -12,7 +12,7 @@
 
 Unless told otherwise, the next version is the current `0.1.0-alpha.N` with N + 1. These steps are the whole process, from an up-to-date main:
 
-1. Set `version` in `apps/obsidian`, `apps/server`, `packages/core` and `packages/mcp` `package.json`.
+1. Set `version` in `apps/cli`, `apps/obsidian`, `apps/server`, `packages/core`, `packages/mcp` and `packages/tools` `package.json`.
 2. Run `pnpm --filter @provenance/obsidian run version`. It updates both `manifest.json` files and `apps/obsidian/versions.json`.
 3. Commit everything as `Release <version>` and push to main.
 4. Tag that commit with the bare version (no `v`) and push the tag. `.github/workflows/release.yml` then publishes the GitHub release that BRAT installs from. Wait for that run to finish.
