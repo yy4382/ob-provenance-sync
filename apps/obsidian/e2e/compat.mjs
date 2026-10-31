@@ -1,11 +1,11 @@
 // What .github/workflows/obsidian-compat.yml runs. The plugin has to work on every Obsidian a device
 // may still be on, so it supports every stable release from the manifest's minAppVersion up. Devices
-// update at different times, and iOS and Android don't follow desktop's release numbers exactly.
+// update at different times, and iOS doesn't follow desktop's release numbers exactly.
 //
 //   compat.mjs due [--all]              prints the versions to test, as JSON: those not verified yet, or all of them
 //   compat.mjs test <version>           runs every suite against OBSIDIAN_BIN and writes reports/<version>.json
 //   compat.mjs record <dir> <versions>  notes what passed in verified-versions.json and opens issues for what failed
-//   compat.mjs phones                   fails if minAppVersion is ahead of what iOS or Android are on; release.yml runs it
+//   compat.mjs ios                      fails if minAppVersion is ahead of the App Store; release.yml runs it
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -19,32 +19,25 @@ const APP_STORE = "https://itunes.apple.com/lookup?id=1557175442";
 
 const gh = (...args) => execFileSync("gh", args, { encoding: "utf8" });
 const minAppVersion = () => JSON.parse(readFileSync(join(here, "../manifest.json"), "utf8")).minAppVersion;
-const stableReleases = () => JSON.parse(gh("api", RELEASES)).filter((r) => !r.prerelease && !r.draft);
-const versionOf = (release) => release?.tag_name.replace(/^v/, "");
 
 function due(all) {
   const minimum = minAppVersion();
-  const supported = stableReleases()
-    .map(versionOf)
+  const supported = JSON.parse(gh("api", RELEASES))
+    .filter((r) => !r.prerelease && !r.draft)
+    .map((r) => r.tag_name.replace(/^v/, ""))
     .filter((v) => !older(v, minimum));
   const verified = JSON.parse(readFileSync(verifiedFile, "utf8"));
   console.log(JSON.stringify(all ? supported : supported.filter((v) => !(v in verified))));
 }
 
-async function phones() {
+async function ios() {
   const minimum = minAppVersion();
-  const android = versionOf(stableReleases().find((r) => r.assets.some((a) => a.name.endsWith(".apk"))));
-  const ios = await fetch(APP_STORE)
+  const newest = await fetch(APP_STORE)
     .then((r) => r.json())
     .then((r) => r.results[0]?.version)
     .catch(() => undefined);
-  for (const [phone, newest] of [
-    ["iOS", ios],
-    ["Android", android],
-  ]) {
-    if (!newest) console.log(`::warning::Couldn't find the ${phone} version, so this release isn't checked against it.`);
-    else if (older(newest, minimum)) throw new Error(`minAppVersion ${minimum} is ahead of ${phone}, which is on ${newest}: phones couldn't update this plugin`);
-  }
+  if (!newest) console.log("::warning::Couldn't find the App Store version, so this release isn't checked against it.");
+  else if (older(newest, minimum)) throw new Error(`minAppVersion ${minimum} is ahead of the App Store, which is on ${newest}: iPhones couldn't update this plugin`);
 }
 
 /** Runs a suite, once more if it fails: a real change fails twice, a slow runner rarely does. */
@@ -122,5 +115,5 @@ const [command, argument] = process.argv.slice(2);
 if (command === "due") due(argument === "--all");
 else if (command === "test") test(argument);
 else if (command === "record") record(argument, JSON.parse(process.argv[4]));
-else if (command === "phones") await phones();
-else throw new Error("usage: compat.mjs due [--all] | test <version> | record <dir> <versions as JSON> | phones");
+else if (command === "ios") await ios();
+else throw new Error("usage: compat.mjs due [--all] | test <version> | record <dir> <versions as JSON> | ios");

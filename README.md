@@ -105,4 +105,4 @@ These runs use the desktop app, so they don't cover WebKit, the mobile file syst
 
 **To add a version**, do nothing: the workflow picks it up. If it fails, keep the old behavior for devices that haven't updated: branch on `requireApiVersion` in the function in `quirks.ts`, and give its probe the same branch with `since`.
 
-**To drop a version**, raise `minAppVersion` in `apps/obsidian/manifest.json`, run `pnpm test`, delete the branches it names, and release. The release copies the manifest to the root, where BRAT reads it. BRAT stops updating devices below `minAppVersion`, so they keep their last working build. A release fails if `minAppVersion` passes what iOS or Android are on.
+**To drop a version**, raise `minAppVersion` in `apps/obsidian/manifest.json`, run `pnpm test`, delete the branches it names, and release. The release copies the manifest to the root, where BRAT reads it. BRAT stops updating devices below `minAppVersion`, so they keep their last working build. A release fails if `minAppVersion` passes the App Store's version.
