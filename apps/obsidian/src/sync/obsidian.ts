@@ -1,6 +1,7 @@
 import { normalizePath, requestUrl, TFile, type App } from "obsidian";
 import { IndexeddbPersistence } from "y-indexeddb";
 import type * as Y from "yjs";
+import { replaceIfHolds } from "../quirks";
 import type { Blobs, Disk, Persistence } from "./engine";
 
 /** Whether a path belongs to the synced vault. The config folder's name is user-configurable, so ask Obsidian for it. */
@@ -55,13 +56,9 @@ export class ObsidianDisk implements Disk {
     }
   }
 
-  /** vault.process runs the check and the write as one step of Obsidian's file queue, and skips the write when nothing changes. */
   async writeIfUnchanged(path: string, expected: string, text: string) {
     const f = this.file(path);
-    if (!f) return false;
-    let wrote = false;
-    await this.app.vault.process(f, (data) => (data === expected ? ((wrote = true), text) : data));
-    return wrote;
+    return f ? replaceIfHolds(this.app, f, expected, text) : false;
   }
 
   async writeBinary(path: string, data: ArrayBuffer) {

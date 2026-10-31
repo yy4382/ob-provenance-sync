@@ -2,8 +2,9 @@ import { Annotation, EditorSelection, RangeSetBuilder, StateEffect, Transaction,
 import { Decoration, EditorView, hoverTooltip, layer, RectangleMarker, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { attribute, insertText, type Segment } from "@provenance/core";
 import diff from "fast-diff";
-import { editorInfoField, TextFileView, type TFile } from "obsidian";
+import type { TFile } from "obsidian";
 import type * as Y from "yjs";
+import { editKind, fileLoadedInto, fileNamedBy } from "../quirks";
 import type { MarkdownFile, SyncEngine } from "../sync/engine";
 
 const fromYjs = Annotation.define<boolean>();
@@ -31,19 +32,6 @@ type Band = { from: number; to: number; kind: keyof typeof marks };
  */
 const panes = new Map<MarkdownFile, Set<ProvenanceView>>();
 
-type EditKind = "human" | "unknown" | "copy";
-
-/**
- * Typing, pasting, undo and Obsidian's own editing commands carry a
- * CodeMirror user event and are the human's. Other plugins editing through
- * the Editor API carry none, so their changes are unknown.
- */
-function kindOf(tr: Transaction): EditKind {
-  const event = tr.annotation(Transaction.userEvent);
-  if (event === "set") return "copy";
-  return event === undefined ? "unknown" : "human";
-}
-
 /** Minimal CodeMirror changes that turn `from` into `to`. */
 function diffChanges(from: string, to: string): ChangeSpec[] {
   const changes: ChangeSpec[] = [];
@@ -69,11 +57,9 @@ class ProvenanceView {
   bands: Band[] = [];
   file: MarkdownFile | null = null;
   /**
-   * The file whose text this editor state holds. Obsidian loads each file into
-   * a new state, and with it a new ProvenanceView, so the pane's file on arrival
-   * is the file. It is null for the blank state Obsidian installs when leaving
-   * a file with unsaved edits, while the pane still names that file: the state
-   * holds no file's text, and binding it would merge the blank as a deletion.
+   * The file whose text this editor state holds, fixed for this view since each
+   * state gets its own. Null for a state that holds no file's text, which
+   * binding would merge as a deletion.
    */
   private readonly loaded: TFile | null;
   release: (() => void) | null = null;
@@ -82,8 +68,7 @@ class ProvenanceView {
   private readonly observer = (event: Y.YTextEvent, tr: Y.Transaction) => this.onYjs(event, tr);
 
   constructor(readonly view: EditorView) {
-    const info = view.state.field(editorInfoField, false);
-    this.loaded = info instanceof TextFileView && info.data === null ? null : (info?.file ?? null);
+    this.loaded = fileLoadedInto(view);
     this.attach();
   }
 
@@ -93,7 +78,7 @@ class ProvenanceView {
 
   /** The pane's file, unless the pane has moved on and the next file's state hasn't arrived. */
   private shownFile(): TFile | null {
-    const file = this.view.state.field(editorInfoField, false)?.file ?? null;
+    const file = fileNamedBy(this.view);
     return file === this.loaded ? file : null;
   }
 
@@ -178,7 +163,7 @@ class ProvenanceView {
     if (set && set.values().next().value !== this) panes.set(file, new Set([this, ...set]));
     file.doc.transact(() => {
       for (const tr of transactions) {
-        const kind = kindOf(tr);
+        const kind = editKind(tr);
         // Positions after a skipped copy no longer line up with the CRDT;
         // such batches are rare, and the primary re-converges afterwards.
         if (kind === "copy") break;

@@ -1,0 +1,9 @@
+{
+  "id": "quirk-probe",
+  "name": "Quirk probe",
+  "version": "0.0.0",
+  "minAppVersion": "0.0.0",
+  "description": "Records what Obsidian does to editors and files, for e2e/quirks.mjs.",
+  "author": "Chris Yang",
+  "isDesktopOnly": false
+}
