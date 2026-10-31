@@ -1,7 +1,7 @@
 // Starts a real Obsidian with an isolated profile, so it never sees your own vaults, and drives it
 // over the Chrome DevTools protocol. Shared by the end-to-end test and the quirk probes.
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 
@@ -42,8 +42,15 @@ export async function obsidian({ vault, profile }) {
   const cdpPort = await freePort();
   let child = null;
   mkdirSync(profile, { recursive: true });
+  // Obsidian rebinds $HOME/.obsidian-cli.sock on start, so with the real HOME it would take the path
+  // from your own Obsidian and leave it dead. Under /tmp, as macOS limits socket paths to 104 bytes.
+  const home = mkdtempSync("/tmp/provenance-home-");
+  process.on("exit", () => rmSync(home, { recursive: true, force: true }));
+  const env = { ...process.env, HOME: home, XDG_RUNTIME_DIR: home };
+  // Without this, macOS looks for a login keychain in the new HOME and Obsidian hangs.
+  const keychainArgs = process.platform === "darwin" ? ["--use-mock-keychain"] : [];
   // A run must stay on the version it was started with, or a restart could test a newer one.
-  writeFileSync(join(profile, "obsidian.json"), JSON.stringify({ updateDisabled: true, vaults: { e2evault: { path: vault, ts: Date.now(), open: true } } }));
+  writeFileSync(join(profile, "obsidian.json"), JSON.stringify({ updateDisabled: true, cli: true, vaults: { e2evault: { path: vault, ts: Date.now(), open: true } } }));
 
   /** Trusting a vault opens the plugin settings in a window of its own. */
   async function closeSettingsWindows() {
@@ -97,7 +104,7 @@ export async function obsidian({ vault, profile }) {
 
   /** Launches Obsidian and answers its first-run questions; resolves once community plugins are on. */
   async function open() {
-    child = spawn(OBSIDIAN, [`--user-data-dir=${profile}`, `--remote-debugging-port=${cdpPort}`, ...EXTRA_ARGS], { stdio: "ignore" });
+    child = spawn(OBSIDIAN, [`--user-data-dir=${profile}`, `--remote-debugging-port=${cdpPort}`, ...keychainArgs, ...EXTRA_ARGS], { stdio: "ignore", env });
     const cdp = await eventually(() => page(), 30000);
     if (!cdp) throw new Error(`Obsidian did not open a window (OBSIDIAN_BIN=${OBSIDIAN})`);
     if (!(await eventually(() => cdp.eval(`return !!window.app?.plugins && app.workspace.layoutReady`), 30000))) throw new Error("Obsidian never finished loading");
@@ -118,5 +125,5 @@ export async function obsidian({ vault, profile }) {
     await sleep(1500);
   }
 
-  return { open, page, kill };
+  return { open, page, kill, env };
 }
