@@ -3,3 +3,4 @@ node_modules/
 dist/
 test-vault/.obsidian/*
 !test-vault/.obsidian/community-plugins.json
+.claude/worktrees/
