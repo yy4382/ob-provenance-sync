@@ -1,7 +1,7 @@
 name: Release plugin
 
 # Push a tag equal to the manifest version (e.g. 0.1.0). BRAT installs from
-# the release assets and reads manifest.json from the repository root.
+# the release assets, manifest.json included.
 on:
   push:
     tags: ["*"]
@@ -29,7 +29,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # BRAT installs pre-releases too, so alpha and beta tags reach testers.
+          # BRAT's Latest installs pre-releases too, so alpha and beta tags reach
+          # every install that isn't frozen on a version, stable ones included.
           prerelease=$([ "${GITHUB_REF_NAME#*-}" != "$GITHUB_REF_NAME" ] && echo --prerelease || true)
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes $prerelease \
             apps/obsidian/main.js apps/obsidian/manifest.json apps/obsidian/styles.css

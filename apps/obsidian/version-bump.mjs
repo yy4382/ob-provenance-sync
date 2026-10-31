@@ -7,7 +7,7 @@ const manifest = JSON.parse(readFileSync("manifest.json", "utf8"));
 const { minAppVersion } = manifest;
 manifest.version = targetVersion;
 writeFileSync("manifest.json", JSON.stringify(manifest, null, 2) + "\n");
-// BRAT reads the manifest from the repository root.
+// The release workflow checks the tag against this copy.
 writeFileSync("../../manifest.json", JSON.stringify(manifest, null, 2) + "\n");
 
 // update versions.json with target version and minAppVersion from manifest.json
