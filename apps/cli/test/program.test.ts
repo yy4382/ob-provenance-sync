@@ -34,6 +34,15 @@ describe("ob-provenance arguments", () => {
     expect((await run("list", "--vault", "Notes", "--agent", "a")).call?.target).toMatchObject({ vault: "Notes", agent: "a" });
   });
 
+  it("refuses an empty --vault or --agent, which is usually an unset variable", async () => {
+    for (const flag of ["--vault", "--agent"]) {
+      const { call, error } = await run(flag, "", "list");
+      expect(call).toBeUndefined();
+      expect(error?.code).toBe("commander.invalidArgument");
+    }
+    expect((await run("list", "--vault", "")).error?.code).toBe("commander.invalidArgument");
+  });
+
   it("keeps a field's value even when it looks like an option", async () => {
     const { call } = await run("edit", "--path", "a.md", "--old_string", "--vault", "--new_string", "-h", "--why", "agent", "--vault", "Notes");
     expect(call?.input).toMatchObject({ old_string: "--vault", new_string: "-h" });

@@ -39,7 +39,7 @@ describe("runTool", () => {
     let called = false;
     const ops = async () => ((called = true), { ok: true as const, result: { op: "append" as const } });
     expect(recordsAuthor(append)).toBe(true);
-    expect(await runTool(append, args, { ops, agent: null, noAgent: "name yourself" })).toEqual({ isError: true, text: "invalid: name yourself" });
+    expect(await runTool(append, args, { ops, agent: null, noAgent: "name yourself" })).toEqual({ isError: true, code: "invalid", text: "invalid: name yourself" });
     expect(called).toBe(false);
   });
 

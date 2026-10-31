@@ -1,6 +1,6 @@
 import { styleText } from "node:util";
 import { instructions, recordsAuthor, TOOLS, type ToolDef } from "@provenance/tools";
-import { Command, Option } from "commander";
+import { Command, InvalidArgumentError, Option } from "commander";
 import { z } from "zod";
 
 export interface Target {
@@ -16,8 +16,14 @@ export interface Actions {
   mcp(target: Target): Promise<void>;
 }
 
-const vaultOption = new Option("--vault <name>", "Vault name or id. Or set OB_PROVENANCE_VAULT. Not needed inside a vault's folder, or with only one vault.");
-const agentOption = () => new Option("--agent <name>", "Your name, e.g. claude-code. Every write needs it. Or set OB_PROVENANCE_AGENT.");
+/** An empty value is usually a shell variable that was never set, so it must not read as "not given". */
+function named(value: string): string {
+  if (!value) throw new InvalidArgumentError("It is empty.");
+  return value;
+}
+
+const vaultOption = new Option("--vault <name>", "Vault name or id. Without it: the vault folder you're in, then OB_PROVENANCE_VAULT, then your only vault.").argParser(named);
+const agentOption = () => new Option("--agent <name>", "Your name, e.g. claude-code. Every write needs it. Or set OB_PROVENANCE_AGENT.").argParser(named);
 
 function fieldOption(key: string, field: z.ZodType): Option {
   const required = field.safeParse(undefined).success ? [] : ["(required)"];

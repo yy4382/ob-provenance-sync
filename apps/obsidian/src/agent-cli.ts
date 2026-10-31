@@ -15,7 +15,7 @@ function desktop() {
   const fs = require("node:fs/promises") as typeof import("node:fs/promises");
   const os = require("node:os") as typeof import("node:os");
   const path = require("node:path") as typeof import("node:path");
-  const paths = agentPaths(os.homedir(), process.env.XDG_CONFIG_HOME);
+  const paths = agentPaths(os.homedir());
   /* eslint-enable @typescript-eslint/no-require-imports, no-undef -- the rest is plain code */
 
   /** Other processes read these files, so they only ever see a whole one. */

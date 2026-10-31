@@ -12,6 +12,7 @@ import {
   isMarkdownPath,
   markNote,
   newFileId,
+  OpError,
   pairRenames,
   repairedConflictPath,
   setText,
@@ -83,8 +84,10 @@ export const FROM_DISK = Symbol("from-disk");
 
 /** How long a start or scan waits for a document still loading before going on without it. */
 const OPEN_WAIT = 3000;
+/** How long an agent's call waits for a note's text to arrive: less than ob-provenance's own limit, so it hears why. */
+const AGENT_OPEN_WAIT = 10_000;
 
-function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+export function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   return Promise.race([promise, new Promise<T>((r) => setTimeout(() => r(fallback), ms))]);
 }
 
@@ -453,7 +456,7 @@ export class SyncEngine implements VaultDocs {
   private mirrorTimer: ReturnType<typeof setTimeout> | null = null;
   /** The last syncTree left files unplaced behind files not synced yet; vault events retry it. */
   private treeIncomplete = false;
-  private started = false;
+  started = false;
 
   constructor(readonly opts: EngineOptions) {
     this.vaultIndex = new VaultIndex(new Y.Doc({ gc: false }));
@@ -1180,16 +1183,21 @@ export class SyncEngine implements VaultDocs {
     await this.enqueue(() => this.syncTree());
   }
 
+  /** A note new to this device has no text until the server sends it, which may be never while offline. */
+  private async arrived(file: MarkdownFile) {
+    if (!(await within(file.ready.then(() => true), AGENT_OPEN_WAIT, false))) throw new OpError("unavailable", "this note's text hasn't reached this device yet. It will once sync reconnects.");
+  }
+
   async readText(id: FileId): Promise<Y.Text> {
     const file = this.openFile(id, false);
-    await file.ready;
+    await this.arrived(file);
     return file.ytext;
   }
 
   async updateText<T>(id: FileId, fn: (ytext: Y.Text) => T): Promise<T> {
     // An id the index doesn't know yet is a file an agent is creating right now.
     const file = this.openFile(id, !this.vaultIndex.get(id));
-    await file.ready;
+    await this.arrived(file);
     let out!: T;
     file.doc.transact(() => (out = fn(file.ytext)));
     return out;

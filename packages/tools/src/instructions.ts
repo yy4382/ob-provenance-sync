@@ -15,7 +15,7 @@ export function instructions(surface: Mode | "cli"): string {
           "",
           "Calling it",
           "- Every write needs --agent <your name>, e.g. --agent claude-code, or OB_PROVENANCE_AGENT in the environment. Reads don't.",
-          "- If there's more than one vault, pass --vault <name>, or set OB_PROVENANCE_VAULT. Inside a vault's folder you can leave it out. List vaults with `ob-provenance vaults`.",
+          "- The vault is chosen in this order: --vault <name>, then the vault folder you're running in, then OB_PROVENANCE_VAULT, then your only vault. If none of these settles it, the call stops. List vaults with `ob-provenance vaults`.",
           "- For text with quotes or line breaks, pipe it in: `ob-provenance append --path a.md --why agent --stdin text < file`.",
           '- A flag takes the next argument as its value, even one that starts with a dash. An empty value is `--new_string ""`.',
           "- `ob-provenance <command> --help` shows a command's fields and examples.",

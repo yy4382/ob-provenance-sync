@@ -6,6 +6,7 @@
 //
 // MOBILE=1 emulates the mobile UI inside the desktop app. It covers what the two share, which is
 // the editor and the vault, but not WebKit or the mobile file system.
+import { spawn } from "node:child_process";
 import { appendFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -281,6 +282,24 @@ const QUIRKS = [
     async probe() {
       const seen = await cdp.eval(`return typeof app.appId`);
       expect(seen === "string", "app.appId names this vault on this device", seen);
+    },
+  },
+  // Stays last: it kills the instance.
+  {
+    id: "cli-cut-off-prints-nothing",
+    desktopOnly: true,
+    async probe() {
+      await cdp.eval(`window.quirkProbe.cliReply = new Promise(() => {}); return true`);
+      const call = spawn("obsidian", ["vault=e2evault", "quirk-probe"], { env: instance.env });
+      let printed = "";
+      call.stdout.on("data", (d) => (printed += d));
+      const status = new Promise((done) => call.on("close", done));
+      await sleep(1500);
+      await instance.kill();
+      const seen = { status: await status, printed };
+      expect(seen.status === 0 && seen.printed === "", "a client whose Obsidian dies mid-call exits 0 having printed nothing", seen);
+      const gone = instance.cli("quirk-probe");
+      expect(gone.status === 1 && gone.stdout === "", "with Obsidian gone, the client exits 1", gone);
     },
   },
 ];

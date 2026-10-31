@@ -77,6 +77,7 @@ writeFileSync(
 function startServer() {
   const child = spawn(process.execPath, [join(repo, "apps/server/dist/server.js"), join(work, "server.json")], { stdio: "ignore" });
   children.push(child);
+  return child;
 }
 
 const instance = await obsidian({ vault, profile });
@@ -175,7 +176,7 @@ async function openObsidian() {
 // --- scenarios ----------------------------------------------------------------
 
 try {
-  startServer();
+  const serverProcess = startServer();
   let cdp = await openObsidian();
   check("plugin loads and syncs", true);
   check(
@@ -339,7 +340,7 @@ try {
   const written = ob(["create", "--path", "Cli/shell.md", "--content", "From the shell.", "--why", "agent", "--agent", "shell-agent"]);
   check("ob-provenance writes as the agent it names", written.status === 0 && ob(["read", "--path", "Cli/shell.md", "--provenance"]).stdout === "[agent agent:shell-agent] From the shell.\n", JSON.stringify(written));
   const anonymous = ob(["append", "--path", "Cli/shell.md", "--text", "x", "--why", "agent"]);
-  check("ob-provenance refuses a write with no identity", anonymous.status === 1 && anonymous.stderr.includes("--agent <name>"), JSON.stringify(anonymous));
+  check("ob-provenance refuses a write with no identity", anonymous.status === 2 && anonymous.stderr.includes("--agent <name>"), JSON.stringify(anonymous));
   const piped = "two lines\nwith \"quotes\" and a trailing newline\n";
   ob(["create", "--path", "Cli/piped.md", "--why", "agent", "--agent", "shell-agent", "--stdin", "content"], { input: piped });
   check("ob-provenance takes a field from stdin", ob(["read", "--path", "Cli/piped.md"]).stdout === piped);
@@ -347,6 +348,7 @@ try {
   check("ob-provenance names the vaults it knows", unknownVault.status === 2 && unknownVault.stderr.includes("vault (id e2evault"), JSON.stringify(unknownVault));
   check("ob-provenance prints an op error and exits 1", ob(["read", "--path", "Cli/missing.md"]).status === 1);
   check("ob-provenance searches", ob(["search", "--query", "AgentBridge"]).stdout.includes("Projects/Roadmap.md"));
+  check("a read ignores a bad agent name", ob(["read", "--path", "Cli/shell.md"], { env: { ...instance.env, OB_PROVENANCE_AGENT: "Claude Code" } }).status === 0);
   const mcpClient = new Client({ name: "shell client", version: "0" });
   await mcpClient.connect(new StdioClientTransport({ command: process.execPath, args: [join(repo, "apps/cli/dist/cli.js"), "--vault", "e2evault", "mcp"], env: instance.env, cwd: work }));
   const overMcp = await mcpClient.callTool({ name: "get_backlinks", arguments: { path: "Welcome.md" } });
@@ -370,6 +372,34 @@ try {
     return text.includes("During a restart.") ? text : undefined;
   });
   check("a restart waits for a write in flight and keeps its author", inFlightCode === 0 && afterRestart?.includes("[agent agent:shell-agent] During a restart."), JSON.stringify([inFlightCode, afterRestart]));
+
+  const restarted = () => cdp.eval(`return await Promise.race([${plugin}.restartSync().then(() => true), new Promise((r) => setTimeout(() => r(false), 25000))])`);
+
+  // Settled first, so the error reaches the new engine's start and not the old one's shutdown.
+  await cdp.eval(`await ${plugin}.engine.settle(); const g = app.vault.getFiles; app.vault.getFiles = () => { throw new Error("simulated disk error"); };
+    try { await ${plugin}.restartSync(); } finally { app.vault.getFiles = g; } return true`);
+  const failedStatus = ob(["status"]).stdout;
+  check("after a failed sync start, the plugin leaves agents to the server", failedStatus.includes("Obsidian: not reachable: This vault isn't serving agents"), failedStatus);
+  const failedRename = ob(["rename", "--from", "Cli/shell.md", "--to", "Cli/moved.md"]);
+  check("after a failed sync start, a rename is refused", failedRename.status === 1 && ob(["read", "--path", "Cli/shell.md"]).status === 0, JSON.stringify(failedRename));
+  await restarted();
+  check("the plugin serves agents again after a good start", await eventually(async () => ob(["status"]).stdout.includes("Obsidian: reachable")));
+
+  // The stalled server never sends this note's text, as when a connection drops just after an index update.
+  serverProcess.kill("SIGSTOP");
+  await sleep(300);
+  const ghost = await cdp.eval(`const e = ${plugin}.engine; const id = crypto.randomUUID(); e.vaultIndex.doc.transact(() => e.vaultIndex.set(id, { type: "markdown", path: "Ghost.md" }), "from-another-device"); return id`);
+  const ghostRead = ob(["read", "--path", "Ghost.md"]);
+  await cdp.eval(`const e = ${plugin}.engine; e.vaultIndex.doc.transact(() => e.vaultIndex.delete(${JSON.stringify(ghost)}), "from-another-device"); return true`);
+  serverProcess.kill("SIGCONT");
+  check("a note whose text never arrives gets an answer, not a hang", ghostRead.status === 1 && ghostRead.stderr.includes("hasn't reached this device"), JSON.stringify(ghostRead));
+  check("a sync restart goes ahead after that call", await restarted());
+
+  await cdp.eval(`${plugin}.agentCalls.add(new Promise(() => {})); return true`);
+  check("a stuck agent call can't hold up a sync restart forever", await restarted());
+  await cdp.eval(`${plugin}.agentCalls.clear(); return true`);
+  await eventually(async () => ob(["status"]).stdout.includes("Obsidian: reachable"));
+
   const other = join(dirname(entry), "othervault.json");
   mkdirSync(join(work, "other"));
   writeFileSync(other, JSON.stringify({ name: "other", path: join(work, "other"), server: null }));
@@ -482,8 +512,23 @@ try {
 
   await cdp.eval(`await app.plugins.plugins["provenance-sync"].engine.settle(); return true`);
   await sleep(1500);
+  ob(["create", "--path", "Cli/crash.md", "--content", "Base.\n", "--why", "agent", "--agent", "shell-agent"]);
+  await sleep(1000);
+  // The delay holds the reply back after the write, so the crash below lands between the two.
+  await cdp.eval(`const e = ${plugin}.engine; const update = e.updateText;
+    e.updateText = async function (...args) { const out = await update.apply(this, args); await new Promise((r) => setTimeout(r, 6000)); return out; }; return true`);
+  const crashed = new Promise((resolve) => {
+    const child = spawn(process.execPath, [join(repo, "apps/cli/dist/cli.js"), "append", "--path", "Cli/crash.md", "--text", "Once.\n", "--why", "agent", "--agent", "shell-agent"], { env: instance.env, cwd: work, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (status) => resolve({ status, stderr }));
+  });
+  await sleep(2500);
   cdp.close();
   await instance.kill();
+  const crash = await crashed;
+  check("a write cut off by a crash says so", crash.status === 1 && crash.stderr.includes("may have landed"), JSON.stringify(crash));
+  check("a write cut off by a crash isn't sent to the server again", (await opsCall({ op: "read", path: "Cli/crash.md" })).result?.content === "Base.\nOnce.\n");
 
   const roadmap = join(vault, "Projects/Roadmap.md");
   writeFileSync(join(vault, "Projects/Renamed.md"), readFileSync(roadmap, "utf8") + "OfflineEdit line.\n");

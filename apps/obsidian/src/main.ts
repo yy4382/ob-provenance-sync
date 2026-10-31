@@ -8,11 +8,12 @@ import { provenanceExtension, renderProvenance, segmentAt } from "./editor/bindi
 import { codeMirrorOf } from "./quirks";
 import { ReattributeModal, type Attribution, type Reattribution } from "./reattribute";
 import { defaultSettings, ProvenanceSettingTab, type ProvenanceSettings } from "./settings";
-import { SyncEngine, type SyncStatus } from "./sync/engine";
+import { SyncEngine, within, type SyncStatus } from "./sync/engine";
 import { httpBlobs, indexedDbPersistence, isSyncedPath, ObsidianDisk, otherSyncs, watchVault } from "./sync/obsidian";
 
 const CHECK_EVERY = 10 * 60_000;
 const OTHER_SYNC_CHECK_EVERY = 5_000;
+const AGENT_CALL_LIMIT = 15_000;
 const LEGACY_TOKEN_SECRET = "provenance-sync-device-token";
 
 type Status = SyncStatus | "error" | "disabled";
@@ -100,7 +101,7 @@ export default class ProvenancePlugin extends Plugin {
         seen = this.restarting;
         await seen;
       }
-      if (!this.engine || !this.settings.agentCli) return null;
+      if (!this.engine?.started || !this.settings.agentCli) return null;
       const call = run(this.engine);
       this.agentCalls.add(call);
       try {
@@ -255,7 +256,8 @@ export default class ProvenancePlugin extends Plugin {
   }
 
   private async stopSync() {
-    await Promise.allSettled(this.agentCalls);
+    // ob-provenance stops waiting by then, and sync must be able to come back whatever a call is stuck on.
+    await within(Promise.allSettled(this.agentCalls), AGENT_CALL_LIMIT, []);
     if (this.engine) {
       await this.engine.settle();
       this.engine.destroy();

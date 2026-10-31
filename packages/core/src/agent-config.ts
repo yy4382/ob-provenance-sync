@@ -10,8 +10,9 @@ export const vaultEntrySchema = z.object({
 });
 export type VaultEntry = z.infer<typeof vaultEntrySchema>;
 
-export function agentPaths(home: string, xdgConfigHome?: string) {
-  return { bin: `${home}/.local/bin/${AGENT_CLI}`, vaults: `${xdgConfigHome || `${home}/.config`}/${AGENT_CLI}/vaults` };
+/** Fixed under home, not moved by XDG_CONFIG_HOME: an app opened from the Dock and an agent's shell can see different environments, and both must find the same file. */
+export function agentPaths(home: string) {
+  return { bin: `${home}/.local/bin/${AGENT_CLI}`, vaults: `${home}/.config/${AGENT_CLI}/vaults` };
 }
 
 /** Whether release `a` is newer than `b`, with a prerelease before its release. */

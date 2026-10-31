@@ -1,13 +1,14 @@
-import type { OpResponse } from "@provenance/core";
+import type { OpErrorCode, OpResponse } from "@provenance/core";
 
 export interface Rendered {
   text: string;
   isError: boolean;
+  code?: OpErrorCode;
 }
 
 /** What an agent reads for an op's answer, the same over MCP and the CLI. */
 export function render(res: OpResponse): Rendered {
-  if (!res.ok) return { isError: true, text: `${res.code}: ${res.message}` };
+  if (!res.ok) return { isError: true, code: res.code, text: `${res.code}: ${res.message}` };
   const r = res.result;
   let text: string;
   switch (r.op) {
