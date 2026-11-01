@@ -1,18 +1,19 @@
 import { errorMessage, humanId, reattribute, REATTRIBUTABLE } from "@provenance/core";
 import { MarkdownView, Notice, Platform, Plugin, type Editor } from "obsidian";
-import { startBridge } from "./bridge";
+import { installCli, localMcpCommand, registerVault, unregisterVault, type LocalMcpCommand } from "./agent-cli";
+import { registerAgentCli } from "./agent-ops";
 import { ConflictsModal } from "./conflicts";
 import { EVENT_LOG_VIEW, EventLog, EventLogView } from "./event-log";
-import { installMcpCli, localMcpCommand, type LocalMcpCommand } from "./mcp-cli";
 import { provenanceExtension, renderProvenance, segmentAt } from "./editor/binding";
 import { codeMirrorOf } from "./quirks";
 import { ReattributeModal, type Attribution, type Reattribution } from "./reattribute";
 import { defaultSettings, ProvenanceSettingTab, type ProvenanceSettings } from "./settings";
-import { SyncEngine, type SyncStatus } from "./sync/engine";
+import { SyncEngine, within, type SyncStatus } from "./sync/engine";
 import { httpBlobs, indexedDbPersistence, isSyncedPath, ObsidianDisk, otherSyncs, watchVault } from "./sync/obsidian";
 
 const CHECK_EVERY = 10 * 60_000;
 const OTHER_SYNC_CHECK_EVERY = 5_000;
+const AGENT_CALL_LIMIT = 15_000;
 const LEGACY_TOKEN_SECRET = "provenance-sync-device-token";
 
 type Status = SyncStatus | "error" | "disabled";
@@ -29,14 +30,19 @@ const STATUS_TEXT: Record<Status, string> = {
 export default class ProvenancePlugin extends Plugin {
   declare settings: ProvenanceSettings;
   private engine: SyncEngine | null = null;
-  private stopBridge: (() => Promise<void>) | null = null;
   private statusEl: HTMLElement | null = null;
   private status: Status = "connecting";
   /** The other sync tools that kept sync off at the last start, joined; "" if none. */
   private blockedBy = "";
-  private mcpCliPath: string | null = null;
+  private cliPath: string | null = null;
+  private agentCliUpdate: Promise<void> = Promise.resolve();
+  /** Stopping waits for these: a write that reaches a stopped engine lands in the file with no author. */
+  private readonly agentCalls = new Set<Promise<unknown>>();
   /** Restarts run one after another, so two quick reconnects never leave two engines running. */
   private restarting: Promise<void> = Promise.resolve();
+  private firstStartDone = () => {};
+  /** A CLI call can open this vault's window and arrive before sync has started for the first time. */
+  private readonly firstStart = new Promise<void>((resolve) => (this.firstStartDone = resolve));
   readonly log = new EventLog();
 
   async onload() {
@@ -88,21 +94,34 @@ export default class ProvenancePlugin extends Plugin {
       editorCallback: (editor, ctx) => ctx instanceof MarkdownView && this.reattribute(editor, ctx, "recover"),
     });
     this.addCommand({ id: "reconnect", name: "Reconnect sync", callback: () => void this.reconnect() });
+    registerAgentCli(this, async (run) => {
+      await this.firstStart;
+      // A restart queued during the wait goes first, or this call would start on the engine it's about to stop.
+      for (let seen; seen !== this.restarting; ) {
+        seen = this.restarting;
+        await seen;
+      }
+      if (!this.engine?.started || !this.settings.agentCli) return null;
+      const call = run(this.engine);
+      this.agentCalls.add(call);
+      try {
+        return await call;
+      } finally {
+        this.agentCalls.delete(call);
+      }
+    });
 
     this.app.workspace.onLayoutReady(() => {
       watchVault(this, () => this.engine);
-      void this.restartSync();
+      void this.restartSync().finally(this.firstStartDone);
       // Another sync may be turned on or off at any time; Obsidian has no event for it.
       this.registerInterval(
         window.setInterval(() => {
           if (otherSyncs(this.app).join(", ") !== this.blockedBy) void this.restartSync();
         }, OTHER_SYNC_CHECK_EVERY),
       );
-      if (Platform.isDesktopApp) {
-        installMcpCli(this.app, this.manifest.dir!)
-          .then((path) => (this.mcpCliPath = path))
-          .catch((e: unknown) => console.error("[provenance-sync] could not install the MCP server", e));
-      }
+      this.syncAgentCli();
+      void this.removeOldAgentFiles();
     });
   }
 
@@ -184,11 +203,36 @@ export default class ProvenancePlugin extends Plugin {
     ];
   }
 
-  /** How an agent on this computer starts the local MCP server, with this vault's paths and server filled in. */
+  /** What versions before ob-provenance left in the plugin folder. */
+  private async removeOldAgentFiles() {
+    const { adapter } = this.app.vault;
+    for (const name of ["bridge.json", "provenance-mcp.mjs"]) {
+      const path = `${this.manifest.dir}/${name}`;
+      if (await adapter.exists(path)) await adapter.remove(path);
+    }
+  }
+
+  /** How an agent on this computer starts the local MCP server for this vault. */
   mcpCommand(): LocalMcpCommand | null {
-    if (!this.mcpCliPath) return null;
-    const { url, token } = this.serverSettings();
-    return localMcpCommand(this.app, this.mcpCliPath, url && token ? { url, vault: this.settings.vaultId, token } : null);
+    return this.cliPath ? localMcpCommand(this.app, this.cliPath) : null;
+  }
+
+  /** Brings the installed CLI and this vault's entry in line with the settings. The entry is what lets agents reach this vault. */
+  syncAgentCli() {
+    if (!Platform.isDesktopApp) return;
+    const update = async () => {
+      if (!this.settings.agentCli) {
+        this.cliPath = null;
+        return unregisterVault(this.app);
+      }
+      this.cliPath = await installCli();
+      const { url, token } = this.serverSettings();
+      await registerVault(this.app, url && token ? { url, vault: this.settings.vaultId, token } : null);
+    };
+    // Settings can change faster than files are written, and the last write must reflect the last change.
+    this.agentCliUpdate = this.agentCliUpdate.then(update).catch((e: unknown) => {
+      this.log.add({ level: "error", message: `Could not update the agent CLI: ${errorMessage(e)}` });
+    });
   }
 
   /** The server URL without a trailing slash ("" if none), and the device token from the keychain. */
@@ -212,8 +256,8 @@ export default class ProvenancePlugin extends Plugin {
   }
 
   private async stopSync() {
-    await this.stopBridge?.();
-    this.stopBridge = null;
+    // ob-provenance stops waiting by then, and sync must be able to come back whatever a call is stuck on.
+    await within(Promise.allSettled(this.agentCalls), AGENT_CALL_LIMIT, []);
     if (this.engine) {
       await this.engine.settle();
       this.engine.destroy();
@@ -282,9 +326,6 @@ export default class ProvenancePlugin extends Plugin {
     }
     if (this.engine !== engine) return;
     this.pokeEditors();
-    if (Platform.isDesktopApp && s.enableBridge) {
-      this.stopBridge = await startBridge(this.app, engine, `${this.manifest.dir}/bridge.json`);
-    }
   }
 
   /** Editors attach to the engine on their next update; give them one. */

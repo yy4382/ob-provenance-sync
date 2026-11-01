@@ -32,6 +32,24 @@ export function newFileId(): FileId {
 export const isMarkdownPath = (path: string) => path.endsWith(".md");
 
 /**
+ * The first of `paths` that a new note at `path` can't sit beside, or null. A
+ * disk may ignore case, and a file can't also be a folder, so such a note would
+ * enter the index and never reach the disk.
+ */
+export function pathClash(paths: string[], path: string): string | null {
+  const wanted = path.split("/");
+  for (const other of paths) {
+    const have = other.split("/");
+    for (let i = 0; i < wanted.length && i < have.length; i++) {
+      if (wanted[i]!.toLowerCase() !== have[i]!.toLowerCase()) break;
+      const endsHere = i === wanted.length - 1 || i === have.length - 1;
+      if (endsHere || wanted[i] !== have[i]) return other;
+    }
+  }
+  return null;
+}
+
+/**
  * The vault-level document: a map from stable file id to its current path, so
  * renames keep history. Concurrent creates of the same path can leave two ids
  * claiming one path; the smallest id wins and the rest are reported as

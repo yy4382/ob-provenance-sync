@@ -1,6 +1,6 @@
 import { slug } from "@provenance/core";
 import { Notice, Platform, PluginSettingTab, type App, type SettingDefinitionItem } from "obsidian";
-import { claudeCodeCommand, mcpJsonConfig, type LocalMcpCommand } from "./mcp-cli";
+import { claudeCodeCommand, mcpJsonConfig, type LocalMcpCommand } from "./agent-cli";
 import type ProvenancePlugin from "./main";
 
 export interface ProvenanceSettings {
@@ -12,7 +12,8 @@ export interface ProvenanceSettings {
   humanName: string;
   deviceName: string;
   showColors: boolean;
-  enableBridge: boolean;
+  /** Installs ob-provenance and lets agents on this computer reach this vault. Off by default: it puts the device token on disk. */
+  agentCli: boolean;
   /** Last agent named when marking text as an agent's, offered again next time. */
   lastAgentName: string;
 }
@@ -26,13 +27,10 @@ export function defaultSettings(app: App): ProvenanceSettings {
     humanName: "me",
     deviceName: `${Platform.isMobile ? "mobile" : "desktop"}-${suffix}`,
     showColors: true,
-    enableBridge: true,
+    agentCli: false,
     lastAgentName: "chatgpt",
   };
 }
-
-/** Changing these needs a fresh connection; the Reconnect action applies them. */
-const RESTART_KEYS = new Set<keyof ProvenanceSettings>(["enableBridge"]);
 
 export class ProvenanceSettingTab extends PluginSettingTab {
   constructor(
@@ -90,20 +88,20 @@ export class ProvenanceSettingTab extends PluginSettingTab {
         heading: "Agents",
         items: [
           {
-            name: "Local agent bridge",
-            desc: "Let local agents edit this vault through provenance-mcp while Obsidian is running.",
+            name: "Agent CLI",
+            desc: "Lets agents on this computer use this vault through the ob-provenance command. Installs it to ~/.local/bin and stores this vault's path, server and device token in ~/.config/ob-provenance, readable only by your user. Needs Node.js 22 or later. While Obsidian runs, agents get every feature only if Command line interface is on in Obsidian's General settings. Otherwise they get reading and editing through the server.",
             visible: Platform.isDesktopApp,
-            control: { type: "toggle", key: "enableBridge" },
+            control: { type: "toggle", key: "agentCli" },
           },
           {
             name: "Copy Claude Code command",
-            desc: "Adds this vault's MCP server to Claude Code. Needs Node.js 22 or later. Agents are named after the MCP client they use.",
+            desc: "Adds this vault's MCP server to Claude Code. Needs Agent CLI on. Agents are named after the MCP client they use.",
             visible: Platform.isDesktopApp,
             action: () => this.copy((cmd) => claudeCodeCommand(cmd)),
           },
           {
             name: "Copy MCP JSON config",
-            desc: "The same server as an mcpServers entry, for clients configured by file.",
+            desc: "The same server as an mcpServers entry, for clients configured by file. Needs Agent CLI on.",
             visible: Platform.isDesktopApp,
             action: () => this.copy((cmd) => mcpJsonConfig(cmd)),
           },
@@ -114,13 +112,13 @@ export class ProvenanceSettingTab extends PluginSettingTab {
 
   private copy(format: (cmd: LocalMcpCommand) => string) {
     const cmd = this.plugin.mcpCommand();
-    if (!cmd) return void new Notice("Still preparing the agent server; try again in a moment.");
-    void navigator.clipboard.writeText(format(cmd)).then(() => new Notice("Copied. It contains your device token, so keep it private."));
+    if (!cmd) return void new Notice("Turn on the agent CLI first, then try again in a moment.");
+    void navigator.clipboard.writeText(format(cmd)).then(() => new Notice("Copied."));
   }
 
   async setControlValue(key: string, value: unknown): Promise<void> {
     await super.setControlValue(key, typeof value === "string" ? value.trim() : value);
     if (key === "showColors") this.plugin.applyColors();
-    if (RESTART_KEYS.has(key as keyof ProvenanceSettings)) await this.plugin.restartSync();
+    this.plugin.syncAgentCli();
   }
 }

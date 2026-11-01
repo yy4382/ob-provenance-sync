@@ -1,3 +1,4 @@
+export * from "./agent-config";
 export * from "./attribution";
 export * from "./ops";
 export * from "./provenance";
