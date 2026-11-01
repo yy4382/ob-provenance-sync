@@ -3,7 +3,7 @@ import type * as Y from "yjs";
 import { attribute } from "./attribution";
 import { agentIdSchema, agentProvenance, noteSchema, type SegmentKind } from "./provenance";
 import { EditError, insertText, replaceText } from "./text";
-import { isMarkdownPath, markNote, newFileId, type FileId, type VaultIndex } from "./vault";
+import { isMarkdownPath, markNote, newFileId, pathClash, type FileId, type VaultIndex } from "./vault";
 
 /** Only Obsidian's own normalized form, so one file can never be reached under two spellings. */
 const pathSchema = z
@@ -14,6 +14,11 @@ const pathSchema = z
     "must be a normalized vault-relative path like folder/note.md",
   );
 const markdownPath = pathSchema.refine(isMarkdownPath, "must be a .md file");
+/** Names Obsidian can't use: a colon never reaches the disk, and it never shows a dot name. Notes already at such a path stay readable. */
+const newNotePath = markdownPath.refine(
+  (p) => !p.includes(":") && p.split("/").every((seg) => !seg.startsWith(".")),
+  "can't hold a colon or a name starting with a dot, because Obsidian couldn't show the note",
+);
 
 const bySchema = z.object({
   agent: agentIdSchema,
@@ -37,7 +42,7 @@ export const opRequestSchema = z.discriminatedUnion("op", [
     by: bySchema,
   }),
   z.object({ op: z.literal("append"), path: markdownPath, text: z.string().min(1), by: bySchema }),
-  z.object({ op: z.literal("create"), path: markdownPath, content: z.string(), by: bySchema }),
+  z.object({ op: z.literal("create"), path: newNotePath, content: z.string(), by: bySchema }),
   z.object({ op: z.literal("rename"), from: markdownPath, to: markdownPath }),
   z.object({ op: z.literal("delete"), path: markdownPath }),
   z.object({ op: z.literal("links"), path: markdownPath }),
@@ -149,7 +154,9 @@ export async function executeOp(docs: VaultDocs, req: OpRequest): Promise<OpResu
       return { op: "append" };
     }
     case "create": {
-      if ((await docs.index()).idOf(req.path)) throw new OpError("exists", `file already exists: ${req.path}`);
+      const clash = pathClash((await docs.index()).entries().map(([, e]) => e.path), req.path);
+      if (clash === req.path) throw new OpError("exists", `file already exists: ${req.path}`);
+      if (clash) throw new OpError("exists", `${req.path} can't sit beside ${clash}: names differing only in case are one file on some disks, and a file can't also be a folder`);
       const by = byOf(req, docs);
       const id = newFileId();
       await docs.updateText(id, (t) => {

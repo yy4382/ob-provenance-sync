@@ -299,6 +299,17 @@ const QUIRKS = [
     },
   },
   {
+    id: "note-names-obsidian-cannot-use",
+    async probe() {
+      const seen = await cdp.eval(`const colon = await app.vault.create("colon: probe.md", "").then(() => "created", (e) => e.message);
+        await app.vault.adapter.write(".dot-probe.md", "");
+        await new Promise((r) => setTimeout(r, 500));
+        return { colon, dot: !!app.vault.getFileByPath(".dot-probe.md"), listed: app.vault.getMarkdownFiles().some((f) => f.path === ".dot-probe.md") }`);
+      expect(seen.colon !== "created", "a note's name can't hold a colon", seen);
+      expect(!seen.dot && !seen.listed, "Obsidian doesn't show a file whose name starts with a dot", seen);
+    },
+  },
+  {
     id: "app-id-is-a-string",
     async probe() {
       const seen = await cdp.eval(`return typeof app.appId`);

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,40 +39,14 @@ function httpOps(url: string, token: string, timeoutMs: number): OpsTransport {
 const remoteOps = (server: NonNullable<RegisteredVault["server"]>, timeoutMs: number) =>
   httpOps(`${server.url}/api/vaults/${encodeURIComponent(server.vault)}/ops`, server.token, timeoutMs);
 
-interface Finished {
-  code: number | null;
-  stdout: string;
-  stderr: string;
-  error: NodeJS.ErrnoException | null;
-  timedOut: boolean;
-}
-
-function run(command: string, args: string[], timeoutMs: number): Promise<Finished> {
-  return new Promise((resolve) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    // `obsidian` hangs if the vault's window closes during a call, so it needs a limit of ours.
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
-      // If `obsidian` is a wrapper script, the kill misses the process holding these pipes open.
-      child.stdout.destroy();
-      child.stderr.destroy();
-      child.unref();
-      resolve({ code: null, stdout, stderr, error: null, timedOut });
-    }, timeoutMs);
-    child.stdout.setEncoding("utf8").on("data", (d: string) => (stdout += d));
-    child.stderr.setEncoding("utf8").on("data", (d: string) => (stderr += d));
-    child.on("error", (error: NodeJS.ErrnoException) => {
-      clearTimeout(timer);
-      resolve({ code: null, stdout, stderr, error, timedOut });
+/** `obsidian` hangs if the vault's window closes during a call, so it needs a limit of ours. execFile kills it and drops the pipes. */
+function run(command: string, args: string[], timeoutMs: number) {
+  return new Promise<{ code: number | null; stdout: string; stderr: string; error: NodeJS.ErrnoException | null; timedOut: boolean }>((resolve) => {
+    const child = execFile(command, args, { timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: Infinity }, (e, stdout, stderr) => {
+      const code = e ? e.code : 0;
+      resolve({ code: typeof code === "number" ? code : null, stdout, stderr, error: typeof code === "string" ? (e as NodeJS.ErrnoException) : null, timedOut: !!e?.killed });
     });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code, stdout, stderr, error: null, timedOut });
-    });
+    child.stdin?.end();
   });
 }
 

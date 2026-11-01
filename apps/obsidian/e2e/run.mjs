@@ -346,6 +346,14 @@ try {
   check("ob-provenance takes a field from stdin", ob(["read", "--path", "Cli/piped.md"]).stdout === piped);
   const unknownVault = ob(["--vault", "Nope", "list"]);
   check("ob-provenance names the vaults it knows", unknownVault.status === 2 && unknownVault.stderr.includes("vault (id e2evault"), JSON.stringify(unknownVault));
+  const twoVaults = ob(["--vault", "vault", "list", "--vault", "other"]);
+  check("ob-provenance refuses two different vaults in one call", twoVaults.status === 2 && twoVaults.stderr.includes("given twice"), JSON.stringify(twoVaults));
+  const mcpUnnamed = ob(["mcp"], { env: instance.env });
+  check("ob-provenance mcp won't start without a vault", mcpUnnamed.status === 2 && mcpUnnamed.stderr.includes("--vault <name>"), JSON.stringify(mcpUnnamed));
+  for (const path of ["Meeting: Q3.md", ".hidden/note.md", "welcome.md", "Welcome.md/x.md"]) {
+    const refused = ob(["create", "--path", path, "--content", "x", "--why", "agent", "--agent", "shell-agent"]);
+    check(`ob-provenance refuses a note that could never reach the disk: ${path}`, refused.status !== 0 && !ob(["read", "--path", path]).stdout, JSON.stringify(refused));
+  }
   const closedPipe = spawnSync("sh", ["-c", `"${process.execPath}" "${join(repo, "apps/cli/dist/cli.js")}" --help | true`], { encoding: "utf8" });
   check("ob-provenance stays quiet when the reader of its output goes away", closedPipe.stderr === "", closedPipe.stderr);
   check("ob-provenance prints an op error and exits 1", ob(["read", "--path", "Cli/missing.md"]).status === 1);

@@ -17,8 +17,9 @@ export interface Actions {
 }
 
 /** An empty value is usually a shell variable that was never set, so it must not read as "not given". */
-function named(value: string): string {
+function named(value: string, previous?: string): string {
   if (!value) throw new InvalidArgumentError("It is empty.");
+  if (previous && previous !== value) throw new InvalidArgumentError(`It was already given as ${previous}.`);
   return value;
 }
 
@@ -28,6 +29,37 @@ const agentOption = () => new Option("--agent <name>", "Your name, e.g. claude-c
 function fieldOption(key: string, field: z.ZodType): Option {
   const required = field.safeParse(undefined).success ? [] : ["(required)"];
   return new Option(field.safeParse(true).success ? `--${key}` : `--${key} <value>`, [field.description ?? "", ...required].join(" ").trim());
+}
+
+/** These flags work on either side of the command, and Commander would quietly keep the outer one. */
+function targetOf<T extends Target>(cmd: Command): T {
+  const outer = cmd.parent!.opts<Target>();
+  const inner = cmd.opts<Target>();
+  for (const key of ["vault", "agent"] as const) {
+    if (outer[key] && inner[key] && outer[key] !== inner[key]) cmd.error(`--${key} was given twice, as ${outer[key]} and ${inner[key]}.`);
+  }
+  return cmd.optsWithGlobals<T>();
+}
+
+/** The end of a heredoc or file isn't part of an edit's string: kept, it would split the line the string lands in. */
+const trimsStdin = (t: ToolDef) => t.op === "edit";
+
+async function fromStdin(cmd: Command, opts: object, field: string, t: ToolDef, actions: Actions): Promise<string> {
+  if (field in opts) cmd.error(`--stdin ${field} and --${field} both give ${field}. Use one.`);
+  const piped = await actions.stdin();
+  const text = trimsStdin(t) ? piped.replace(/\r?\n$/, "") : piped;
+  // In an edit this would delete the match, and a failed pipe shouldn't be able to do that.
+  if (!text) cmd.error(`--stdin ${field} read nothing. For an empty value, pass --${field} "".`);
+  return text;
+}
+
+function stdinOption(fields: string[], trims: boolean): Option {
+  const option = new Option("--stdin <field>", `Read this field from stdin, for text with quotes or line breaks.${trims ? " One line break at its end is dropped." : ""}`).choices(fields);
+  const choose = option.parseArg!;
+  return option.argParser((field: string, previous: string) => {
+    if (previous) throw new InvalidArgumentError(`Only one field can come from stdin. Pass the other with its flag, e.g. --${previous} "$(cat file)".`);
+    return choose(field, previous);
+  });
 }
 
 function addTool(program: Command, t: ToolDef, actions: Actions) {
@@ -40,13 +72,12 @@ function addTool(program: Command, t: ToolDef, actions: Actions) {
     .addHelpText("after", `\nExamples:\n${t.examples.map((e) => `  ${e}`).join("\n")}`);
   for (const [key, field] of fields) cmd.addOption(fieldOption(key, field));
   if (recordsAuthor(t)) {
-    const text = fields.filter(([key, field]) => key !== "path" && field.safeParse("").success).map(([key]) => key);
-    cmd.addOption(new Option("--stdin <field>", "Read this field from stdin, for text with quotes or line breaks.").choices(text));
+    cmd.addOption(stdinOption(fields.filter(([key, field]) => key !== "path" && field.safeParse("").success).map(([key]) => key), trimsStdin(t)));
   }
   cmd.addOption(vaultOption).addOption(agentOption().hideHelp(!recordsAuthor(t)));
   cmd.action(async () => {
-    const opts = cmd.optsWithGlobals<Target & { stdin?: string }>();
-    const given = opts.stdin ? { ...opts, [opts.stdin]: await actions.stdin() } : opts;
+    const opts = targetOf<Target & { stdin?: string }>(cmd);
+    const given = opts.stdin ? { ...opts, [opts.stdin]: await fromStdin(cmd, opts, opts.stdin, t, actions) } : opts;
     // Required fields are checked here, not by Commander, because --stdin can supply them.
     const input = z.object(t.input).safeParse(given);
     if (!input.success) cmd.error(z.prettifyError(input.error));
@@ -78,14 +109,14 @@ export function buildProgram(actions: Actions): Command {
     .action(() => actions.vaults());
   program
     .command("status")
-    .description("Show whether a call would reach Obsidian or the sync server")
+    .description("Show whether a call would reach Obsidian or the sync server. Like any call, it opens the vault in Obsidian if it's closed")
     .addOption(vaultOption)
-    .action((_opts, cmd: Command) => actions.status(cmd.optsWithGlobals<Target>()));
+    .action((_opts, cmd: Command) => actions.status(targetOf(cmd)));
   program
     .command("mcp")
     .description("Serve these commands as an MCP server on stdio")
     .addOption(vaultOption)
     .addOption(agentOption())
-    .action((_opts, cmd: Command) => actions.mcp(cmd.optsWithGlobals<Target>()));
+    .action((_opts, cmd: Command) => actions.mcp(targetOf(cmd)));
   return program;
 }

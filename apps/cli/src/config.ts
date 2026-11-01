@@ -1,30 +1,23 @@
-import { readdir, readFile, realpath } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { agentPaths, vaultEntrySchema } from "@provenance/core";
-import type { Registry, RegisteredVault } from "./vault";
+import type { RegisteredVault } from "./vault";
 
-/** The vaults that turned on Agent CLI, with the entries that can't be used right now kept apart. */
-export async function readVaults(): Promise<Registry> {
+/** The vaults that turned on Agent CLI. An entry that can't be read is left out. */
+export async function readVaults(): Promise<RegisteredVault[]> {
   const dir = agentPaths(homedir()).vaults;
   const names = await readdir(dir).catch(() => []);
   const entries = await Promise.all(
     names
       .filter((n) => n.endsWith(".json"))
-      .map(async (n): Promise<RegisteredVault | string> => {
-        const file = join(dir, n);
-        let entry;
+      .map(async (n) => {
         try {
-          entry = vaultEntrySchema.parse(JSON.parse(await readFile(file, "utf8")));
+          return { ...vaultEntrySchema.parse(JSON.parse(await readFile(join(dir, n), "utf8"))), id: n.slice(0, -".json".length) };
         } catch {
-          return `an unreadable entry (${file})`;
-        }
-        try {
-          return { ...entry, id: n.slice(0, -".json".length), path: await realpath(entry.path) };
-        } catch {
-          return `${entry.name} (folder not found: ${entry.path}, entry ${file})`;
+          return null;
         }
       }),
   );
-  return { vaults: entries.filter((e) => typeof e !== "string"), broken: entries.filter((e) => typeof e === "string") };
+  return entries.filter((e) => e !== null);
 }

@@ -5,13 +5,17 @@ import { buildProgram, type Target } from "../src/program";
 afterEach(() => void vi.restoreAllMocks());
 
 async function run(...argv: string[]) {
+  return runWith("from stdin\n", ...argv);
+}
+
+async function runWith(stdin: string, ...argv: string[]) {
   let stdout = "";
   let stderr = "";
   vi.spyOn(process.stdout, "write").mockImplementation((s) => ((stdout += String(s)), true));
   vi.spyOn(process.stderr, "write").mockImplementation((s) => ((stderr += String(s)), true));
   const calls: { t: ToolDef; input: unknown; target: Target }[] = [];
   const program = buildProgram({
-    stdin: async () => "from stdin\n",
+    stdin: async () => stdin,
     tool: async (t, input, target) => void calls.push({ t, input, target }),
     vaults: async () => {},
     status: async () => {},
@@ -26,12 +30,39 @@ async function run(...argv: string[]) {
 }
 
 /** What a shell would pass for an example: quotes group words, and a `<` redirect isn't an argument. */
-const words = (example: string) => example.split(" < ")[0]!.match(/"[^"]*"|\S+/g)!.map((w) => w.replace(/^"|"$/g, ""));
+const words = (example: string) => example.split(" < ")[0]!.match(/\$'[^']*'|"[^"]*"|\S+/g)!.map((w) => w.replace(/^\$'|^"|'$|"$/g, ""));
 
 describe("ob-provenance arguments", () => {
   it("takes --vault and --agent before or after the command", async () => {
     expect((await run("--vault", "Notes", "--agent", "a", "list")).call?.target).toMatchObject({ vault: "Notes", agent: "a" });
     expect((await run("list", "--vault", "Notes", "--agent", "a")).call?.target).toMatchObject({ vault: "Notes", agent: "a" });
+  });
+
+  it("refuses two different values for --vault or --agent on either side of the command", async () => {
+    expect((await run("--vault", "Work", "list", "--vault", "Personal")).error?.code).toBe("commander.error");
+    expect((await run("--agent", "a", "append", "--path", "a.md", "--text", "x", "--why", "agent", "--agent", "b")).error?.code).toBe("commander.error");
+    expect((await run("--vault", "Work", "--vault", "Personal", "list")).error?.code).toBe("commander.invalidArgument");
+    expect((await run("--vault", "Work", "list", "--vault", "Work")).call?.target).toMatchObject({ vault: "Work" });
+  });
+
+  it("keeps stdin as it is, except for the line break ending an edit's string", async () => {
+    expect((await runWith("a\n", "append", "--path", "a.md", "--stdin", "text", "--why", "agent")).call?.input).toMatchObject({ text: "a\n" });
+    expect((await runWith("a\n\n", "edit", "--path", "a.md", "--old_string", "x", "--stdin", "new_string", "--why", "agent")).call?.input).toMatchObject({ new_string: "a\n" });
+    expect((await runWith("a\r\n", "edit", "--path", "a.md", "--new_string", "x", "--stdin", "old_string", "--why", "agent")).call?.input).toMatchObject({ old_string: "a" });
+  });
+
+  it("refuses stdin that would quietly lose text", async () => {
+    for (const text of ["", "\n"]) {
+      const { call, stderr } = await runWith(text, "edit", "--path", "a.md", "--old_string", "x", "--stdin", "new_string", "--why", "agent");
+      expect(call).toBeUndefined();
+      expect(stderr).toContain('--new_string ""');
+    }
+    const both = await run("append", "--path", "a.md", "--stdin", "text", "--text", "x", "--why", "agent");
+    expect(both.call).toBeUndefined();
+    expect(both.stderr).toContain("both give text");
+    const twice = await run("edit", "--path", "a.md", "--stdin", "old_string", "--stdin", "new_string", "--why", "agent");
+    expect(twice.call).toBeUndefined();
+    expect(twice.stderr).toContain("Only one field can come from stdin");
   });
 
   it("refuses an empty --vault or --agent, which is usually an unset variable", async () => {

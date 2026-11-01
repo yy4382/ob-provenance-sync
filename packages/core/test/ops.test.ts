@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { conflictOriginal, conflictPath, difference, repairedConflictPath, handleOpRequest, isNewerVersion, parseOpResponse, TEXT_KEY, VaultIndex, type FileId, type VaultDocs } from "../src";
+import { conflictOriginal, conflictPath, difference, repairedConflictPath, handleOpRequest, isNewerVersion, newFileId, parseOpResponse, TEXT_KEY, VaultIndex, type FileId, type VaultDocs } from "../src";
 
 function memoryVault(): VaultDocs & { files: Map<FileId, Y.Doc> } {
   const index = new VaultIndex(new Y.Doc());
@@ -74,6 +74,41 @@ describe("handleOpRequest", () => {
     await handleOpRequest(vault, { op: "rename", from: "a.md", to: "b.md" });
     expect((await vault.index()).idOf("b.md")).toBe(id);
     expect(await handleOpRequest(vault, { op: "create", path: "b.md", content: "", by })).toMatchObject({ ok: false, code: "exists" });
+  });
+});
+
+describe("creating a note the disk could never hold", () => {
+  const create = (vault: VaultDocs, path: string) => handleOpRequest(vault, { op: "create", path, content: "x", by });
+
+  it.each(["Meeting: Q3.md", "a:b/c.md", ".hidden/note.md", ".obsidian/agent.md", "notes/.dot.md"])("refuses the name %s", async (path) => {
+    expect(await create(memoryVault(), path)).toMatchObject({ ok: false, code: "invalid" });
+  });
+
+  it.each([
+    ["welcome.md", "Welcome.md"],
+    ["Welcome.md/x.md", "Welcome.md"],
+    ["a.md", "a.md/b.md"],
+    ["notes/b.md", "Notes/a.md"],
+  ])("refuses %s beside %s", async (path, existing) => {
+    const vault = memoryVault();
+    await create(vault, existing);
+    expect(await create(vault, path)).toMatchObject({ ok: false, code: "exists", message: expect.stringContaining(existing) });
+    expect(await handleOpRequest(vault, { op: "list" })).toMatchObject({ result: { files: [existing] } });
+  });
+
+  it("allows a note beside others in the same folder or a longer name", async () => {
+    const vault = memoryVault();
+    await create(vault, "Notes/a.md");
+    expect(await create(vault, "Notes/b.md")).toMatchObject({ ok: true });
+    expect(await create(vault, "Notes/a.md.md")).toMatchObject({ ok: true });
+    expect(await create(vault, "Notes.md")).toMatchObject({ ok: true });
+  });
+
+  it("still reads a note already at such a name", async () => {
+    const vault = memoryVault();
+    await vault.updateIndex((index) => index.set(newFileId(), { type: "markdown", path: "a: b.md" }));
+    expect(await handleOpRequest(vault, { op: "list" })).toMatchObject({ result: { files: ["a: b.md"] } });
+    expect((await handleOpRequest(vault, { op: "read", path: "a: b.md" })).ok).toBe(true);
   });
 });
 

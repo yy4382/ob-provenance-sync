@@ -13,6 +13,13 @@ import { editorInfoField, moment, normalizePath, TextFileView, type App, type Ma
  * and drop the old branch once minAppVersion passes that release.
  */
 
+/**
+ * Core refuses a new note's name that Obsidian can't use, so an agent hears at
+ * once instead of finding the note never reached the disk. The list is Obsidian's.
+ *
+ * quirk: note-names-obsidian-cannot-use
+ */
+
 export type EditKind = "human" | "unknown" | "copy";
 
 /**

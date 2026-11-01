@@ -15,7 +15,7 @@ export function instructions(surface: Mode | "cli"): string {
           "",
           "Calling it",
           "- Every write needs --agent <your name>, e.g. --agent claude-code, or OB_PROVENANCE_AGENT in the environment. Reads don't.",
-          "- Every call needs --vault <name>, or OB_PROVENANCE_VAULT in the environment. `ob-provenance vaults` lists them.",
+          "- Every call needs --vault <name>, or OB_PROVENANCE_VAULT in the environment. `ob-provenance vaults` lists them. A call opens the vault in Obsidian if it's closed.",
           "- For text with quotes or line breaks, pipe it in: `ob-provenance append --path a.md --why agent --stdin text < file`.",
           '- A flag takes the next argument as its value, even one that starts with a dash. An empty value is `--new_string ""`.',
           "- `ob-provenance <command> --help` shows a command's fields and examples.",

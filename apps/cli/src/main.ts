@@ -38,14 +38,16 @@ async function selected(target: Target) {
 const program = buildProgram({
   stdin: readStdin,
   async vaults() {
-    const { vaults, broken } = await readVaults();
-    const lines = [...vaults.map((v) => `${v.name}\t${v.path}\t${v.server ? v.server.url : "no sync server"}`), ...broken.map((b) => `can't be used\t${b}`)];
-    print(lines.join("\n") || "(no vaults have Agent CLI turned on)");
+    const vaults = await readVaults();
+    print(vaults.map((v) => `${v.name}\t${v.path}\t${v.server ? v.server.url : "no sync server"}`).join("\n") || "(no vaults have Agent CLI turned on)");
   },
   async status(target) {
     print((await describeRoute(await selected(target))).join("\n"));
   },
-  mcp: (target) => createMcpServer({ ops: agentOps({ select: select(target) }), agent: pinnedAgent(target), mode: "full" }).connect(new StdioServerTransport()),
+  async mcp(target) {
+    if (!target.vault && !process.env.OB_PROVENANCE_VAULT) refuse("ob-provenance mcp needs --vault <name> or OB_PROVENANCE_VAULT in the command that starts it, because a tool call can't name a vault.");
+    await createMcpServer({ ops: agentOps({ select: select(target) }), agent: pinnedAgent(target), mode: "full" }).connect(new StdioServerTransport());
+  },
   async tool(t, input, target) {
     const agent = recordsAuthor(t) ? pinnedAgent(target) : null;
     const vault = await selected(target);
