@@ -28,7 +28,7 @@ VaultTree.tla:
 
 ## Does my change touch this?
 
-Both models were last confirmed to describe the code at **fb71d1a** (sync commit).
+Both models were last confirmed to describe the code at **5005cd6** (sync commit).
 
 | Code | MarkdownFile.tla |
 | --- | --- |
@@ -126,4 +126,4 @@ MarkdownFile.tla: every interleaving for one note, words `a` (initial), one remo
 
 VaultTree.tla: two devices, three ids, two note names and their conflict copies, up to two user actions (create, rename, delete, or an outside edit while a device is off) and two clean closes (about 1.1M distinct states); with one user action all three rules hold. Assumptions: the server relays index changes at once; a starting device sees the server's index before its scan; users act only between steps of a tree pass, not during its awaits; `settleCollision`'s content check and its change are one step; text is a set of tokens and `applyDisk` is a three-way merge on sets; files are markdown.
 
-Not covered: notes whose content never reached the server (no document state; `writeNow` refuses to place them and `onCreate` adopts a file put at their path; every model note has state, so these branches never fire), tested in `engine.test.ts` instead; crashes (a stale mirror; `scanDisk`'s `movedAway` handles one case), offline starts (the scan reads a stale index), binaries, remote text edits racing tree moves, `SyncEngine.check`'s repairs, several panes on one note, the server and network, agent calls (`readText`, `updateText`, `updateIndex`, `arrived`), `main.ts` waiting for those calls before `Stop`, and the conflict resolver's `replace` (`adoptCopy` with new text).
+Not covered: notes whose content never reached the server (no document state; `writeNow` refuses to place them and `onCreate` adopts a file put at their path; every model note has state, so these branches never fire), tested in `engine.test.ts` instead; crashes (a stale mirror; `scanDisk`'s `movedAway` handles one case), offline starts (the scan reads a stale index), binaries, remote text edits racing tree moves, `SyncEngine.check`'s repairs, several panes on one note, the server and network, agent calls (`readText`, `updateText`, `updateIndex`, `arrived`), `main.ts` waiting for those calls before `Stop`, the conflict resolver's `replace` (`adoptCopy` with new text), and paths a disk or Obsidian can't hold: names differing only in case, a file also used as a folder, a colon, a dot name (model paths are plain and distinct; core refuses these only on an agent's `create`, through `pathClash` and `newNotePath`, not on a rename or on anything the engine reads from disk).
