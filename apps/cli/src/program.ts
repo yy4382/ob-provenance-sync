@@ -22,7 +22,7 @@ function named(value: string): string {
   return value;
 }
 
-const vaultOption = new Option("--vault <name>", "Vault name or id. Without it: the vault folder you're in, then OB_PROVENANCE_VAULT, then your only vault.").argParser(named);
+const vaultOption = new Option("--vault <name>", "Vault name or id. Every call needs it. Or set OB_PROVENANCE_VAULT.").argParser(named);
 const agentOption = () => new Option("--agent <name>", "Your name, e.g. claude-code. Every write needs it. Or set OB_PROVENANCE_AGENT.").argParser(named);
 
 function fieldOption(key: string, field: z.ZodType): Option {

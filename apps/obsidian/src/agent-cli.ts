@@ -61,7 +61,7 @@ export interface LocalMcpCommand {
   env: Record<string, string>;
 }
 
-/** The vault is pinned by id, so an agent's writes can't drift to another vault with its working directory. */
+/** The vault is pinned by id, so a second vault of the same name can't stop this command working. */
 export function localMcpCommand(app: App, cliPath: string): LocalMcpCommand {
   return { command: "node", args: [cliPath, "--vault", deviceVaultId(app), "mcp"], env: {} };
 }

@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { readdir, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -29,6 +28,3 @@ export async function readVaults(): Promise<Registry> {
   );
   return { vaults: entries.filter((e) => typeof e !== "string"), broken: entries.filter((e) => typeof e === "string") };
 }
-
-/** A vault this CLI may know nothing about. Obsidian can use another config folder name, but this is the default. */
-export const isVault = (dir: string) => existsSync(join(dir, ".obsidian"));

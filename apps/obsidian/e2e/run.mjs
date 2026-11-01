@@ -157,7 +157,7 @@ function cliCall(body) {
 
 /** Runs the built ob-provenance as an agent would, with this instance's HOME and `obsidian`. */
 const ob = (args, opts = {}) =>
-  spawnSync(process.execPath, [join(repo, "apps/cli/dist/cli.js"), ...args], { env: instance.env, cwd: work, encoding: "utf8", timeout: 30000, maxBuffer: 1 << 26, ...opts });
+  spawnSync(process.execPath, [join(repo, "apps/cli/dist/cli.js"), ...args], { env: { ...instance.env, OB_PROVENANCE_VAULT: "vault" }, cwd: work, encoding: "utf8", timeout: 30000, maxBuffer: 1 << 26, ...opts });
 
 async function openObsidian() {
   const cdp = await instance.open();
@@ -350,7 +350,7 @@ try {
   check("ob-provenance stays quiet when the reader of its output goes away", closedPipe.stderr === "", closedPipe.stderr);
   check("ob-provenance prints an op error and exits 1", ob(["read", "--path", "Cli/missing.md"]).status === 1);
   check("ob-provenance searches", ob(["search", "--query", "AgentBridge"]).stdout.includes("Projects/Roadmap.md"));
-  check("a read ignores a bad agent name", ob(["read", "--path", "Cli/shell.md"], { env: { ...instance.env, OB_PROVENANCE_AGENT: "Claude Code" } }).status === 0);
+  check("a read ignores a bad agent name", ob(["--vault", "vault", "read", "--path", "Cli/shell.md"], { env: { ...instance.env, OB_PROVENANCE_AGENT: "Claude Code" } }).status === 0);
   const mcpClient = new Client({ name: "shell client", version: "0" });
   await mcpClient.connect(new StdioClientTransport({ command: process.execPath, args: [join(repo, "apps/cli/dist/cli.js"), "--vault", "e2evault", "mcp"], env: instance.env, cwd: work }));
   const overMcp = await mcpClient.callTool({ name: "get_backlinks", arguments: { path: "Welcome.md" } });
@@ -363,7 +363,7 @@ try {
   await cdp.eval(`const e = app.plugins.plugins["provenance-sync"].engine; const update = e.updateText;
     e.updateText = async function (...args) { await new Promise((r) => setTimeout(r, 1500)); return update.apply(this, args); }; return true`);
   const inFlight = new Promise((resolve) => {
-    const child = spawn(process.execPath, [join(repo, "apps/cli/dist/cli.js"), "append", "--path", "Cli/shell.md", "--text", " During a restart.", "--why", "agent", "--agent", "shell-agent"], { env: instance.env, cwd: work, stdio: "ignore" });
+    const child = spawn(process.execPath, [join(repo, "apps/cli/dist/cli.js"), "--vault", "vault", "append", "--path", "Cli/shell.md", "--text", " During a restart.", "--why", "agent", "--agent", "shell-agent"], { env: instance.env, cwd: work, stdio: "ignore" });
     child.on("close", resolve);
   });
   await sleep(500);
@@ -402,15 +402,12 @@ try {
   await cdp.eval(`${plugin}.agentCalls.clear(); return true`);
   await eventually(async () => ob(["status"]).stdout.includes("Obsidian: reachable"));
 
-  const other = join(dirname(entry), "othervault.json");
-  mkdirSync(join(work, "other"));
-  writeFileSync(other, JSON.stringify({ name: "other", path: join(work, "other"), server: null }));
-  const notesBefore = ob(["--vault", "vault", "list"]).stdout;
-  const ambiguous = ob(["append", "--path", "Cli/shell.md", "--text", "lost", "--why", "agent", "--agent", "shell-agent"]);
-  check("with two vaults and neither named, ob-provenance refuses and lists them", ambiguous.status === 2 && /--vault <name>.*vault.*other/.test(ambiguous.stderr), JSON.stringify(ambiguous));
-  check("the refused call changed nothing", ob(["--vault", "vault", "list"]).stdout === notesBefore && !ob(["--vault", "vault", "read", "--path", "Cli/shell.md"]).stdout.includes("lost"));
-  check("inside a vault's folder, ob-provenance needs no name", ob(["list", "--prefix", "Cli/"], { cwd: join(vault, "Projects") }).status === 0);
-  rmSync(other);
+  const notesBefore = ob(["list"]).stdout;
+  const unnamed = ob(["append", "--path", "Cli/shell.md", "--text", "lost", "--why", "agent", "--agent", "shell-agent"], { env: instance.env });
+  check("a call that names no vault refuses and lists them, even with one vault", unnamed.status === 2 && /--vault <name> or OB_PROVENANCE_VAULT.*vault \(id e2evault/.test(unnamed.stderr), JSON.stringify(unnamed));
+  check("the refused call changed nothing", ob(["list"]).stdout === notesBefore && !ob(["read", "--path", "Cli/shell.md"]).stdout.includes("lost"));
+  const insideVault = ob(["list", "--prefix", "Cli/"], { cwd: join(vault, "Projects"), env: instance.env });
+  check("the folder a call runs in doesn't choose its vault", insideVault.status === 2, JSON.stringify(insideVault));
   await sleep(100);
   writeFileSync(bin, "// ob-provenance 99.0.0\n");
   await setAgentCli(false);
@@ -527,7 +524,7 @@ try {
   await cdp.eval(`const e = ${plugin}.engine; const update = e.updateText;
     e.updateText = async function (...args) { const out = await update.apply(this, args); await new Promise((r) => setTimeout(r, 6000)); return out; }; return true`);
   const crashed = new Promise((resolve) => {
-    const child = spawn(process.execPath, [join(repo, "apps/cli/dist/cli.js"), "append", "--path", "Cli/crash.md", "--text", "Once.\n", "--why", "agent", "--agent", "shell-agent"], { env: instance.env, cwd: work, stdio: ["ignore", "ignore", "pipe"] });
+    const child = spawn(process.execPath, [join(repo, "apps/cli/dist/cli.js"), "--vault", "vault", "append", "--path", "Cli/crash.md", "--text", "Once.\n", "--why", "agent", "--agent", "shell-agent"], { env: instance.env, cwd: work, stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
     child.stderr.on("data", (d) => (stderr += d));
     child.on("close", (status) => resolve({ status, stderr }));

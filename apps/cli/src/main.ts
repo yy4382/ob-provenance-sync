@@ -4,7 +4,7 @@ import { parseAgentName, slug, type AgentId } from "@provenance/core";
 import { createMcpServer } from "@provenance/mcp";
 import { recordsAuthor, runTool } from "@provenance/tools";
 import { CommanderError } from "commander";
-import { isVault, readVaults } from "./config";
+import { readVaults } from "./config";
 import { buildProgram, type Target } from "./program";
 import { agentOps, describeRoute } from "./route";
 import { selectVault, type Selection } from "./vault";
@@ -26,7 +26,7 @@ function pinnedAgent(target: Target): AgentId | null {
 }
 
 const select = (target: Target) => async (): Promise<Selection> =>
-  selectVault(await readVaults(), { arg: target.vault ?? null, env: process.env.OB_PROVENANCE_VAULT, cwd: process.cwd(), isVault });
+  selectVault(await readVaults(), { arg: target.vault ?? null, env: process.env.OB_PROVENANCE_VAULT });
 
 const print = (text: string) => process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
 

@@ -39,7 +39,7 @@ export const TOOLS: readonly ToolDef[] = [
     command: "list",
     op: "list",
     description: "List vault files, including attachments. Only .md files can be read or edited. In a large vault, pass prefix.",
-    examples: ["ob-provenance list --prefix Projects/"],
+    examples: ["ob-provenance --vault Notes list --prefix Projects/"],
     input: { prefix: z.string().optional().describe("Only list paths starting with this string. End it with / to match a folder.") },
     annotations: { readOnlyHint: true },
     request: ({ prefix }) => ({ op: "list", ...(prefix ? { prefix } : {}) }),
@@ -54,7 +54,7 @@ export const TOOLS: readonly ToolDef[] = [
       "mixed (agent words combined with human or dictated words). Authors are listed in text order. " +
       'An author of "unknown" means part of the piece has no recorded author. Example: "[mixed human:alice,agent:claude-code] Half half." ' +
       "This view shows no notes or times, and drops indentation and blank lines, so copy old_string from a plain read.",
-    examples: ["ob-provenance read --path notes/today.md", "ob-provenance read --path notes/today.md --provenance"],
+    examples: ["ob-provenance --vault Notes read --path notes/today.md", "ob-provenance --vault Notes read --path notes/today.md --provenance"],
     input: { path, provenance: z.boolean().optional().describe("Show who wrote each piece of text.") },
     annotations: { readOnlyHint: true },
     request: ({ path, provenance }) => ({ op: "read", path, provenance: provenance ?? false }),
@@ -68,7 +68,7 @@ export const TOOLS: readonly ToolDef[] = [
       "replace_all replaces every match. An empty new_string deletes the text. " +
       "Unchanged text keeps its author, except punctuation and spaces between your changes. " +
       "If the match fails, read the note again, because the human may have changed it.",
-    examples: ['ob-provenance edit --path notes/plan.md --old_string "ship in May" --new_string "ship in June" --why agent --agent claude-code', 'ob-provenance edit --path notes/plan.md --old_string "TODO" --stdin new_string --why agent --agent claude-code < section.md'],
+    examples: ['ob-provenance --vault Notes edit --path notes/plan.md --old_string "ship in May" --new_string "ship in June" --why agent --agent claude-code', 'ob-provenance --vault Notes edit --path notes/plan.md --old_string "TODO" --stdin new_string --why agent --agent claude-code < section.md'],
     input: {
       path,
       old_string: z.string(),
@@ -91,7 +91,7 @@ export const TOOLS: readonly ToolDef[] = [
     command: "append",
     op: "append",
     description: "Append text to the end of an existing markdown file. Include any leading newline you need.",
-    examples: ['ob-provenance append --path notes/today.md --text "- Called the dentist." --why human-via-agent --agent claude-code', "ob-provenance append --path notes/today.md --stdin text --why agent --agent claude-code < summary.md"],
+    examples: ['ob-provenance --vault Notes append --path notes/today.md --text "- Called the dentist." --why human-via-agent --agent claude-code', "ob-provenance --vault Notes append --path notes/today.md --stdin text --why agent --agent claude-code < summary.md"],
     input: { path, text: z.string(), why, note },
     request: (a, agent) => ({ op: "append", path: a.path, text: a.text, by: by(a, agent) }),
   }),
@@ -100,7 +100,7 @@ export const TOOLS: readonly ToolDef[] = [
     command: "create",
     op: "create",
     description: "Create a new markdown file and any missing folders. Fails if the file already exists.",
-    examples: ["ob-provenance create --path notes/idea.md --stdin content --why agent --agent claude-code < draft.md"],
+    examples: ["ob-provenance --vault Notes create --path notes/idea.md --stdin content --why agent --agent claude-code < draft.md"],
     input: { path, content: z.string(), why, note },
     request: (a, agent) => ({ op: "create", path: a.path, content: a.content, by: by(a, agent) }),
   }),
@@ -112,7 +112,7 @@ export const TOOLS: readonly ToolDef[] = [
       "Rename or move a markdown file, not a folder, creating any missing folders. Attribution is kept, and nothing records who renamed it. " +
       "Links from other notes update only if the human allows it, and the result says when that's pending. " +
       "Link text rewritten this way becomes author unknown. Requires Obsidian running.",
-    examples: ["ob-provenance rename --from notes/idea.md --to archive/idea.md"],
+    examples: ["ob-provenance --vault Notes rename --from notes/idea.md --to archive/idea.md"],
     input: { from: path, to: path },
     request: ({ from, to }) => ({ op: "rename", from, to }),
   }),
@@ -123,7 +123,7 @@ export const TOOLS: readonly ToolDef[] = [
     description:
       "Delete a markdown file using the vault's deleted-files setting, which may be the system trash, the .trash folder or permanent deletion. " +
       "Nothing records who deleted it, and a restored note loses its attribution. Ask the human first unless they requested this deletion. Requires Obsidian running.",
-    examples: ["ob-provenance delete --path notes/idea.md"],
+    examples: ["ob-provenance --vault Notes delete --path notes/idea.md"],
     input: { path },
     annotations: { destructiveHint: true },
     request: ({ path }) => ({ op: "delete", path }),
@@ -133,7 +133,7 @@ export const TOOLS: readonly ToolDef[] = [
     command: "links",
     op: "links",
     description: "List the existing notes and attachments this note links to. Links to missing notes are left out. Requires Obsidian running.",
-    examples: ["ob-provenance links --path notes/today.md"],
+    examples: ["ob-provenance --vault Notes links --path notes/today.md"],
     input: { path },
     annotations: { readOnlyHint: true },
     request: ({ path }) => ({ op: "links", path }),
@@ -143,7 +143,7 @@ export const TOOLS: readonly ToolDef[] = [
     command: "backlinks",
     op: "backlinks",
     description: "List notes that link to this note. Requires Obsidian running.",
-    examples: ["ob-provenance backlinks --path notes/today.md"],
+    examples: ["ob-provenance --vault Notes backlinks --path notes/today.md"],
     input: { path },
     annotations: { readOnlyHint: true },
     request: ({ path }) => ({ op: "backlinks", path }),
@@ -156,7 +156,7 @@ export const TOOLS: readonly ToolDef[] = [
       "Search note contents and paths. This is not regex or Obsidian search syntax, and quotes are literal. " +
       "Matching ignores case, and every space-separated word must appear as a substring, either all in the path or all in the content. " +
       "Returns paths only, at most 50, with no sign of truncation. If you get 50, use a narrower query. Requires Obsidian running.",
-    examples: ['ob-provenance search --query "quarterly plan"'],
+    examples: ['ob-provenance --vault Notes search --query "quarterly plan"'],
     input: { query: z.string() },
     annotations: { readOnlyHint: true },
     request: ({ query }) => ({ op: "search", query }),
@@ -169,7 +169,7 @@ export const TOOLS: readonly ToolDef[] = [
       "Return the path of today's daily note without creating it. Use this instead of guessing the path. " +
       "If the note doesn't exist yet, a second line says (not created yet). " +
       "Fails if the Daily notes plugin is off or its folder doesn't exist. Requires Obsidian running.",
-    examples: ["ob-provenance daily"],
+    examples: ["ob-provenance --vault Notes daily"],
     input: {},
     annotations: { readOnlyHint: true },
     request: () => ({ op: "daily" }),
@@ -182,7 +182,7 @@ export const TOOLS: readonly ToolDef[] = [
       "Create today's daily note from the vault's template and return its path. Does nothing if it already exists. " +
       "Call this only when you are about to write to the note, because an empty note clutters the human's vault. " +
       "Template text starts as author unknown. Fails if the Daily notes plugin is off, or its folder or template doesn't exist. Requires Obsidian running.",
-    examples: ["ob-provenance create-daily"],
+    examples: ["ob-provenance --vault Notes create-daily"],
     input: {},
     request: () => ({ op: "daily", create: true }),
   }),
