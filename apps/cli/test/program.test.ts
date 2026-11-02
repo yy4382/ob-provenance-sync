@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { instructions, TOOLS, type ToolDef } from "@provenance/tools";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildProgram, type Target } from "../src/program";
@@ -197,6 +198,13 @@ describe("ob-provenance activities", () => {
   it("spells a two-word flag with a dash, and only that way", async () => {
     expect((await run("activities", "--since", "2h", "--skip-unknown")).call?.input).toMatchObject({ include_unknown: false });
     expect((await run("activities", "--since", "2h", "--skipUnknown")).error?.code).toBe("commander.unknownOption");
+  });
+
+  it("parses every form the README documents", async () => {
+    const readme = readFileSync(new URL("../../../README.md", import.meta.url), "utf8");
+    const forms = readme.split("\n").filter((line) => line.startsWith("ob-provenance ") && line.includes(" activities "));
+    expect(forms).toHaveLength(4);
+    for (const form of forms) expect((await run(...words(form).slice(1))).call?.t.command, form).toBe("activities");
   });
 
   it("leaves flags spelled with an underscore as they were", async () => {
