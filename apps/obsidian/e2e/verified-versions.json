@@ -1,14 +1,14 @@
 {
   "1.14.4": {
     "date": "2026-11-02",
-    "commit": "d81000eeb9c5203a8812dcb9f45469d9579d1b9f"
+    "commit": "945147bf5d79a23df09f4ea01eaec25f72fb1979"
   },
   "1.14.5": {
     "date": "2026-11-02",
-    "commit": "d81000eeb9c5203a8812dcb9f45469d9579d1b9f"
+    "commit": "945147bf5d79a23df09f4ea01eaec25f72fb1979"
   },
   "1.15.0": {
     "date": "2026-11-02",
-    "commit": "43f39bcd5ce9c4dd4f04ca1abc07bf65cf650182"
+    "commit": "945147bf5d79a23df09f4ea01eaec25f72fb1979"
   }
 }
