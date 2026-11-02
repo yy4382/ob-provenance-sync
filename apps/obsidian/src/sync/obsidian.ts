@@ -140,7 +140,28 @@ export function httpBlobs(baseUrl: string, vault: string, token: string): Blobs 
   };
 }
 
+const storedPrefix = (app: App) => `provenance-sync/${deviceVaultId(app)}/`;
+
 export function indexedDbPersistence(app: App) {
-  const prefix = `provenance-sync/${deviceVaultId(app)}`;
-  return (name: string, doc: Y.Doc): Persistence => new IndexeddbPersistence(`${prefix}/${name}`, doc);
+  const prefix = storedPrefix(app);
+  return (name: string, doc: Y.Doc): Persistence => new IndexeddbPersistence(`${prefix}${name}`, doc);
+}
+
+/** The databases behind `indexedDbPersistence`. Not every WebKit can list them. */
+export function indexedDbStored(app: App) {
+  const prefix = storedPrefix(app);
+  return {
+    async names() {
+      if (!("databases" in indexedDB)) return null;
+      const all = await indexedDB.databases();
+      return all.flatMap(({ name }) => (name?.startsWith(prefix) ? [name.slice(prefix.length)] : []));
+    },
+    drop(name: string) {
+      return new Promise<void>((resolve, reject) => {
+        const request = indexedDB.deleteDatabase(`${prefix}${name}`);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error ?? new Error(`couldn't delete ${name}`));
+      });
+    },
+  };
 }

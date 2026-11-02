@@ -35,10 +35,12 @@ export const PRE_EVERY = 5 * 60_000;
 export const WEEK = 7 * 24 * 60 * 60_000;
 export const DAY = 24 * 60 * 60_000;
 export const HISTORY_DAYS = 365;
+/** A device's journal is a cache of recent weeks, so offline edits keep their times, authors and versions. */
+export const LOCAL_HISTORY_DAYS = 30;
 
 export const weekOf = (at: number): number => Math.floor(at / WEEK);
 export const entriesOf = (doc: Y.Doc): Y.Array<Entry> => doc.getArray<Entry>("entries");
-/** The oldest week a host keeps and reads. */
+/** The oldest week a host keeps. Weeks go whole, so a host keeps at least `days`. */
 export const oldestWeek = (historyDays: number, now: number): number => weekOf(now - historyDays * DAY);
 
 const entrySchema = z.discriminatedUnion("t", [

@@ -3,18 +3,21 @@ import {
   adoptText,
   agentProvenance,
   conflictPath,
+  DAY,
   difference,
   entriesOf,
   errorMessage,
   fileDocName,
   hasState,
-  HISTORY_DAYS,
   humanProvenance,
   indexDocName,
   isMarkdownPath,
   journalDocName,
+  journalWeekOf,
+  LOCAL_HISTORY_DAYS,
   markNote,
   newFileId,
+  oldestWeek,
   OpError,
   pairRenames,
   parseEntries,
@@ -73,8 +76,10 @@ export interface EngineOptions {
   /** Absent when no server is configured: provenance still works, it just doesn't leave this device. */
   server?: { url: string; token: string; blobs: Blobs; WebSocketPolyfill?: unknown };
   persist?: (name: string, doc: Y.Doc) => Persistence;
-  /** Days of the journal this device reads back. Defaults to HISTORY_DAYS. */
-  historyDays?: number;
+  /** The documents behind `persist`. `names` is null where the host can't list them. */
+  stored?: { names(): Promise<string[] | null>; drop(name: string): Promise<void> };
+  /** Days of history this device keeps offline, read as it's needed. It never limits what a read returns. Defaults to LOCAL_HISTORY_DAYS. */
+  localHistoryDays?: () => number;
   onStatus?: (status: SyncStatus) => void;
   onEvent?: (event: SyncEvent) => void;
 }
@@ -501,9 +506,8 @@ export class SyncEngine implements VaultDocs {
   private thisWeek: OpenWeek | null = null;
   /** Weeks this device may hold entries for that the server hasn't confirmed. A past week has no open provider to send them. */
   private unsentWeeks = new Set<number>();
-  /** A socket takes one provider per document, so readers of one past week share its read. */
-  private readonly weekReads = new Map<number, Promise<{ entries: Entry[]; complete: boolean }>>();
   private stopRecordingIndex: () => void = () => {};
+  private weekDropTimer: ReturnType<typeof setInterval> | null = null;
   started = false;
 
   constructor(readonly opts: EngineOptions) {
@@ -543,9 +547,9 @@ export class SyncEngine implements VaultDocs {
     this.opts.onEvent?.({ level, message, ...(path === undefined ? {} : { path }) });
   }
 
-  connect(name: string, document: Y.Doc): HocuspocusProvider | null {
+  connect(name: string, document: Y.Doc, sessionAwareness = false): HocuspocusProvider | null {
     if (!this.socket) return null;
-    const provider = new HocuspocusProvider({ websocketProvider: this.socket, name, document, token: this.opts.server!.token });
+    const provider = new HocuspocusProvider({ websocketProvider: this.socket, name, document, token: this.opts.server!.token, sessionAwareness });
     provider.attach();
     return provider;
   }
@@ -599,6 +603,8 @@ export class SyncEngine implements VaultDocs {
     this.unsentWeeks = new Set(((await this.indexPersistence?.get(UNSENT_WEEKS_KEY)) ?? []) as number[]);
     this.enterWeek(weekOf(Date.now()));
     await this.thisWeek!.persistence?.whenSynced;
+    void this.dropOldWeeks();
+    this.weekDropTimer = setInterval(() => void this.dropOldWeeks(), DAY);
     this.stopRecordingIndex = this.recorder.watchIndex(this.vaultIndex.files);
     this.recorder.paused = Object.keys(lastSeen).length === 0;
     await this.enqueue(() => this.scanDisk(lastSeen));
@@ -1274,10 +1280,6 @@ export class SyncEngine implements VaultDocs {
     return out;
   }
 
-  get historyDays(): number {
-    return this.opts.historyDays ?? HISTORY_DAYS;
-  }
-
   /** The queue keeps a tree pass from opening a note in the moment a peek closes it. */
   peekText<T>(id: FileId, fn: (ytext: Y.Text) => T): Promise<T | null> {
     const peek = () => this.peek(id, (file) => fn(file.ytext));
@@ -1296,27 +1298,40 @@ export class SyncEngine implements VaultDocs {
     return { week, doc, persistence: this.opts.persist?.(name, doc) ?? null, provider: null };
   }
 
-  private pastWeek(n: number): Promise<{ entries: Entry[]; complete: boolean }> {
-    let read = this.weekReads.get(n);
-    if (!read) {
-      read = this.readPastWeek(n).finally(() => this.weekReads.delete(n));
-      this.weekReads.set(n, read);
-    }
-    return read;
-  }
-
   /** A past week, open for as long as it takes to read it, and to send what the server is missing. */
-  private async readPastWeek(n: number): Promise<{ entries: Entry[]; complete: boolean }> {
-    const week = this.openWeek(n);
+  private async pastWeek(n: number): Promise<{ entries: Entry[]; complete: boolean }> {
+    // Outside the cache there's no persistence, so reading old history doesn't refill it.
+    const week = this.keepsWeek(n) ? this.openWeek(n) : { week: n, doc: new Y.Doc({ gc: false }), persistence: null, provider: null };
     try {
       await week.persistence?.whenSynced;
       // This week's provider answers for the server. Waiting on each past week would use up a read while offline.
-      if (this.isConnected) week.provider = this.connect(journalDocName(this.opts.vault, n), week.doc);
+      // Each read gets a session of its own: on one socket, a provider opened as the last one closes loses its handshake to the closing connection.
+      if (this.isConnected) week.provider = this.connect(journalDocName(this.opts.vault, n), week.doc, true);
       const sent = week.provider ? await within(acknowledged(week.provider).then(() => true), OPEN_WAIT, false) : false;
       if (sent) this.confirmSent(n);
       return { entries: parseEntries(entriesOf(week.doc).toArray()), complete: !this.socket || sent };
     } finally {
       closeWeek(week);
+    }
+  }
+
+  /** A week the server hasn't confirmed stays whatever its age: here may be its only copy. */
+  private keepsWeek(n: number): boolean {
+    return this.unsentWeeks.has(n) || n >= oldestWeek(this.opts.localHistoryDays?.() ?? LOCAL_HISTORY_DAYS, Date.now());
+  }
+
+  /** Drops weeks past this device's limit from its storage, always whole. The server still has them, and a read goes through to it. */
+  async dropOldWeeks(): Promise<void> {
+    const { stored, vault } = this.opts;
+    if (!stored) return;
+    try {
+      const names = (await stored.names()) ?? this.vaultIndex.weeks().map((week) => journalDocName(vault, week));
+      for (const name of names) {
+        const week = journalWeekOf(name);
+        if (week !== null && name === journalDocName(vault, week) && !this.keepsWeek(week)) await stored.drop(name);
+      }
+    } catch (e) {
+      this.log("warn", `Couldn't drop old history from this device: ${errorMessage(e)}`);
     }
   }
 
@@ -1332,10 +1347,10 @@ export class SyncEngine implements VaultDocs {
     if (this.thisWeek) closeWeek(this.thisWeek);
     const open = this.openWeek(week);
     this.thisWeek = open;
-    open.provider = this.connect(journalDocName(this.opts.vault, week), open.doc);
-    if (!open.provider) return;
     this.unsentWeeks.add(week);
     this.saveUnsentWeeks();
+    open.provider = this.connect(journalDocName(this.opts.vault, week), open.doc);
+    if (!open.provider) return;
     void synced(open.provider).then(() => {
       for (const past of this.unsentWeeks) if (past !== week) void this.pastWeek(past);
     });
@@ -1371,6 +1386,7 @@ export class SyncEngine implements VaultDocs {
   destroy(): void {
     if (this.treeTimer) clearTimeout(this.treeTimer);
     if (this.mirrorTimer) clearTimeout(this.mirrorTimer);
+    if (this.weekDropTimer) clearInterval(this.weekDropTimer);
     for (const f of this.files.values()) f.destroy();
     this.files.clear();
     this.stopRecordingIndex();

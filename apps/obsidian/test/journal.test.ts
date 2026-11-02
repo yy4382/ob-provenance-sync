@@ -1,4 +1,4 @@
-import { handleOpRequest, newFileId, textAt, weekOf, WEEK, type EditEntry, type Entry, type TreeEntry } from "@provenance/core";
+import { DAY, handleOpRequest, journalDocName, newFileId, textAt, weekOf, WEEK, type EditEntry, type Entry, type TreeEntry } from "@provenance/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { startDeafServer, startOldServer } from "../../server/test/old-server";
@@ -14,7 +14,7 @@ afterEach(async () => {
 const noBlobs = { put: async () => {}, get: async () => new ArrayBuffer(0) };
 
 function device(name: string, url: string | null, disk = new MemoryDisk(), store = new MemoryStore()) {
-  const engine = new SyncEngine({ vault: "v", author: `human:${name}`, device: name, disk, persist: store.persist, ...(url ? { server: { url, token: TOKEN, blobs: noBlobs } } : {}) });
+  const engine = new SyncEngine({ vault: "v", author: `human:${name}`, device: name, disk, persist: store.persist, stored: store.stored, ...(url ? { server: { url, token: TOKEN, blobs: noBlobs } } : {}) });
   disk.engine = engine;
   stopped.push(() => engine.destroy());
   return { engine, disk, store };
@@ -179,6 +179,29 @@ describe("peekText", () => {
   });
 });
 
+describe("peekText on a device that never held the note", () => {
+  it("reads it straight after each other, as a history and then a read would", async () => {
+    const s = await server();
+    const { ws } = s;
+    const a = device("a", ws);
+    a.disk.files.set("n.md", "gone soon\n");
+    await a.engine.start();
+    await a.engine.settle();
+    const id = idOf(a.engine, "n.md");
+    const read = () =>
+      fetch(`${s.http}/api/vaults/v/ops`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` }, body: JSON.stringify({ op: "read", path: "n.md" }) }).then((r) => r.json());
+    await eventually(async () => expect(await read()).toMatchObject({ result: { content: "gone soon\n" } }));
+    await a.disk.trash("n.md");
+    await a.engine.settle();
+
+    const fresh = device("r", ws);
+    await fresh.engine.start();
+    await fresh.engine.settle();
+    await eventually(() => expect(fresh.engine.vaultIndex.get(id)).toBeUndefined());
+    for (let i = 0; i < 3; i++) expect(await fresh.engine.peekText(id, (t) => t.toString())).toBe("gone soon\n");
+  });
+});
+
 describe("an old server, which refuses journal documents", () => {
   async function oldServer() {
     const { url, close } = await startOldServer();
@@ -264,6 +287,23 @@ describe("confirming a week", () => {
     expect(await store.unsentWeeks("v")).toContain(week);
   });
 
+  it("serves one past week to reads straight after each other", async () => {
+    const store = new MemoryStore();
+    const disk = new MemoryDisk();
+    const week = await pastWeekHeldBy(store, disk);
+    vi.useFakeTimers({ toFake: ["Date"], now: (week + 1) * WEEK + 60_000 });
+    const { ws } = await server();
+    const after = device("a", ws, disk, store);
+    await after.engine.start();
+    await after.engine.settle();
+    await eventually(() => expect(after.engine.isConnected).toBe(true));
+    for (let i = 0; i < 5; i++) {
+      const started = performance.now();
+      const read = await after.engine.week(week);
+      expect(read.complete, `read ${i} after ${Math.round(performance.now() - started)} ms`).toBe(true);
+    }
+  });
+
   it("serves two reads of one past week at once", async () => {
     const store = new MemoryStore();
     const disk = new MemoryDisk();
@@ -277,6 +317,209 @@ describe("confirming a week", () => {
     const [one, two] = await Promise.all([after.engine.week(week), after.engine.week(week)]);
     expect(edits(one.entries)).toHaveLength(1);
     expect(two).toEqual(one);
+  });
+});
+
+describe("what a device keeps", () => {
+  const MINUTE = 60_000;
+  const docOf = (week: number) => journalDocName("v", week);
+
+  /** A note edited once a week for `weeks` weeks, on a device left running against `ws`. Ends with the clock on the last edit. */
+  async function editedWeekly(ws: string, weeks: number, store = new MemoryStore()) {
+    const first = weekOf(Date.now());
+    vi.useFakeTimers({ toFake: ["Date"], now: first * WEEK + 60 * MINUTE });
+    const a = device("a", ws, new MemoryDisk(), store);
+    a.disk.files.set("n.md", "start\n");
+    await a.engine.start();
+    await a.engine.settle();
+    await eventually(() => expect(a.engine.isConnected).toBe(true));
+    for (let i = 0; i < weeks; i++) {
+      vi.setSystemTime((first + i) * WEEK + 120 * MINUTE);
+      await a.disk.write("n.md", `week ${i}\n`);
+      await a.engine.settle();
+      await eventually(async () => expect(edits((await a.engine.week(first + i)).entries)).toHaveLength(1));
+    }
+    return { a, first, store };
+  }
+
+  it("keeps an unsent week past its limit, sends it on reconnect, and only then drops it", async () => {
+    const refusing = await startOldServer();
+    stopped.push(refusing.close);
+    const store = new MemoryStore();
+    const disk = new MemoryDisk();
+    const week = weekOf(Date.now());
+    const before = device("a", refusing.url, disk, store);
+    disk.files.set("n.md", "hello\n");
+    await before.engine.start();
+    await before.engine.settle();
+    await disk.write("n.md", "hello\nagain\n");
+    await before.engine.settle();
+    expect(store.holds(docOf(week))).toBe(true);
+
+    vi.useFakeTimers({ toFake: ["Date"], now: week * WEEK + 60 * DAY });
+    await before.engine.dropOldWeeks();
+    expect(store.holds(docOf(week))).toBe(true);
+    before.engine.destroy();
+
+    const { ws } = await server();
+    const after = device("a", ws, disk, store);
+    await after.engine.start();
+    await after.engine.settle();
+    await eventually(async () => expect(await store.unsentWeeks("v")).not.toContain(week));
+    expect(store.holds(docOf(week))).toBe(true);
+
+    await after.engine.dropOldWeeks();
+    expect(store.holds(docOf(week))).toBe(false);
+    const reader = device("r", ws);
+    await reader.engine.start();
+    await reader.engine.settle();
+    await eventually(async () => expect(edits(await entries(reader.engine, week))).toHaveLength(1));
+  });
+
+  it("doesn't drop a week the server answered for but never acknowledged", async () => {
+    const refusing = await startOldServer();
+    stopped.push(refusing.close);
+    const store = new MemoryStore();
+    const disk = new MemoryDisk();
+    const week = weekOf(Date.now());
+    const before = device("a", refusing.url, disk, store);
+    disk.files.set("n.md", "hello\n");
+    await before.engine.start();
+    await before.engine.settle();
+    await disk.write("n.md", "hello\nagain\n");
+    await before.engine.settle();
+    before.engine.destroy();
+
+    vi.useFakeTimers({ toFake: ["Date"], now: week * WEEK + 60 * DAY });
+    const deaf = await startDeafServer();
+    stopped.push(deaf.close);
+    const after = device("a", deaf.url, disk, store);
+    await after.engine.start();
+    await after.engine.settle();
+    await eventually(() => expect(after.engine.isConnected).toBe(true));
+    await after.engine.week(week);
+    await after.engine.dropOldWeeks();
+    expect(store.holds(docOf(week))).toBe(true);
+  });
+
+  it("keeps every week in a vault with no server, which has no other copy", async () => {
+    const store = new MemoryStore();
+    const week = weekOf(Date.now());
+    const a = device("a", null, new MemoryDisk(), store);
+    a.disk.files.set("n.md", "hello\n");
+    await a.engine.start();
+    await a.engine.settle();
+    await a.disk.write("n.md", "hello\nagain\n");
+    await a.engine.settle();
+    vi.useFakeTimers({ toFake: ["Date"], now: week * WEEK + 400 * DAY });
+    await a.engine.dropOldWeeks();
+    expect(store.holds(docOf(week))).toBe(true);
+    expect(edits(await entries(a.engine, week))).toHaveLength(1);
+  });
+
+  it("drops weeks whole, once past the limit, and touches no note", async () => {
+    const { ws } = await server();
+    const { a, first, store } = await editedWeekly(ws, 10);
+    const id = idOf(a.engine, "n.md");
+    await eventually(() => expect(a.engine.isConnected).toBe(true));
+    for (let n = first; n < first + 9; n++) await a.engine.week(n);
+    await eventually(async () => expect((await store.unsentWeeks("v")).filter((w) => w < first + 9)).toEqual([]));
+    await a.engine.dropOldWeeks();
+    expect(store.holds(docOf(first))).toBe(false);
+    expect(store.holds(docOf(first + 3))).toBe(false);
+    expect(store.holds(docOf(first + 4))).toBe(true);
+    expect(store.holds(docOf(first + 9))).toBe(true);
+    expect(store.holds(`v/md/${id}`)).toBe(true);
+    expect(a.disk.files.get("n.md")).toBe("week 9\n");
+  });
+
+  it("reads a week outside its limit through from the server, and stores nothing of it", async () => {
+    const { ws } = await server();
+    const { a, first, store } = await editedWeekly(ws, 10);
+    await eventually(() => expect(a.engine.isConnected).toBe(true));
+    for (let n = first; n < first + 9; n++) await a.engine.week(n);
+    await a.engine.dropOldWeeks();
+    expect(store.holds(docOf(first))).toBe(false);
+
+    const read = await a.engine.week(first);
+    expect(edits(read.entries)).toHaveLength(1);
+    expect(read.complete).toBe(true);
+    expect(store.holds(docOf(first))).toBe(false);
+    expect((await store.stored.names()).includes(docOf(first))).toBe(false);
+  });
+
+  it("caches a week inside its limit that it didn't have, because that's what the cache is for", async () => {
+    const { ws } = await server();
+    const { first } = await editedWeekly(ws, 3);
+    const store = new MemoryStore();
+    const r = device("r", ws, new MemoryDisk(), store);
+    await r.engine.start();
+    await r.engine.settle();
+    await eventually(() => expect(r.engine.isConnected).toBe(true));
+    await r.engine.week(first);
+    expect(store.holds(docOf(first))).toBe(true);
+  });
+
+  it("gives the same answer through the plugin as through the server, whichever weeks it holds", async () => {
+    const s = await server();
+    const { a, first, store } = await editedWeekly(s.ws, 10);
+    await eventually(() => expect(a.engine.isConnected).toBe(true));
+    for (let n = first; n < first + 9; n++) await a.engine.week(n);
+    await a.engine.dropOldWeeks();
+    expect(store.holds(docOf(first))).toBe(false);
+
+    const onServer = (body: unknown) =>
+      fetch(`${s.http}/api/vaults/v/ops`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` }, body: JSON.stringify(body) }).then((r) => r.json());
+    const onPlugin = (req: unknown) => handleOpRequest(a.engine, req);
+    for (const req of [
+      { op: "history", path: "n.md" },
+      { op: "history", path: "n.md", limit: 3, offset: 6, fullDiff: true },
+      { op: "read", path: "n.md", at: first * WEEK + 121 * MINUTE },
+      { op: "read", path: "n.md", at: (first + 2) * WEEK + 121 * MINUTE, provenance: true },
+      { op: "read", path: "n.md", at: Date.now() },
+    ]) {
+      const [here, there] = [await onPlugin(req), await onServer(req)];
+      expect(here).toMatchObject({ ok: true });
+      expect(JSON.parse(JSON.stringify(here))).toEqual(there);
+    }
+    const res = await onPlugin({ op: "history", path: "n.md", limit: 100 });
+    expect(res).toMatchObject({ ok: true, result: { versions: expect.any(Array) } });
+    expect(res.ok && res.result.op === "history" && res.result.versions).toHaveLength(10);
+    expect(await onPlugin({ op: "read", path: "n.md", at: first * WEEK + 121 * MINUTE })).toMatchObject({ result: { content: "week 0\n" } });
+  });
+
+  it("applies a new limit without a restart", async () => {
+    const { ws } = await server();
+    const { first, a, store } = await editedWeekly(ws, 3);
+    await eventually(() => expect(a.engine.isConnected).toBe(true));
+    for (let n = first; n < first + 2; n++) await a.engine.week(n);
+    let days = 30;
+    a.engine.opts.localHistoryDays = () => days;
+    await a.engine.dropOldWeeks();
+    expect(store.holds(docOf(first))).toBe(true);
+    days = 1;
+    await a.engine.dropOldWeeks();
+    expect(store.holds(docOf(first))).toBe(false);
+  });
+
+  it("answers from what it holds when the server is down, and says so", async () => {
+    const s = await startServer();
+    let closed = false;
+    stopped.push(() => (closed ? undefined : s.app.close()));
+    const { a, first, store } = await editedWeekly(s.ws, 10);
+    await eventually(() => expect(a.engine.isConnected).toBe(true));
+    for (let n = first; n < first + 9; n++) await a.engine.week(n);
+    await a.engine.dropOldWeeks();
+    expect(store.holds(docOf(first))).toBe(false);
+    await s.app.close();
+    closed = true;
+    await eventually(() => expect(a.engine.isConnected).toBe(false));
+
+    const res = await handleOpRequest(a.engine, { op: "history", path: "n.md", limit: 100 });
+    expect(res).toMatchObject({ ok: true, result: { incomplete: "server" } });
+    if (!res.ok || res.result.op !== "history") throw new Error("expected history");
+    expect(res.result.versions.length).toBeGreaterThanOrEqual(5);
+    expect(res.result.versions.length).toBeLessThan(10);
   });
 });
 

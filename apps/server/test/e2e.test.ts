@@ -12,6 +12,7 @@ import {
   indexDocName,
   insertText,
   newFileId,
+  oldestWeek,
   TEXT_KEY,
   VaultIndex,
   type FileId,
@@ -31,13 +32,14 @@ afterEach(async () => {
   for (const fn of cleanup.splice(0).reverse()) await fn();
 });
 
-async function start(dataDir?: string) {
+async function start(dataDir?: string, options: { historyDays?: number; seed?: (app: ReturnType<typeof createApp>) => void } = {}) {
   const dir = dataDir ?? (await mkdtemp(join(tmpdir(), "prov-server-")));
   const app = createApp(
     parseConfig({
       host: "127.0.0.1",
       port: 0,
       dataDir: dir,
+      ...(options.historyDays ? { historyDays: options.historyDays } : {}),
       tokens: [
         { role: "device", name: "mac", token: DEVICE_A },
         { role: "device", name: "phone", token: DEVICE_B },
@@ -46,6 +48,7 @@ async function start(dataDir?: string) {
       ],
     }),
   );
+  options.seed?.(app);
   const server = await app.listen();
   const http = `http://127.0.0.1:${server.address.port}`;
   return { app, dir, http, ws: http.replace("http", "ws"), close: () => app.close() };
@@ -82,6 +85,40 @@ const post = (url: string, token: string, body: unknown) =>
   fetch(url, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) }).then(
     async (r) => ({ status: r.status, body: (await r.json()) as Record<string, unknown> }),
   );
+
+describe("keeping history", () => {
+  const state = new Uint8Array([0, 0]);
+
+  it("keeps a year unless told otherwise", () => {
+    expect(parseConfig({ tokens: [{ role: "device", name: "d", token: DEVICE_A }] }).historyDays).toBe(365);
+  });
+
+  it("drops whole journal weeks past the limit as it starts, in every vault, and nothing else", async () => {
+    const oldest = oldestWeek(14, Date.now());
+    const names = {
+      gone: [`v/journal/${oldest - 1}`, `other/journal/${oldest - 1}`, "v/journal/5"],
+      kept: [`v/journal/${oldest}`, `other/journal/${oldest + 1}`, "v/md/abc", "v/index", "v/journal/5/index"],
+    };
+    const s = await start(undefined, {
+      historyDays: 14,
+      seed: (app) => {
+        for (const name of [...names.gone, ...names.kept]) app.storage.storeDocument(name, state);
+      },
+    });
+    cleanup.push(s.close);
+    for (const name of names.gone) expect(s.app.storage.loadDocument(name), name).toBeNull();
+    for (const name of names.kept) expect(s.app.storage.loadDocument(name), name).not.toBeNull();
+  });
+
+  it("goes by the week in the name, not by when a row was last stored", async () => {
+    const s = await start(undefined, { historyDays: 14 });
+    cleanup.push(s.close);
+    const name = `v/journal/${oldestWeek(14, Date.now()) - 1}`;
+    s.app.storage.storeDocument(name, state);
+    s.app.expireHistory();
+    expect(s.app.storage.loadDocument(name)).toBeNull();
+  });
+});
 
 describe("sync server", () => {
   it("syncs attributed text between two devices and persists it across restarts", async () => {

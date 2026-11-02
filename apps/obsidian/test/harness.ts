@@ -8,9 +8,9 @@ import { SyncEngine, type Blobs, type Disk, type Persistence } from "../src/sync
 
 export const TOKEN = "device-token-0123456789";
 
-export async function startServer() {
+export async function startServer(options: { historyDays?: number } = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), "prov-engine-"));
-  const app = createApp(parseConfig({ host: "127.0.0.1", port: 0, dataDir, tokens: [{ role: "device", name: "d", token: TOKEN }] }));
+  const app = createApp(parseConfig({ host: "127.0.0.1", port: 0, dataDir, tokens: [{ role: "device", name: "d", token: TOKEN }], ...options }));
   const server = await app.listen();
   const http = `http://127.0.0.1:${server.address.port}`;
   const blobs = (vault: string): Blobs => ({
@@ -101,6 +101,12 @@ export class MemoryStore {
     };
   };
   unsentWeeks = async (vault: string) => (this.meta.get(`${vault}/index:unsent-weeks`) ?? []) as number[];
+  stored = {
+    names: async () => [...this.updates.keys()],
+    drop: async (name: string) => void this.updates.delete(name),
+  };
+  /** Whether anything was ever written for a document. */
+  holds = (name: string) => (this.updates.get(name)?.length ?? 0) > 0;
 }
 
 export async function eventually(check: () => void | Promise<void>, ms = 4000) {

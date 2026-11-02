@@ -67,7 +67,6 @@ function vault() {
       doc.transact(() => (out = fn(doc.getText(TEXT_KEY))));
       return out;
     },
-    historyDays: 365,
     week: async (n) => {
       weekReads.push(n);
       return { entries: parseEntries(entriesOf(weekDoc(n)).toArray()), complete: true };

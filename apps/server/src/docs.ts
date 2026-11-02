@@ -19,7 +19,6 @@ export class ServerVaultDocs implements VaultDocs {
     private readonly hocuspocus: Hocuspocus,
     private readonly storage: Storage,
     private readonly vault: string,
-    readonly historyDays: number,
   ) {}
 
   private connection(name: string): Promise<DirectConnection> {

@@ -9,7 +9,7 @@ import { codeMirrorOf } from "./quirks";
 import { ReattributeModal, type Attribution, type Reattribution } from "./reattribute";
 import { defaultSettings, ProvenanceSettingTab, type ProvenanceSettings } from "./settings";
 import { SyncEngine, within, type SyncStatus } from "./sync/engine";
-import { httpBlobs, indexedDbPersistence, isSyncedPath, ObsidianDisk, otherSyncs, watchVault } from "./sync/obsidian";
+import { httpBlobs, indexedDbPersistence, indexedDbStored, isSyncedPath, ObsidianDisk, otherSyncs, watchVault } from "./sync/obsidian";
 
 const CHECK_EVERY = 10 * 60_000;
 const OTHER_SYNC_CHECK_EVERY = 5_000;
@@ -308,6 +308,8 @@ export default class ProvenancePlugin extends Plugin {
       device: s.deviceName,
       disk: new ObsidianDisk(this.app),
       persist: indexedDbPersistence(this.app),
+      stored: indexedDbStored(this.app),
+      localHistoryDays: () => this.settings.localHistoryDays,
       onStatus: (status) => this.setStatus(status),
       onEvent: (event) => this.log.add(event),
       ...(base && token

@@ -115,8 +115,6 @@ export interface VaultDocs {
   updateIndex(fn: (index: VaultIndex) => void): Promise<void>;
   readText(id: FileId): Promise<Y.Text>;
   updateText<T>(id: FileId, fn: (ytext: Y.Text) => T): Promise<T>;
-  /** How many days of the journal this host keeps. */
-  readonly historyDays: number;
   /** One week's journal. complete: false when a server exists and couldn't be reached, so this is only what this device holds. */
   week(n: number): Promise<{ entries: Entry[]; complete: boolean }>;
   /** Runs `fn` on a note's text without keeping it open, also for a deleted note. Null if the text can't be had in time. */

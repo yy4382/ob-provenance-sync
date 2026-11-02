@@ -1,4 +1,4 @@
-import { slug } from "@provenance/core";
+import { LOCAL_HISTORY_DAYS, slug } from "@provenance/core";
 import { Notice, Platform, PluginSettingTab, type App, type SettingDefinitionItem } from "obsidian";
 import { claudeCodeCommand, mcpJsonConfig, type LocalMcpCommand } from "./agent-cli";
 import type ProvenancePlugin from "./main";
@@ -11,6 +11,8 @@ export interface ProvenanceSettings {
   vaultId: string;
   humanName: string;
   deviceName: string;
+  /** A number per device: a phone may hold less than a desktop. */
+  localHistoryDays: number;
   showColors: boolean;
   /** Installs ob-provenance and lets agents on this computer reach this vault. Off by default: it puts the device token on disk. */
   agentCli: boolean;
@@ -26,6 +28,7 @@ export function defaultSettings(app: App): ProvenanceSettings {
     vaultId: slug(app.vault.getName()) || "vault",
     humanName: "me",
     deviceName: `${Platform.isMobile ? "mobile" : "desktop"}-${suffix}`,
+    localHistoryDays: LOCAL_HISTORY_DAYS,
     showColors: true,
     agentCli: false,
     lastAgentName: "chatgpt",
@@ -69,6 +72,11 @@ export class ProvenanceSettingTab extends PluginSettingTab {
             name: "Reconnect",
             desc: "Stops syncing, writes pending changes to disk, and starts again with the settings above. It doesn't change your notes. The sync event log shows what happened.",
             action: () => void this.plugin.reconnect(),
+          },
+          {
+            name: "History kept on this device",
+            desc: "Days of note history this device keeps offline. This controls only what this device stores: older history is still available from the server, and deleted text stays in the note's own data.",
+            control: { type: "number", key: "localHistoryDays", min: 0, step: 1 },
           },
         ],
       },

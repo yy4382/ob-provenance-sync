@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { agentIdSchema, parseAgentName, type AgentId } from "@provenance/core";
+import { agentIdSchema, HISTORY_DAYS, parseAgentName, type AgentId } from "@provenance/core";
 import { z } from "zod";
 
 const tokenSchema = z.discriminatedUnion("role", [
@@ -18,6 +18,8 @@ const configSchema = z.object({
   port: z.number().int().default(8787),
   dataDir: z.string().default("./data"),
   maxBlobBytes: z.number().int().positive().default(100 * 1024 * 1024),
+  /** How long note history is kept. The only limit on what a read of history can return. */
+  historyDays: z.number().int().positive().default(HISTORY_DAYS),
   tokens: z.array(tokenSchema).min(1),
 });
 
