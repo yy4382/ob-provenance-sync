@@ -508,6 +508,8 @@ async function changeIn(docs: VaultDocs, c: Candidate, { cut, keep, byLine, full
 
   const before = status === "created" ? "empty" : boundAt(burstsOf(c.mine), cut);
   const after = status === "deleted" ? "empty" : "current";
+  // Comparing the text with itself would pass off an edit as no change at all.
+  if (before === "current" && after === "current" && c.changes.some((e) => e.t === "edit")) return { change: uncounted };
   let hunks: Hunk[] = [];
   // A rename alone leaves the text as it was, and renaming a folder can touch hundreds of notes that needn't be opened.
   if (before !== "current" || after !== "current") {

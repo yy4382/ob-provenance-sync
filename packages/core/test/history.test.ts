@@ -685,6 +685,25 @@ describe("a note edited on two devices", () => {
     phone.append("phone line\n");
     expect(await w.shown(phone.doc)).toEqual([version("phone", 1, 0, "+phone line"), version("laptop", 1, 0, "+laptop line")]);
   });
+
+  it("doesn't take a change it can't size for no change", async () => {
+    const w = devices();
+    const [laptop, desktop, phone] = [w.device("laptop"), w.device("desktop"), w.device("phone")];
+    laptop.append("laptop line\n");
+    pass(2 * MINUTE);
+    desktop.append("desktop line\n");
+    pass(2 * MINUTE);
+    w.merge(laptop, desktop);
+    pass(10 * MINUTE);
+    const since = Date.now();
+    pass(10 * MINUTE);
+    phone.append("phone line\n");
+    pass(MINUTE);
+    w.merge(laptop, phone);
+
+    const { changes } = await activities(w.docs(laptop.doc), { since });
+    expect(changes).toMatchObject([{ path: "a.md", status: "modified", authors: ["human:phone"], added: null, removed: null, preview: "" }]);
+  });
 });
 
 describe("a host that only sees a note during its own writes", () => {

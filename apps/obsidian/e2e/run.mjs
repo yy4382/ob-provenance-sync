@@ -427,13 +427,15 @@ try {
   ob(["append", "--path", "Bulk/n7.md", "--text", "Added here.\n", "--why", "agent", "--agent", "shell-agent"]);
   const olderNote = await lineBecomes("Bulk/n7.md", (c) => c.status === "modified" && c.added === 1 && c.removed === 0);
   check("activities through the plugin shows an edit to an older note", !!olderNote, JSON.stringify(recent()));
-  ob(["rename", "--from", "Bulk/n7.md", "--to", "Cli/activity-moved.md"]);
+  const renameCall = ob(["rename", "--from", "Bulk/n7.md", "--to", "Cli/activity-moved.md"]);
+  check("ob-provenance renames a note", renameCall.status === 0, JSON.stringify(renameCall));
   const renamedLine = await lineBecomes("Cli/activity-moved.md", (c) => c.status === "renamed" && c.from === "Bulk/n7.md" && c.added === 1 && c.authors.includes("agent:shell-agent") && c.authors.includes("unknown"));
   check("activities through the plugin shows a rename under the new path, with the edit's counts", !!renamedLine, JSON.stringify(recent()));
   const renamedVersion = newestVersion("Bulk/n7.md");
   check("history through the plugin follows a rename from the old path", renamedVersion?.status === "renamed" && renamedVersion.path === "Cli/activity-moved.md" && renamedVersion.from === "Bulk/n7.md", JSON.stringify(renamedVersion));
   check("history through the plugin gives the same versions under the new path", JSON.stringify(newestVersion("Cli/activity-moved.md")) === JSON.stringify(renamedVersion), JSON.stringify(newestVersion("Cli/activity-moved.md")));
-  ob(["delete", "--path", "Cli/activity-moved.md"]);
+  const deleteCall = ob(["delete", "--path", "Cli/activity-moved.md"]);
+  check("ob-provenance deletes a note", deleteCall.status === 0, JSON.stringify(deleteCall));
   const gone = await lineBecomes("Bulk/n7.md", (c) => c.status === "deleted" && c.added === 0 && c.removed === 1);
   check("activities through the plugin shows a deletion under the path the range began with", !!gone, JSON.stringify(recent()));
   check("activities through the plugin leaves no line under the renamed path after a deletion", !recentLine("Cli/activity-moved.md"), JSON.stringify(recent()));

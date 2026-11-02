@@ -48,7 +48,7 @@ const historyOutput = z.object({
 
 const change = version.extend({
   at: z.string().describe("When it last changed in the range, to the minute."),
-  path: z.string().describe("Its path now, or its last path if it was deleted."),
+  path: z.string().describe("Its path now, or the path it had as the range began if it was deleted."),
   added: z.number().nullable().describe("Lines added over the range. Null for an attachment, or if this can't be worked out here yet."),
   removed: z.number().nullable().describe("Lines removed over the range. Null for an attachment, or if this can't be worked out here yet."),
   truncated: z.boolean().optional().describe("Part or all of this file's diff was cut."),
