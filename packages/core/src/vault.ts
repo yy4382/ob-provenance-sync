@@ -17,12 +17,20 @@ export const hasState = (doc: Y.Doc) => doc.store.clients.size > 0;
 
 export const indexDocName = (vault: string) => `${vault}/index`;
 export const fileDocName = (vault: string, id: FileId) => `${vault}/md/${id}`;
+export const journalDocName = (vault: string, week: number) => `${vault}/journal/${week}`;
+const JOURNAL_NAME = /^(.+)\/journal\/(\d+)$/;
+
+/** The week of a journal document's name, or null if it isn't one. */
+export function journalWeekOf(name: string): number | null {
+  const week = JOURNAL_NAME.exec(name)?.[2];
+  return week === undefined ? null : Number(week);
+}
 
 export function parseDocName(name: string): { vault: string; id: FileId | null } | null {
   const md = /^(.+)\/md\/([\w-]+)$/.exec(name);
   if (md) return { vault: md[1]!, id: md[2] as FileId };
-  const index = /^(.+)\/index$/.exec(name);
-  return index ? { vault: index[1]!, id: null } : null;
+  const vaultDoc = /^(.+)\/index$/.exec(name) ?? JOURNAL_NAME.exec(name);
+  return vaultDoc ? { vault: vaultDoc[1]!, id: null } : null;
 }
 
 export function newFileId(): FileId {
@@ -30,6 +38,18 @@ export function newFileId(): FileId {
 }
 
 export const isMarkdownPath = (path: string) => path.endsWith(".md");
+
+/** The text `snapshot` names, as a document of its own; null if this replica doesn't hold every update it refers to. */
+export function docAt(doc: Y.Doc, snapshot: Y.Snapshot): Y.Doc | null {
+  for (const [client, clock] of snapshot.sv) if (clock > Y.getState(doc.store, client)) return null;
+  try {
+    return Y.createDocFromSnapshot(doc, snapshot);
+  } catch {
+    return null;
+  }
+}
+
+export const textAt = (doc: Y.Doc, snapshot: Y.Snapshot): string | null => docAt(doc, snapshot)?.getText(TEXT_KEY).toJSON() ?? null;
 
 /**
  * The first of `paths` that a new note at `path` can't sit beside, or null. A
@@ -57,9 +77,21 @@ export function pathClash(paths: string[], path: string): string | null {
  */
 export class VaultIndex {
   readonly files: Y.Map<FileEntry>;
+  /** Which weeks have a journal, so a reader never opens, and so creates, a document for a week nobody wrote to. */
+  private readonly journalWeeks: Y.Map<true>;
 
   constructor(readonly doc: Y.Doc) {
     this.files = doc.getMap<FileEntry>("files");
+    this.journalWeeks = doc.getMap<true>("journal");
+  }
+
+  markJournalWeek(week: number): void {
+    if (!this.journalWeeks.has(String(week))) this.journalWeeks.set(String(week), true);
+  }
+
+  /** Newest first. */
+  weeks(): number[] {
+    return [...this.journalWeeks.keys()].map(Number).sort((a, b) => b - a);
   }
 
   get(id: FileId): FileEntry | undefined {

@@ -17,6 +17,7 @@ import {
   repairedConflictPath,
   setText,
   TEXT_KEY,
+  textAt,
   unknownProvenance,
   VaultIndex,
   type FileEntry,
@@ -99,15 +100,6 @@ export async function sha256(data: ArrayBuffer): Promise<string> {
 const BASE_KEY = "disk-base";
 const SAVED_STATES = 64;
 
-/** A snapshot is usable only if the document holds every update it refers to. */
-function textAt(doc: Y.Doc, snapshot: Y.Snapshot): string | null {
-  for (const [client, clock] of snapshot.sv) if (clock > Y.getState(doc.store, client)) return null;
-  try {
-    return Y.createDocFromSnapshot(doc, snapshot).getText(TEXT_KEY).toJSON();
-  } catch {
-    return null;
-  }
-}
 const MIRROR_KEY = "on-disk";
 
 /**
