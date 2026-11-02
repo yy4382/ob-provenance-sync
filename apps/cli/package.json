@@ -1,6 +1,6 @@
 {
   "name": "@provenance/cli",
-  "version": "0.1.0-alpha.11",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "bin": {
