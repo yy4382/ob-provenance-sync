@@ -247,7 +247,6 @@ function boundAt(bursts: Burst[], cut: number): Bound {
   return next ? { pre: next.pre! } : "current";
 }
 
-/** Who made these entries. A rename or a deletion counts as unknown, and creating a note names whoever wrote its first text. */
 function authorsOf(entries: Array<EditEntry | TreeEntry>): AuthorId[] {
   const known = entries.flatMap((e) => (e.t === "edit" && e.by !== "unknown" ? [e.by] : []));
   const unknown = !known.length || entries.some((e) => (e.t === "tree" ? e.from !== null : e.by === "unknown"));
@@ -471,7 +470,6 @@ function removersOf({ changes, move }: Candidate): AuthorId[] {
   return (removing.length ? removing : edits).map((e) => e.by);
 }
 
-/** Only the kept lines of `hunks`, with their sizes recounted. A hunk with no change left goes. */
 function keptHunks(hunks: Hunk[], stays: { added: (line: number) => boolean; removed: boolean }): Hunk[] {
   const kept: Hunk[] = [];
   for (const hunk of hunks) {

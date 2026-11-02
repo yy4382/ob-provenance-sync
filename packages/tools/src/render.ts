@@ -73,7 +73,6 @@ interface Listing {
   place(i: number): number | undefined;
   noun: string;
   empty: string;
-  /** Notes that follow the ones about paging. */
   closing: string[];
 }
 
