@@ -815,7 +815,11 @@ describe("a full diff", () => {
     const lines = (word: string) => Array.from({ length: 3000 }, (_, i) => `${word} ${i}`).join("\n") + "\n";
     await v.create("a.md", lines("old"));
     pass(PRE_EVERY);
-    await v.human(v.index.idOf("a.md")!, lines("new"));
+    // setText would diff every character, which takes seconds and isn't what's being tested.
+    await v.docs.updateText(v.index.idOf("a.md")!, (t) => {
+      t.delete(0, t.length);
+      insertText(t, 0, lines("new"), humanProvenance("human:a", "mac"));
+    });
     const [rewrite] = await versions(v.docs, "a.md", { fullDiff: true });
     expect(rewrite).toMatchObject({ added: 3000, removed: 3000 });
     expect(rewrite!.diff!.startsWith("@@ -1,3000 +1,3000 @@\n-old 0\n")).toBe(true);
