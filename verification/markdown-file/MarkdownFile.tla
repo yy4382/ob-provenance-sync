@@ -173,7 +173,7 @@ ClosePane ==
 \* Obsidian saves the pane's text, possibly just after the pane closed, through vault.modify,
 \* which watchVault (obsidian.ts:47-52) wraps with trackWrite (engine.ts:285-305): the editor state with the
 \* saved text becomes the base as the save lands, and a read it overlapped reads again.
-\* The save fires "modify" (obsidian.ts:36 -> SyncEngine.onModify, engine.ts:1173).
+\* The save fires "modify" (obsidian.ts:36 -> SyncEngine.onModify, engine.ts:1174).
 EditorSave ==
     /\ dirty
     /\ disk' = editorText
@@ -211,8 +211,8 @@ WatcherFires ==
     /\ queue' = Append(queue, "modify")
     /\ UNCHANGED <<doc, pane, base, disk, created, intentDel, extDeletes, timer, pc, held, savedInRead, checks>>
 
-\* SyncEngine.check (engine.ts:1087) finds the file differing from the CRDT, at any time,
-\* and calls onDiskModified in its queued task (engine.ts:1123), like a "modify" event.
+\* SyncEngine.check (engine.ts:1088) finds the file differing from the CRDT, at any time,
+\* and calls onDiskModified in its queued task (engine.ts:1124), like a "modify" event.
 CheckFires ==
     /\ checks < MaxChecks
     /\ checks' = checks + 1
@@ -247,7 +247,7 @@ WriteRuns ==
             /\ queue' = Append(Tail(queue), "modify")                                  \* vault.process fires "modify"
     /\ UNCHANGED <<doc, pane, pendingExt, created, intentDel, extDeletes, timer, pc, held, savedInRead, checks>>
 
-\* onModify -> onDiskModified up to the read's await: engine.ts:1173-1181, 265-271.
+\* onModify -> onDiskModified up to the read's await: engine.ts:1174-1182, 265-271.
 ReadStarts ==
     /\ Next1("modify")
     /\ queue' = Tail(queue)
