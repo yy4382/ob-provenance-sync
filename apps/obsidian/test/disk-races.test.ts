@@ -57,6 +57,23 @@ it("keeps an outside revert to a text the pane once showed", async () => {
   expect(disk.files.get("a.md")).toBe("Base.");
 });
 
+// A click on a task in reading view writes the file with the pane still bound. Unticking
+// puts back a text the pane showed, which matching against those states took for a late
+// save, so the CRDT kept the tick and the next save brought it back.
+it("merges clicks on a task in reading view as the user's, including an untick", async () => {
+  const { engine, disk, file } = await offline("- [ ] Task\n");
+  await file.bindEditor(() => "- [ ] Task\n");
+  await disk.save("a.md", "- [x] Task\n", true);
+  await engine.settle();
+  expect(file.ytext.toJSON()).toBe("- [x] Task\n");
+  const tick = (file.ytext.toDelta() as Array<{ insert: string; attributes: { pa: string } }>).find((d) => d.insert.includes("x"));
+  expect(tick?.attributes.pa).toBe("human:chris");
+  await disk.save("a.md", "- [ ] Task\n", true);
+  await engine.settle();
+  expect(file.ytext.toJSON()).toBe("- [ ] Task\n");
+  expect(disk.files.get("a.md")).toBe("- [ ] Task\n");
+});
+
 // F3: a remote change schedules a write; another program edits the file before the
 // watcher event is handled. A plain write would replace it without looking.
 it("does not write over an outside edit whose modify event is still pending", async () => {

@@ -115,6 +115,12 @@ export async function obsidian({ vault, profile }) {
         for (const ch of text) await call("Input.insertText", { text: ch });
       },
       hover: (x, y) => call("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }),
+      /** Clicks the middle of the active pane's `index`th `selector`, with real mouse events. */
+      async click(selector, index = 0) {
+        const { x, y } = await this.eval(`const r = app.workspace.activeLeaf.view.contentEl.querySelectorAll(${JSON.stringify(selector)})[${index}].getBoundingClientRect();
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2 }`);
+        for (const type of ["mousePressed", "mouseReleased"]) await call("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 });
+      },
       /** Saves a screenshot to $SHOTS/<name>.png when SHOTS is set, for looking at the UI by eye. */
       async shot(name) {
         if (!process.env.SHOTS) return;

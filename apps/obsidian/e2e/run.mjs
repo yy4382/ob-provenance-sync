@@ -123,6 +123,20 @@ async function reattributeVia(cdp, command, marker, { why, agent }) {
   return (await eventually(() => cdp.eval(`return document.querySelector(".notice")?.innerText`))) ?? "no notice";
 }
 
+/** Shows `path` in a pane in Live Preview ("source") or reading view ("preview"), with the cursor off its tasks. */
+async function openInMode(cdp, leaf, path, mode) {
+  await cdp.eval(`const l = ${leaf};
+    await l.setViewState({ type: "markdown", state: { file: ${JSON.stringify(path)}, mode: ${JSON.stringify(mode)}, source: false } });
+    await new Promise((r) => setTimeout(r, 700)); app.workspace.setActiveLeaf(l, { focus: true });
+    l.view.editor.setCursor({ line: 0, ch: 0 }); return true`);
+  await sleep(300);
+}
+
+async function clickTask(cdp, view, index = 0) {
+  await cdp.click(`${view} .task-list-item-checkbox`, index);
+  await sleep(1000);
+}
+
 async function opsCall(body) {
   const res = await fetch(api, { method: "POST", headers: { authorization: `Bearer ${AGENT_TOKEN}` }, body: JSON.stringify(body) });
   return res.json();
@@ -281,6 +295,34 @@ try {
     return r.content[0].text.includes("Target2") ? r.content[0].text : undefined;
   });
   check("the human's answer updates the link", !!relinked);
+  const taskNote = "Intro.\n\n- [ ] Live task\n\n> [!note] Heading\n> Agent line.\n> - [ ] Callout task\n";
+  const agrees = (path) => eventually(async () => (await cdp.eval(`return ${engineFile(path)}?.ytext.toJSON()`)) === readFileSync(join(vault, path), "utf8"));
+  const whole = async (path) => authorsOf(cdp, path, await cdp.eval(`return ${engineFile(path)}.ytext.toJSON()`));
+  await mcpCall("create_file", { path: "Tasks.md", content: taskNote, why: "agent" });
+  await eventually(async () => existsSync(join(vault, "Tasks.md")));
+  await openInMode(cdp, `app.workspace.getLeaf("tab")`, "Tasks.md", "source");
+  await clickTask(cdp, ".markdown-source-view", 0);
+  check("a click on a task in Live Preview is the human's", (await authorsOf(cdp, "Tasks.md", "x")).join() === "human:tester", JSON.stringify(await authorsOf(cdp, "Tasks.md", "x")));
+  await clickTask(cdp, ".markdown-source-view", 1);
+  const calloutAuthors = await authorsOf(cdp, "Tasks.md", "Agent line");
+  check("a click on a task in a callout leaves the callout's text with its author", calloutAuthors.length === 1 && calloutAuthors[0].startsWith("agent:"), JSON.stringify(calloutAuthors));
+  check("clicking tasks adds no unknown text", !(await whole("Tasks.md")).includes("unknown"), JSON.stringify(await whole("Tasks.md")));
+  await agrees("Tasks.md");
+
+  await openInMode(cdp, "app.workspace.activeLeaf", "Tasks.md", "preview");
+  await clickTask(cdp, ".markdown-reading-view", 0);
+  const unticked = await agrees("Tasks.md");
+  check("unticking a task in reading view reaches the note", unticked && (await cdp.eval(`return ${engineFile("Tasks.md")}.ytext.toJSON()`)).includes("- [ ] Live task"), readFileSync(join(vault, "Tasks.md"), "utf8"));
+  await clickTask(cdp, ".markdown-reading-view", 0);
+  check("ticking a task in reading view reaches the note", await agrees("Tasks.md"), readFileSync(join(vault, "Tasks.md"), "utf8"));
+  check("a click on a task in reading view is the human's", !(await whole("Tasks.md")).includes("unknown"), JSON.stringify(await whole("Tasks.md")));
+
+  await openInMode(cdp, "app.workspace.activeLeaf", "Tasks.md", "source");
+  await cdp.eval(`app.workspace.activeEditor.editor.replaceRange("y", { line: 0, ch: 0 }); return true`);
+  await sleep(500);
+  check("another plugin's edit stays unknown", (await authorsOf(cdp, "Tasks.md", "y")).join() === "unknown", JSON.stringify(await authorsOf(cdp, "Tasks.md", "y")));
+  await cdp.eval(`app.workspace.activeLeaf.detach(); return true`);
+
   const setDaily = (options) => cdp.eval(`app.internalPlugins.getEnabledPluginById("daily-notes").options = ${JSON.stringify(options)}; return true`);
   const daily = await mcpCall("get_daily_note", {});
   const [dailyPath, dailyPending] = daily.content[0].text.split("\n");
@@ -563,7 +605,7 @@ try {
   const files = await eventually(async () => {
     const r = await opsCall({ op: "list" });
     const notes = r.result.files.filter(
-      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Linker.md", "DailyTemplate.md"].includes(f),
+      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Linker.md", "DailyTemplate.md", "Tasks.md"].includes(f),
     );
     return notes.join(",") === "Projects/Renamed.md" ? notes : undefined;
   }, 15000);

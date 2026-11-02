@@ -60,7 +60,7 @@ export class MemoryDisk implements Disk {
     return true;
   }
   /** An editor's save: vault.modify, which the plugin wraps with trackWrite. */
-  save(path: string, text: string) {
+  save(path: string, text: string, _byUser = false) {
     return this.engine!.trackWrite(path, text, () => this.write(path, text));
   }
   async writeBinary(path: string, data: ArrayBuffer) {
