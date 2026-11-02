@@ -29,6 +29,12 @@ describe("instructions", () => {
     expect(instructions("full")).toContain("why=human-via-agent");
     expect(instructions("full")).not.toContain("--agent");
   });
+
+  it("names the recent changes tool on every surface, in its own terms", () => {
+    expect(instructions("cli")).toContain("use activities with --since <time>");
+    expect(instructions("full")).toContain("use list_recent_changes with since=<time>");
+    expect(instructions("limited")).toContain("use list_recent_changes with since=<time>");
+  });
 });
 
 describe("parseTime", () => {
@@ -109,6 +115,84 @@ describe("a note's history", () => {
     const at = Date.parse("2026-11-02T06:05:00Z");
     expect(render({ ok: true, result: { op: "read", content: "text", incomplete: "record", recordStart: at } }).text).toBe(`text\n\nnote: this note's history starts at ${stamp(at)}, so this is its earliest recorded text and it may have differed at that time.`);
     expect(render({ ok: true, result: { op: "read", content: "text", incomplete: "record" } }).text).toBe("text\n\nnote: nothing is recorded for this note, so this is its current text and it may have differed at that time.");
+  });
+});
+
+describe("recent changes", () => {
+  const at = Date.parse("2026-11-02T06:05:00Z");
+  const time = stamp(at);
+  const base = { at, authors: ["human:a" as const], path: "a.md", status: "modified" as const, added: 2, removed: 1, preview: "+ new - old" };
+  const tool = TOOLS.find((t) => t.op === "activities")!;
+  const answer = (result: object) => render({ ok: true, result: { op: "activities", changes: [], offsets: [], ...result } });
+
+  it("prints one line per file, in the same form as a note's versions", () => {
+    expect(
+      answer({
+        changes: [
+          base,
+          { ...base, path: "b.md", from: "a.md", status: "renamed", authors: ["unknown"], added: 0, removed: 0, preview: "" },
+          { ...base, status: "deleted", added: 0, removed: 3, preview: "- gone" },
+          { ...base, added: null, removed: null, preview: "" },
+        ],
+      }).text,
+    ).toBe([`${time}  a.md  human:a  +2 -1  + new - old`, `${time}  a.md -> b.md  unknown  +0 -0`, `${time}  a.md (deleted)  human:a  +0 -3  - gone`, `${time}  a.md  human:a  +? -?`].join("\n"));
+  });
+
+  it("prints binary in place of an attachment's counts", () => {
+    expect(answer({ changes: [{ ...base, path: "p.png", authors: ["unknown"], added: null, removed: null, preview: "", binary: true }] }).text).toBe(`${time}  p.png  unknown  binary`);
+  });
+
+  it("puts hunks under a file in place of its preview", () => {
+    expect(answer({ changes: [{ ...base, diff: "@@ -1,1 +1,1 @@\n-old\n+new" }] }).text).toBe(`${time}  a.md  human:a  +2 -1\n@@ -1,1 +1,1 @@\n-old\n+new\n`);
+  });
+
+  it("says when nothing changed", () => {
+    expect(answer({}).text).toBe("(no changes in this time)");
+  });
+
+  it("says what to pass next, what cut an answer short, and where the record starts", () => {
+    expect(answer({ changes: [base], next_offset: 7 }).text).toBe(`${time}  a.md  human:a  +2 -1  + new - old\nnote: more changes exist. Pass offset 7 to see them.`);
+    expect(answer({ incomplete: "server" }).text).toContain("other devices' changes may be missing");
+    expect(answer({ incomplete: "time" }).text).toContain("older changes may be missing");
+    expect(answer({ recordStart: at }).text).toBe(`(no changes in this time)\nnote: the record starts at ${time}, so nothing older is shown.`);
+  });
+
+  it("gives structured output that matches what the tool declares, with times stamped", () => {
+    const { structured } = answer({ changes: [{ ...base, binary: true }], offsets: [3], next_offset: 4, incomplete: "time", recordStart: at });
+    expect(structured).toEqual({ changes: [{ ...base, binary: true, at: time }], next_offset: 4, incomplete: "time", record_start: time });
+    expect(tool.output!.safeParse(structured).success).toBe(true);
+  });
+
+  const capped = (changes: object[], result: object) =>
+    runTool(tool, { since: "2h", full_diff: true }, { ops: async () => ({ ok: true, result: { op: "activities", changes, ...result } as never }), agent: null, noAgent: "", diffChars: MCP_DIFF_CHARS });
+
+  it("resumes a capped page at the file after the cut, past files with no net change", async () => {
+    const res = await capped(
+      [{ ...base, diff: "a".repeat(20_000) }, { ...base, diff: "b".repeat(20_000) }, { ...base, diff: "c".repeat(20_000) }],
+      { offsets: [10, 12, 15], next_offset: 16 },
+    );
+    expect(res.structured).toMatchObject({ next_offset: 15 });
+    expect(res.text).toContain("Pass offset 15");
+  });
+
+  it("carries on after the page when the cut falls on its last file", async () => {
+    const res = await capped([{ ...base, diff: "a".repeat(40_000) }], { offsets: [10], next_offset: 13 });
+    expect(res.structured).toMatchObject({ next_offset: 13 });
+    expect(await capped([{ ...base, diff: "a".repeat(40_000) }], { offsets: [10] }).then((r) => r.structured)).not.toHaveProperty("next_offset");
+  });
+
+  it("asks only for what it was given, and always for a time", () => {
+    expect(tool.request({ since: "2026-11-02T14:05+08:00" } as never, "agent:x")).toEqual({ op: "activities", since: Date.parse("2026-11-02T14:05+08:00") });
+    expect(tool.request({ since: "2026-11-02T14:05+08:00", authors: [], include_unknown: true } as never, "agent:x")).toEqual({ op: "activities", since: Date.parse("2026-11-02T14:05+08:00") });
+    expect(tool.request({ since: "2026-11-02T14:05+08:00", authors: ["human:a"], include_unknown: false, limit: 5, offset: 2, full_diff: true } as never, "agent:x")).toEqual({
+      op: "activities",
+      since: Date.parse("2026-11-02T14:05+08:00"),
+      authors: ["human:a"],
+      skipUnknown: true,
+      limit: 5,
+      offset: 2,
+      fullDiff: true,
+    });
   });
 });
 

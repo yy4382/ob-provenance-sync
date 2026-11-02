@@ -1,4 +1,4 @@
-import type { HistoryResult, Incomplete, NoteVersion, OpErrorCode, OpRequest, OpResponse, PastGap } from "@provenance/core";
+import type { ActivitiesResult, FileChange, HistoryResult, Incomplete, OpErrorCode, OpRequest, OpResponse, PastGap } from "@provenance/core";
 import { stamp } from "./time";
 
 export interface Rendered {
@@ -15,10 +15,10 @@ export interface RenderOptions {
   req?: OpRequest;
 }
 
-type ShownVersion = NoteVersion & { truncated?: boolean };
+type ShownVersion = FileChange & { truncated?: boolean };
 
 /** Spends `chars` on diffs from the newest version on. `resume` is the version after the last one shown in part, or null if none was cut. */
-function capDiffs(versions: NoteVersion[], chars: number): { versions: ShownVersion[]; resume: number | null } {
+function capDiffs(versions: FileChange[], chars: number): { versions: ShownVersion[]; resume: number | null } {
   let left = chars;
   let resume: number | null = null;
   const shown = versions.map((v, i): ShownVersion => {
@@ -41,6 +41,11 @@ const historyNote: Record<Incomplete, string> = {
   time: "note: this search hit its time limit, so older versions may be missing.",
 };
 
+const activitiesNote: Record<Incomplete, string> = {
+  server: "note: this shows only what this device holds, so other devices' changes may be missing. The sync server can't be reached right now.",
+  time: "note: this search hit its time limit, so older changes may be missing.",
+};
+
 const readNote: Record<Incomplete, string> = {
   server: "note: the sync server can't be reached and older history needs it, so this may not be the text at that time.",
   time: "note: this search hit its time limit, so this may not be the text at that time.",
@@ -55,28 +60,51 @@ function pastNote({ incomplete, recordStart }: PastGap & { incomplete: NonNullab
 function versionLine(v: ShownVersion): string {
   const file = v.from ? `${v.from} -> ${v.path}` : v.path;
   const mark = v.status === "created" ? " (new)" : v.status === "deleted" ? " (deleted)" : "";
-  const fields = [stamp(v.at), `${file}${mark}`, v.authors.join(","), `+${v.added ?? "?"} -${v.removed ?? "?"}`];
+  const counts = v.binary ? "binary" : `+${v.added ?? "?"} -${v.removed ?? "?"}`;
+  const fields = [stamp(v.at), `${file}${mark}`, v.authors.join(","), counts];
   if (v.diff !== undefined || v.truncated) return `${fields.join("  ")}${v.diff ? `\n${v.diff}` : ""}\n`;
   return [...fields, ...(v.preview ? [v.preview] : [])].join("  ");
 }
 
-function renderHistory(r: HistoryResult, opts: RenderOptions): Pick<Rendered, "text" | "structured"> {
-  const offset = opts.req?.op === "history" ? (opts.req.offset ?? 0) : 0;
-  const { versions, resume } = opts.diffChars === undefined ? { versions: r.versions as ShownVersion[], resume: null } : capDiffs(r.versions, opts.diffChars);
-  const next = resume === null ? r.next_offset : offset + resume;
+interface Listing {
+  items: FileChange[];
+  next_offset?: number | undefined;
+  /** Where an item sits in the list `offset` counts. Undefined past the last item. */
+  place(i: number): number | undefined;
+  noun: string;
+  empty: string;
+  closing: string[];
+}
+
+/** The answer's text and what its structured form shares, whichever list it is. */
+function listed({ items, next_offset, place, noun, empty, closing }: Listing, opts: RenderOptions) {
+  const { versions, resume } = opts.diffChars === undefined ? { versions: items as ShownVersion[], resume: null } : capDiffs(items, opts.diffChars);
+  const next = resume === null ? next_offset : (place(resume) ?? next_offset);
   const notes = [
     ...(resume === null ? [] : [`note: full diffs stop at ${opts.diffChars} characters in one answer, so some are cut. To see a whole version, read the note at its time.`]),
-    ...(next === undefined ? [] : [`note: more versions exist. Pass offset ${next} to see them.`]),
-    ...(r.incomplete ? [historyNote[r.incomplete]] : []),
+    ...(next === undefined ? [] : [`note: more ${noun} exist. Pass offset ${next} to see them.`]),
+    ...closing,
   ];
   const lines = versions.map(versionLine);
   return {
-    text: [...(lines.length ? lines : ["(no recorded changes)"]), ...notes].join("\n"),
-    structured: {
-      versions: versions.map((v) => ({ ...v, at: stamp(v.at) })),
-      ...(next === undefined ? {} : { next_offset: next }),
-      ...(r.incomplete ? { incomplete: r.incomplete } : {}),
-    },
+    text: [...(lines.length ? lines : [empty]), ...notes].join("\n"),
+    shown: versions.map((v) => ({ ...v, at: stamp(v.at) })),
+    paging: next === undefined ? {} : { next_offset: next },
+  };
+}
+
+function renderHistory(r: HistoryResult, opts: RenderOptions): Pick<Rendered, "text" | "structured"> {
+  const offset = opts.req?.op === "history" ? (opts.req.offset ?? 0) : 0;
+  const { text, shown, paging } = listed({ items: r.versions, next_offset: r.next_offset, place: (i) => offset + i, noun: "versions", empty: "(no recorded changes)", closing: r.incomplete ? [historyNote[r.incomplete]] : [] }, opts);
+  return { text, structured: { versions: shown, ...paging, ...(r.incomplete ? { incomplete: r.incomplete } : {}) } };
+}
+
+function renderActivities(r: ActivitiesResult, opts: RenderOptions): Pick<Rendered, "text" | "structured"> {
+  const closing = [...(r.incomplete ? [activitiesNote[r.incomplete]] : []), ...(r.recordStart === undefined ? [] : [`note: the record starts at ${stamp(r.recordStart)}, so nothing older is shown.`])];
+  const { text, shown, paging } = listed({ items: r.changes, next_offset: r.next_offset, place: (i) => r.offsets[i], noun: "changes", empty: "(no changes in this time)", closing }, opts);
+  return {
+    text,
+    structured: { changes: shown, ...paging, ...(r.incomplete ? { incomplete: r.incomplete } : {}), ...(r.recordStart === undefined ? {} : { record_start: stamp(r.recordStart) }) },
   };
 }
 
@@ -97,6 +125,8 @@ export function render(res: OpResponse, opts: RenderOptions = {}): Rendered {
       break;
     case "history":
       return { isError: false, ...renderHistory(r, opts) };
+    case "activities":
+      return { isError: false, ...renderActivities(r, opts) };
     case "edit":
       text = `replaced ${r.replaced} occurrence(s)`;
       break;

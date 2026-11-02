@@ -7,14 +7,18 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   attribute,
+  entriesOf,
   fileDocName,
   humanProvenance,
   indexDocName,
   insertText,
+  journalDocName,
   newFileId,
   oldestWeek,
+  Recorder,
   TEXT_KEY,
   VaultIndex,
+  weekOf,
   type FileId,
 } from "@provenance/core";
 import { afterEach, describe, expect, it } from "vitest";
@@ -69,11 +73,11 @@ function connect(ws: string, name: string, token: string) {
   };
 }
 
-async function eventually(check: () => void, ms = 3000) {
+async function eventually(check: () => void | Promise<void>, ms = 3000) {
   const end = Date.now() + ms;
   for (;;) {
     try {
-      return check();
+      return await check();
     } catch (e) {
       if (Date.now() > end) throw e;
       await new Promise((r) => setTimeout(r, 25));
@@ -183,6 +187,44 @@ describe("sync server", () => {
     expect((await post(`${s.http}/api/vaults/v/ops`, "bad-token-bad-token", { op: "list" })).status).toBe(401);
   });
 
+  it("answers what changed over HTTP, from two devices' edits", async () => {
+    const s = await start();
+    cleanup.push(s.close);
+    const since = Date.now();
+    await post(`${s.http}/api/vaults/v/ops`, ANDY, { op: "create", path: "shared.md", content: "From Andy.\n", by: { agent: "agent:andy", why: "agent" } });
+    const index = connect(s.ws, indexDocName("v"), DEVICE_A);
+    await index.synced();
+    const id = new VaultIndex(index.document).idOf("shared.md")!;
+
+    const device = async (name: string, token: string) => {
+      const [note, journal] = [connect(s.ws, fileDocName("v", id), token), connect(s.ws, journalDocName("v", weekOf(Date.now())), token)];
+      await Promise.all([note.synced(), journal.synced()]);
+      const recorder = new Recorder(
+        name,
+        () => entriesOf(journal.document),
+        (tr) => tr.local,
+        () => {},
+      );
+      recorder.watchNote(id, note.document);
+      const text = note.document.getText(TEXT_KEY);
+      return { text, write: (line: string) => note.document.transact(() => insertText(text, text.length, line, humanProvenance(`human:${name}`, name))) };
+    };
+    const [mac, phone] = [await device("mac", DEVICE_A), await device("phone", DEVICE_B)];
+    mac.write("From the mac.\n");
+    await eventually(() => expect(phone.text.toString()).toContain("From the mac."));
+    phone.write("From the phone.\n");
+
+    const ask = async (filter: object = {}) => {
+      const { body } = await post(`${s.http}/api/vaults/v/ops`, ANDY, { op: "activities", since, ...filter });
+      return (body.result as { changes: Array<Record<string, unknown>> }).changes;
+    };
+    await eventually(async () =>
+      expect(await ask()).toMatchObject([{ path: "shared.md", status: "created", authors: ["agent:andy", "human:mac", "human:phone"], added: 3, removed: 0, preview: "+ From Andy. / From the mac. / From the phone." }]),
+    );
+    expect(await ask({ authors: ["human:phone"] })).toMatchObject([{ authors: ["human:phone"], added: 1, removed: 0, preview: "+ From the phone." }]);
+    expect((await post(`${s.http}/api/vaults/v/ops`, ANDY, { op: "activities", since, authors: ["phone"] })).body).toMatchObject({ ok: false, code: "invalid" });
+  });
+
   it("answers malformed op requests as invalid, not as a server error", async () => {
     const s = await start();
     cleanup.push(s.close);
@@ -205,6 +247,9 @@ describe("sync server", () => {
     await client.callTool({ name: "create_file", arguments: { path: "a.md", content: "Hi.", why: "agent" } });
     const read = await client.callTool({ name: "read_file", arguments: { path: "a.md", provenance: true } });
     expect(read.content).toEqual([{ type: "text", text: "[agent agent:claude-code] Hi." }]);
+    const recent = await client.callTool({ name: "list_recent_changes", arguments: { since: "1h" } });
+    expect((recent.content as Array<{ text: string }>)[0]!.text).toContain("a.md (new)  agent:claude-code  +1 -0  + Hi.");
+    expect(recent.structuredContent).toMatchObject({ changes: [{ path: "a.md", status: "created", added: 1 }] });
   });
 
   it("stores attachments by content hash", async () => {

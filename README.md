@@ -101,11 +101,22 @@ ob-provenance --vault Notes read --path today.md --at 2h
 
 A version is a stretch of editing, so a new one starts about every 5 minutes while a note is being edited. Each device's edits are versions of their own, so edits made offline keep their real times and authors, and two devices' versions can overlap. History starts when this feature first ran on the vault. It follows a note through renames and still works for a deleted note, and it can be viewed but not restored. Renames and deletions have no recorded author. Older history comes from the server automatically, by the same command. If the server can't be reached, the answer says it's incomplete. `read --at` for a time older than a note's first recorded change gives the earliest text on record and says so.
 
+`activities` looks across the whole vault instead. It gives each file changed since a time one line: when it last changed, its path, who changed it, lines added and removed, and about 100 characters of what changed, added text first:
+
+```sh
+ob-provenance --vault Notes activities --since 2h
+ob-provenance --vault Notes activities --since 2026-11-02T14:05+08:00 --diff
+ob-provenance --vault Notes activities --since 1d --author human:chris,agent:claude-code
+ob-provenance --vault Notes activities --since 1d --author human:chris --skip-unknown --json
+```
+
+The line shows the net change from that time to now, so edits that cancel out don't appear, and a created, deleted or renamed file says so. The range includes the minute of `--since`, and the starting text can be up to 5 minutes early for a note being edited at that time. `--diff` prints whole diffs, and `--json` prints JSON. `--author` works on lines: an added line matches who wrote it, and removed lines match anyone who removed text in that file. Changes with no recorded author stay unless you pass `--skip-unknown`, and that includes renames and deletions. An attachment shows `binary` in place of its counts, and `+? -?` means a file's lines can't be worked out here yet. Over MCP this is `list_recent_changes`, with `authors`, `include_unknown` and `full_diff`.
+
 Every call names its vault, with `--vault <name or id>` or `OB_PROVENANCE_VAULT`, and `--vault` wins. Without one, the call stops and lists your vaults. Nothing else picks a vault, neither the folder it runs in nor window focus, so a call means the same vault wherever it runs and whether or not Obsidian is open.
 
 While Obsidian answers, every operation goes through the plugin. A vault that's registered but closed opens in a new window. When Obsidian can't answer, reads and writes go to the server instead, and `rename`, `delete`, `links`, `backlinks`, `search`, `daily` and `create-daily` fail with the reason. If the server is also unreachable, the agent is told the vault is unavailable. A call the plugin started and never finished, by a timeout or by Obsidian crashing, isn't sent to the server, because the write may already have landed: the agent is told to read the note first. `ob-provenance status` shows which way a call would go.
 
-**Remote, limited mode.** Long-running agents connect to the server over Streamable HTTP at `https://sync.example.com/mcp/<vault-id>`, sending `Authorization: Bearer <agent token>`. Add `?agent=<name>` if the token doesn't pin an identity. Limited mode offers `list_files`, `read_file`, `get_file_history`, `edit_file`, `append_to_file` and `create_file`.
+**Remote, limited mode.** Long-running agents connect to the server over Streamable HTTP at `https://sync.example.com/mcp/<vault-id>`, sending `Authorization: Bearer <agent token>`. Add `?agent=<name>` if the token doesn't pin an identity. Limited mode offers `list_files`, `read_file`, `get_file_history`, `list_recent_changes`, `edit_file`, `append_to_file` and `create_file`.
 
 Every write requires `why`. Use `agent` when the agent wrote the content itself, and `human-via-agent` when the agent is inserting words the human dictated. Writes also accept an optional one-sentence `note`.
 

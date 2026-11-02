@@ -29,7 +29,9 @@ const agentOption = () => new Option("--agent <name>", "Your name, e.g. claude-c
 
 function fieldOption(key: string, field: z.ZodType): Option {
   const required = field.safeParse(undefined).success ? [] : ["(required)"];
-  return new Option(field.safeParse(true).success ? `--${key}` : `--${key} <value>`, [field.description ?? "", ...required].join(" ").trim());
+  // Commander camel-cases a dashed flag back, so the value still lands on `key`.
+  const flag = `--${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`;
+  return new Option(field.safeParse(true).success ? flag : `${flag} <value>`, [field.description ?? "", ...required].join(" ").trim());
 }
 
 /** These flags work on either side of the command, and Commander would quietly keep the outer one. */

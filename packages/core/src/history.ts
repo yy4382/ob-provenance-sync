@@ -1,10 +1,11 @@
 import { structuredPatch, type StructuredPatchHunk as Hunk } from "diff";
 import diff from "fast-diff";
 import * as Y from "yjs";
-import { PRE_EVERY, type EditEntry, type Entry, type TreeEntry } from "./journal";
+import { runsOf, type Run } from "./attribution";
+import { PRE_EVERY, weekOf, type EditEntry, type Entry, type TreeEntry } from "./journal";
 import { OpError, type VaultDocs } from "./ops";
 import { minuteOf, type AuthorId } from "./provenance";
-import { docAt, TEXT_KEY, textAt, type FileId } from "./vault";
+import { docAt, TEXT_KEY, textAt, type FileId, type VaultIndex } from "./vault";
 
 /** One recorded burst of one note on one device: from a `pre` to that device's next `pre` or seal. */
 export interface NoteVersion {
@@ -38,7 +39,30 @@ export interface HistoryResult {
   incomplete?: Incomplete;
 }
 
+/** A file's net change over a stretch of time. An attachment has no lines to count. */
+export type FileChange = NoteVersion & { binary?: true };
+
+export interface ActivitiesResult {
+  changes: FileChange[];
+  /** Each change's place in the list `offset` counts, which also holds files that turned out to have no net change. */
+  offsets: number[];
+  next_offset?: number;
+  incomplete?: Incomplete;
+  /** The first entry in the vault's record, when the range reaches past it. */
+  recordStart?: number;
+}
+
+export interface ActivitiesRequest {
+  since: number;
+  authors?: AuthorId[] | undefined;
+  skipUnknown?: boolean | undefined;
+  limit?: number | undefined;
+  offset?: number | undefined;
+  fullDiff?: boolean | undefined;
+}
+
 export const HISTORY_LIMIT = 20;
+export const ACTIVITIES_LIMIT = 50;
 /** Scanning stops here, and at most one batch of weeks and one open note can follow, which leaves room inside the CLI's 15 seconds. */
 const SCAN_MS = 7000;
 const ANSWER_MS = 12_000;
@@ -110,29 +134,38 @@ function namedBy(entries: Entry[], path: string): FileId | null {
   return newest?.id ?? null;
 }
 
-interface Scan {
-  id: FileId | null;
+interface WeekReads {
   entries: Entry[];
   incomplete?: Incomplete;
 }
 
-async function scan(docs: VaultDocs, path: string, deadline: number, now: () => number, enough: (mine: Entry[]) => boolean): Promise<Scan> {
-  const index = await docs.index();
-  const weeks = index.weeks();
+/** Reads weeks newest first until `enough`, `take` of the unread ones at a time. An answer cut short loses the oldest entries. */
+async function readWeeks(docs: VaultDocs, deadline: number, now: () => number, enough: (entries: Entry[]) => boolean, take: (unread: number[]) => number = () => WEEKS_AT_ONCE): Promise<WeekReads> {
+  const weeks = (await docs.index()).weeks();
   const entries: Entry[] = [];
-  let id = index.idOf(path) ?? null;
   let unreached = false;
-  while (weeks.length) {
-    if (id && enough(noteEntries(entries, id))) break;
-    if (now() >= deadline) return { id, entries, incomplete: "time" };
-    const reads = await Promise.all(weeks.splice(0, WEEKS_AT_ONCE).map((n) => docs.week(n)));
+  while (weeks.length && !enough(entries)) {
+    if (now() >= deadline) return { entries, incomplete: "time" };
+    const reads = await Promise.all(weeks.splice(0, take(weeks)).map((n) => docs.week(n)));
     for (const read of reads) {
       for (const entry of read.entries) entries.push(entry);
       unreached ||= !read.complete;
     }
-    id ??= namedBy(entries, path);
   }
-  return { id, entries, ...(unreached ? { incomplete: "server" as const } : {}) };
+  return { entries, ...(unreached ? { incomplete: "server" as const } : {}) };
+}
+
+interface Scan extends WeekReads {
+  id: FileId | null;
+}
+
+async function scan(docs: VaultDocs, path: string, deadline: number, now: () => number, enough: (mine: Entry[]) => boolean): Promise<Scan> {
+  let id = (await docs.index()).idOf(path) ?? null;
+  const read = await readWeeks(docs, deadline, now, (entries) => {
+    id ??= namedBy(entries, path);
+    return !!id && enough(noteEntries(entries, id));
+  });
+  return { id: id ?? namedBy(read.entries, path), ...read };
 }
 
 function notFound(path: string, incomplete: Incomplete | undefined): OpError {
@@ -214,6 +247,12 @@ function boundAt(bursts: Burst[], cut: number): Bound {
   return next ? { pre: next.pre! } : "current";
 }
 
+function authorsOf(entries: Array<EditEntry | TreeEntry>): AuthorId[] {
+  const known = entries.flatMap((e) => (e.t === "edit" && e.by !== "unknown" ? [e.by] : []));
+  const unknown = !known.length || entries.some((e) => (e.t === "tree" ? e.from !== null : e.by === "unknown"));
+  return [...new Set(known), ...(unknown ? ["unknown" as const] : [])];
+}
+
 /** One version in every field but those that need the note's text. */
 function shapesOf(bursts: Burst[], currentPath: string) {
   let path = currentPath;
@@ -225,11 +264,9 @@ function shapesOf(bursts: Burst[], currentPath: string) {
     const after = last ? (last.to ?? last.from ?? path) : path;
     const status: NoteVersion["status"] =
       last?.to === null ? "deleted" : tree.some((e) => e.from === null) ? "created" : first?.from != null && first.from !== last?.to ? "renamed" : "modified";
-    const known = entries.flatMap((e) => (e.t === "edit" && e.by !== "unknown" ? [e.by] : []));
-    const unknown = !known.length || entries.some((e) => (e.t === "tree" ? e.from !== null : e.by === "unknown"));
     shapes.push({
       at: minuteOf(entries.at(-1)!.at),
-      authors: [...new Set(known), ...(unknown ? ["unknown" as const] : [])],
+      authors: authorsOf(entries),
       path: after,
       status,
       ...(status === "renamed" ? { from: first!.from! } : {}),
@@ -358,6 +395,186 @@ export async function history(docs: VaultDocs, req: HistoryRequest, now: () => n
   const more = cut || bursts.length > wanted;
   const incomplete = found.incomplete ?? (cut ? "time" : texts ? undefined : "server");
   return { versions, ...(more ? { next_offset: offset + versions.length } : {}), ...(incomplete ? { incomplete } : {}) };
+}
+
+type Keep = (author: AuthorId) => boolean;
+type Move = Pick<NoteVersion, "status" | "path" | "from">;
+
+/** What became of a file, from its path as a range began to its path now. Null if nothing of it outlived the range. */
+function moveOf(was: string | null, now: string | null): Move | null {
+  if (was === null) return now === null ? null : { status: "created", path: now };
+  if (now === null) return { status: "deleted", path: was };
+  return was === now ? { status: "modified", path: now } : { status: "renamed", path: now, from: was };
+}
+
+/** A file with a change on record in the range, and all the journal alone can say about it. */
+interface Candidate {
+  id: FileId;
+  /** All the note's entries that were read, by time. */
+  mine: Entry[];
+  /** Those in the range that changed something. */
+  changes: Array<EditEntry | TreeEntry>;
+  move: Move;
+  authors: AuthorId[];
+}
+
+/** Newest first, ties by path, so pages don't shift. A file the author filter drops here costs no read of its text. */
+function candidatesOf(entries: Entry[], cut: number, index: VaultIndex, keep: Keep): Candidate[] {
+  const notes = new Map<FileId, Entry[]>();
+  for (const e of entries) {
+    const mine = notes.get(e.id);
+    if (mine) mine.push(e);
+    else notes.set(e.id, [e]);
+  }
+  const candidates: Candidate[] = [];
+  for (const [id, mine] of notes) {
+    mine.sort((a, b) => a.at - b.at);
+    const changes = mine.filter((e): e is EditEntry | TreeEntry => e.t !== "seal" && e.at >= cut);
+    if (!changes.length) continue;
+    const now = index.get(id)?.path ?? null;
+    const firstMove = changes.find((e): e is TreeEntry => e.t === "tree");
+    const move = moveOf(firstMove ? firstMove.from : now, now);
+    const authors = authorsOf(changes).filter(keep);
+    if (move && authors.length) candidates.push({ id, mine, changes, move, authors });
+  }
+  return candidates.sort((a, b) => b.changes.at(-1)!.at - a.changes.at(-1)!.at || a.move.path.localeCompare(b.move.path));
+}
+
+/**
+ * Who wrote each line of `text`, asked in ascending order. An old line with new
+ * text in it belongs to whoever just wrote there, not to its first author. A
+ * line's break belongs to the next line's writer as often as to its own, so it
+ * only counts on a blank line, where it's all there is.
+ */
+function lineAuthors(text: string, runs: Run[], cut: number): (line: number) => AuthorId[] {
+  const starts = [0];
+  for (let at = text.indexOf("\n"); at !== -1; at = text.indexOf("\n", at + 1)) starts.push(at + 1);
+  let first = 0;
+  return (line) => {
+    const from = starts[line - 1]!;
+    const to = Math.max((starts[line] ?? text.length + 1) - 1, from + 1);
+    while (first < runs.length && runs[first]!.to <= from) first++;
+    const on = [];
+    for (let i = first; i < runs.length && runs[i]!.from < to; i++) on.push(runs[i]!.provenance);
+    const recent = on.filter((p) => p.at >= cut);
+    return on.length ? (recent.length ? recent : on).map((p) => p.author) : ["unknown"];
+  };
+}
+
+/** A Yjs delete has no author per character, so a file's removed lines stand or fall together. */
+function removersOf({ changes, move }: Candidate): AuthorId[] {
+  if (move.status === "deleted") return ["unknown"];
+  const edits = changes.filter((e): e is EditEntry => e.t === "edit");
+  const removing = edits.filter((e) => e.removes);
+  // An insertion in a line diffs as a replaced line, so removed lines can come from edits that removed nothing.
+  return (removing.length ? removing : edits).map((e) => e.by);
+}
+
+function keptHunks(hunks: Hunk[], stays: { added: (line: number) => boolean; removed: boolean }): Hunk[] {
+  const kept: Hunk[] = [];
+  for (const hunk of hunks) {
+    const lines: string[] = [];
+    let line = hunk.newStart;
+    let previous = true;
+    for (const text of hunk.lines) {
+      if (!text.startsWith("\\")) {
+        previous = text.startsWith("-") ? stays.removed : !text.startsWith("+") || stays.added(line);
+        if (!text.startsWith("-")) line++;
+      }
+      if (previous) lines.push(text);
+    }
+    const count = (sign: string) => lines.filter((l) => l.startsWith(sign)).length;
+    if (count("+") + count("-")) kept.push({ ...hunk, lines, oldLines: count(" ") + count("-"), newLines: count(" ") + count("+") });
+  }
+  return kept;
+}
+
+interface ActivitiesQuery {
+  cut: number;
+  keep: Keep;
+  /** Whether the answer is about some authors, so a shared file shows only their lines. */
+  byLine: boolean;
+  fullDiff: boolean;
+}
+
+/** One file's line for the range, or no line. `unread` means its text couldn't be had in time. */
+async function changeIn(docs: VaultDocs, c: Candidate, { cut, keep, byLine, fullDiff }: ActivitiesQuery): Promise<{ change: FileChange | null; unread?: boolean }> {
+  const { status } = c.move;
+  const known = { ...c.move, at: minuteOf(c.changes.at(-1)!.at), authors: c.authors };
+  const uncounted = { ...known, added: null, removed: null, preview: "" };
+  if (c.changes.some((e) => e.t === "tree" && e.binary)) return { change: { ...uncounted, binary: true } };
+
+  const before = status === "created" ? "empty" : boundAt(burstsOf(c.mine), cut);
+  const after = status === "deleted" ? "empty" : "current";
+  // Comparing the text with itself would pass off an edit as no change at all.
+  if (before === "current" && after === "current" && c.changes.some((e) => e.t === "edit")) return { change: uncounted };
+  let hunks: Hunk[] = [];
+  // A rename alone leaves the text as it was, and renaming a folder can touch hundreds of notes that needn't be opened.
+  if (before !== "current" || after !== "current") {
+    const read = await docs.peekText(c.id, (ytext) => ({ before: textOf(before, ytext.doc!), after: textOf(after, ytext.doc!), runs: byLine ? runsOf(ytext) : [] }));
+    if (read?.before == null || read.after == null) return { change: uncounted, unread: !read };
+    hunks = hunksOf(read.before, read.after);
+    if (byLine) {
+      const authorsOn = lineAuthors(read.after, read.runs, cut);
+      hunks = keptHunks(hunks, { added: (line) => authorsOn(line).some(keep), removed: removersOf(c).some(keep) });
+    }
+  }
+  if (!hunks.length && (status === "modified" || !keep("unknown"))) return { change: null };
+  return { change: { ...known, added: countOf(hunks, "+"), removed: countOf(hunks, "-"), preview: previewOf(hunks), ...(fullDiff ? { diff: hunkText(hunks) } : {}) } };
+}
+
+/**
+ * What changed across the vault from `since` until now: one line per file id,
+ * newest first, comparing its text as the range began with its text now, so
+ * edits that cancel out don't appear. Times print to the minute, so the range
+ * starts at the top of `since`'s minute: a change reported twice costs less
+ * than one missed.
+ */
+export async function activities(docs: VaultDocs, req: ActivitiesRequest, now: () => number = Date.now): Promise<ActivitiesResult> {
+  const { since, authors, skipUnknown = false, limit = ACTIVITIES_LIMIT, offset = 0, fullDiff = false } = req;
+  const start = now();
+  const cut = minuteOf(since);
+  // No burst in the range starts further back than this, and an entry from before it also shows the record reaches past the cut.
+  const reach = cut - PRE_EVERY;
+  const found = await readWeeks(
+    docs,
+    start + SCAN_MS,
+    now,
+    (entries) => entries.some((e) => e.at < reach),
+    (unread) => Math.min(WEEKS_AT_ONCE, Math.max(1, unread.filter((n) => n >= weekOf(reach)).length)),
+  );
+
+  const keep: Keep = (a) => (a === "unknown" ? !skipUnknown : !authors || authors.includes(a));
+  const candidates = candidatesOf(found.entries, cut, await docs.index(), keep);
+  const query = { cut, keep, byLine: !!authors || skipUnknown, fullDiff };
+  const changes: FileChange[] = [];
+  const offsets: number[] = [];
+  let next = offset;
+  let late = false;
+  let unread = false;
+  while (next < candidates.length && changes.length < limit) {
+    if (next > offset && now() >= start + ANSWER_MS) {
+      late = true;
+      break;
+    }
+    const line = await changeIn(docs, candidates[next]!, query);
+    unread ||= !!line.unread;
+    if (line.change) {
+      changes.push(line.change);
+      offsets.push(next);
+    }
+    next++;
+  }
+
+  const earliest = found.entries.reduce((min, e) => Math.min(min, e.at), Infinity);
+  const incomplete = found.incomplete ?? (late ? "time" : unread ? "server" : undefined);
+  return {
+    changes,
+    offsets,
+    ...(next < candidates.length ? { next_offset: next } : {}),
+    ...(incomplete ? { incomplete } : {}),
+    ...(!found.incomplete && found.entries.length && earliest >= cut ? { recordStart: earliest } : {}),
+  };
 }
 
 export interface PastText {

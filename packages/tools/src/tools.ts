@@ -1,4 +1,4 @@
-import { FULL_ONLY_OPS, noteSchema, type AgentId, type OpName, type OpRequest, type OpResponse } from "@provenance/core";
+import { authorIdSchema, FULL_ONLY_OPS, noteSchema, type AgentId, type AuthorId, type OpName, type OpRequest, type OpResponse } from "@provenance/core";
 import { z } from "zod";
 import type { Mode } from "./instructions";
 import { render, type Rendered } from "./render";
@@ -45,6 +45,27 @@ const historyOutput = z.object({
   next_offset: z.number().optional().describe("Pass this as offset to continue. Absent when there's nothing more."),
   incomplete: z.enum(["server", "time"]).optional().describe("Older versions may be missing: server means the sync server can't be reached, time means the search hit its limit."),
 });
+
+const change = version.extend({
+  at: z.string().describe("When it last changed in the range, to the minute."),
+  path: z.string().describe("Its path now, or the path it had as the range began if it was deleted."),
+  added: z.number().nullable().describe("Lines added over the range. Null for an attachment, or if this can't be worked out here yet."),
+  removed: z.number().nullable().describe("Lines removed over the range. Null for an attachment, or if this can't be worked out here yet."),
+  truncated: z.boolean().optional().describe("Part or all of this file's diff was cut."),
+  binary: z.boolean().optional().describe("An attachment, which has no lines to count."),
+});
+
+const activitiesOutput = z.object({
+  changes: z.array(change),
+  next_offset: z.number().optional().describe("Pass this as offset to continue. Absent when there's nothing more."),
+  incomplete: z.enum(["server", "time"]).optional().describe("Changes may be missing: server means this shows only what this device holds, time means the search hit its limit."),
+  record_start: z.string().optional().describe("Where the vault's record starts, when the range reaches past it. Nothing older can be shown."),
+});
+
+const authorList = z
+  .string()
+  .refine((raw) => raw.split(",").every((a) => authorIdSchema.safeParse(a).success), "must be authors separated by commas, each human:<name>, agent:<name> or unknown")
+  .transform((raw) => raw.split(",") as AuthorId[]);
 
 type WriteArgs = { why: z.infer<typeof why>; note?: string | undefined };
 const by = (a: WriteArgs, agent: AgentId) => ({ agent, why: a.why, ...(a.note ? { note: a.note } : {}) });
@@ -133,6 +154,54 @@ export const TOOLS: readonly ToolDef[] = [
     output: historyOutput,
     annotations: { readOnlyHint: true, openWorldHint: false },
     request: ({ path, limit, offset, full_diff }) => ({ op: "history", path, ...(limit ? { limit } : {}), ...(offset ? { offset } : {}), ...(full_diff ? { fullDiff: true } : {}) }),
+  }),
+  tool({
+    mcpName: "list_recent_changes",
+    command: "activities",
+    op: "activities",
+    title: "Recent changes",
+    description:
+      "List what changed across the vault since a time, newest first: when each file last changed, its path, who changed it, lines added and removed, and a preview of what changed. " +
+      "Each file gets one line for the whole range, showing the net change from then to now, so edits that cancel out don't appear. " +
+      "The range includes the minute of since, and the first text can be up to 5 minutes early for a note being edited at that time. " +
+      "An author filter works on lines: an added line matches who wrote it, and removed lines match anyone who removed text in that file. " +
+      "Text with no recorded author stays in a filtered answer unless you ask to leave it out. " +
+      "Renames and deletions have no recorded author, so they count as unknown. " +
+      "Counts of +? -? (null in JSON) mean a file's lines can't be worked out here yet. An attachment shows binary in place of its counts (binary true and null counts in JSON). " +
+      "History starts when this feature first ran on the vault, and a note in the answer says where if the range reaches past that. " +
+      "Edits made offline keep their real times, so a change can appear later with a time older than a since already used. " +
+      "To see a whole version, use the note's history, then read the note with at set to that version's time.",
+    examples: ["ob-provenance --vault Notes activities --since 2h", "ob-provenance --vault Notes activities --since 1d --author human:chris,agent:claude-code --skip-unknown", "ob-provenance --vault Notes activities --since 2026-11-02T14:05+08:00 --diff", "ob-provenance --vault Notes activities --since 1w --limit 20 --offset 20 --json"],
+    input: {
+      since: time,
+      authors: z.array(authorIdSchema).optional().describe("Only show these authors, each human:<name>, agent:<name> or unknown."),
+      include_unknown: z.boolean().optional().describe("Keep changes with no recorded author, even with authors set. Defaults to true."),
+      limit: z.number().int().min(1).max(100).optional().describe("How many files to return. Defaults to 50, at most 100."),
+      offset: z.number().int().min(0).optional().describe("Where to start in the list of changed files. A cut answer says what to pass."),
+      full_diff: z.boolean().optional().describe("Replace each preview with unified diff hunks, up to 30,000 characters in one answer."),
+    },
+    cli: {
+      input: {
+        since: time,
+        author: authorList.optional().describe("Only show these authors, separated by commas: human:<name>, agent:<name> or unknown."),
+        skipUnknown: z.boolean().optional().describe("Leave out changes with no recorded author, which otherwise always stay."),
+        limit: count.optional().describe("How many files to return. Defaults to 50."),
+        offset: count.optional().describe("Where to start in the list of changed files. A cut answer says what to pass."),
+        diff: z.boolean().optional().describe("Replace each preview with unified diff hunks."),
+      },
+      toInput: ({ since, author, skipUnknown, limit, offset, diff }: { since: string; author?: AuthorId[]; skipUnknown?: boolean; limit?: number; offset?: number; diff?: boolean }) => ({ since, authors: author, include_unknown: skipUnknown ? false : undefined, limit, offset, full_diff: diff }),
+    },
+    output: activitiesOutput,
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    request: ({ since, authors, include_unknown, limit, offset, full_diff }) => ({
+      op: "activities",
+      since: parseTime(since, Date.now())!,
+      ...(authors?.length ? { authors } : {}),
+      ...(include_unknown === false ? { skipUnknown: true } : {}),
+      ...(limit ? { limit } : {}),
+      ...(offset ? { offset } : {}),
+      ...(full_diff ? { fullDiff: true } : {}),
+    }),
   }),
   tool({
     mcpName: "edit_file",

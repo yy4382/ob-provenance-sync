@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { instructions, TOOLS, type ToolDef } from "@provenance/tools";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildProgram, type Target } from "../src/program";
@@ -138,6 +139,79 @@ describe("ob-provenance history", () => {
   });
 });
 
+describe("ob-provenance activities", () => {
+  const since = "2026-11-02T14:05+08:00";
+  const sinceMs = Date.parse(since);
+  const requested = async (...argv: string[]) => {
+    const { call } = await run("activities", "--since", since, ...argv);
+    return call?.t.request(call.input as never, "agent:x");
+  };
+
+  it("takes a time and asks for nothing else unless given it", async () => {
+    expect(await requested()).toEqual({ op: "activities", since: sinceMs });
+  });
+
+  it("turns a span into a time that far back", async () => {
+    const before = Date.now();
+    const { call } = await run("activities", "--since", "2h");
+    const req = call?.t.request(call.input as never, "agent:x");
+    expect(req).toMatchObject({ op: "activities" });
+    const asked = (req as { since: number }).since;
+    expect(asked).toBeGreaterThanOrEqual(before - 2 * 3_600_000);
+    expect(asked).toBeLessThanOrEqual(Date.now() - 2 * 3_600_000);
+  });
+
+  it("turns every flag into the request", async () => {
+    expect(await requested("--author", "human:a,agent:b,unknown", "--skip-unknown", "--limit", "5", "--offset", "10", "--diff")).toEqual({
+      op: "activities",
+      since: sinceMs,
+      authors: ["human:a", "agent:b", "unknown"],
+      skipUnknown: true,
+      limit: 5,
+      offset: 10,
+      fullDiff: true,
+    });
+  });
+
+  it("prints JSON when asked", async () => {
+    expect((await run("activities", "--since", "2h", "--json")).call?.target.json).toBe(true);
+  });
+
+  it("needs a time, and names the forms it takes", async () => {
+    const missing = await run("activities");
+    expect(missing.call).toBeUndefined();
+    expect(missing.stderr).toContain("since");
+    const wrong = await run("activities", "--since", "yesterday");
+    expect(wrong.call).toBeUndefined();
+    expect(wrong.stderr).toContain("30m, 2h, 1d, 1w or an ISO 8601 time");
+  });
+
+  it("refuses a bad author before reaching the vault, as a wrong call", async () => {
+    for (const author of ["alice", "human:a,bob", "human:a,", "Unknown"]) {
+      const { call, error, stderr } = await run("activities", "--since", "2h", "--author", author);
+      expect(call, author).toBeUndefined();
+      expect(error?.code, author).toBe("commander.error");
+      expect(stderr, author).toContain("human:<name>, agent:<name> or unknown");
+    }
+  });
+
+  it("spells a two-word flag with a dash, and only that way", async () => {
+    expect((await run("activities", "--since", "2h", "--skip-unknown")).call?.input).toMatchObject({ include_unknown: false });
+    expect((await run("activities", "--since", "2h", "--skipUnknown")).error?.code).toBe("commander.unknownOption");
+  });
+
+  it("parses every form the README documents", async () => {
+    const readme = readFileSync(new URL("../../../README.md", import.meta.url), "utf8");
+    const forms = readme.split("\n").filter((line) => line.startsWith("ob-provenance ") && line.includes(" activities "));
+    expect(forms).toHaveLength(4);
+    for (const form of forms) expect((await run(...words(form).slice(1))).call?.t.command, form).toBe("activities");
+  });
+
+  it("leaves flags spelled with an underscore as they were", async () => {
+    expect((await run("edit", "--path", "a.md", "--old_string", "x", "--new_string", "y", "--replace_all", "--why", "agent")).call?.input).toMatchObject({ replace_all: true });
+  });
+});
+
 describe("ob-provenance read --at", () => {
   it("turns a time into the moment it names", async () => {
     const { call } = await run("read", "--path", "a.md", "--at", "2026-11-02T14:05+08:00");
@@ -162,7 +236,7 @@ describe("ob-provenance help", () => {
   it("shows each command's fields and examples, by --help or help", async () => {
     for (const t of TOOLS) {
       const { stdout } = await run(t.command, "--help");
-      for (const key of Object.keys(t.cli?.input ?? t.input)) expect(stdout).toContain(`--${key}`);
+      for (const key of Object.keys(t.cli?.input ?? t.input)) expect(stdout).toContain(`--${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`);
       for (const example of t.examples) expect(stdout).toContain(example);
       expect((await run("help", t.command)).stdout).toBe(stdout);
     }

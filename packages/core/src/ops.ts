@@ -1,8 +1,8 @@
 import { z } from "zod";
 import type * as Y from "yjs";
 import { attribute } from "./attribution";
-import { history, readAt, type HistoryResult, type PastGap } from "./history";
-import { agentIdSchema, agentProvenance, noteSchema, type SegmentKind } from "./provenance";
+import { activities, history, readAt, type ActivitiesResult, type HistoryResult, type PastGap } from "./history";
+import { agentIdSchema, agentProvenance, authorIdSchema, noteSchema, type SegmentKind } from "./provenance";
 import type { Entry } from "./journal";
 import { EditError, insertText, replaceText } from "./text";
 import { isMarkdownPath, markNote, newFileId, pathClash, TEXT_KEY, type FileId, type VaultIndex } from "./vault";
@@ -43,6 +43,15 @@ export const opRequestSchema = z.discriminatedUnion("op", [
     fullDiff: z.boolean().optional(),
   }),
   z.object({
+    op: z.literal("activities"),
+    since: z.number(),
+    authors: z.array(authorIdSchema).optional(),
+    skipUnknown: z.boolean().optional(),
+    limit: z.number().int().min(1).optional(),
+    offset: z.number().int().min(0).optional(),
+    fullDiff: z.boolean().optional(),
+  }),
+  z.object({
     op: z.literal("edit"),
     path: markdownPath,
     oldString: z.string().min(1),
@@ -75,6 +84,7 @@ export type OpResult =
   | { op: "list"; files: string[] }
   | ({ op: "read"; content: string; sentences?: AttributedSentence[] } & PastGap)
   | ({ op: "history" } & HistoryResult)
+  | ({ op: "activities" } & ActivitiesResult)
   | { op: "edit"; replaced: number }
   | { op: "append" | "create" | "delete" }
   | { op: "rename"; linksPending?: boolean }
@@ -154,6 +164,8 @@ export async function executeOp(docs: VaultDocs, req: OpRequest): Promise<OpResu
     }
     case "history":
       return { op: "history", ...(await history(docs, req)) };
+    case "activities":
+      return { op: "activities", ...(await activities(docs, req)) };
     case "edit": {
       const by = byOf(req, docs);
       const id = await requireId(docs, req.path);
