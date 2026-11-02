@@ -227,7 +227,7 @@ describe("an old server, which refuses journal documents", () => {
 
     const here = await a.engine.week(weekOf(Date.now()));
     expect(here.complete).toBe(false);
-    expect(here.entries.map((e) => e.t)).toEqual(["edit", "tree"]);
+    expect(here.entries.map((e) => e.t)).toEqual(["edit", "tree", "seal"]);
   });
 
   it("sends what it kept to a server that accepts it, even from a past week", async () => {
@@ -568,6 +568,83 @@ describe("reading history on a device", () => {
   });
 });
 
+describe("a note edited on a phone while offline", () => {
+  const MINUTE = 60_000;
+  const by = (agent: string) => ({ agent, why: "agent" });
+  const seals = (list: Entry[]) => list.filter((e) => e.t === "seal").map((e) => e.device);
+
+  async function offlineEdits(reconnectAt: (start: number) => number) {
+    const start = weekOf(Date.now()) * WEEK + 60 * MINUTE;
+    vi.useFakeTimers({ toFake: ["Date"], now: start });
+    const s = await server();
+    const laptop = device("laptop", s.ws);
+    laptop.disk.files.set("n.md", "base\n");
+    await laptop.engine.start();
+    await laptop.engine.settle();
+    const [disk, store] = [new MemoryDisk(), new MemoryStore()];
+    const online = device("phone", s.ws, disk, store);
+    await online.engine.start();
+    await eventually(() => expect(disk.files.get("n.md")).toBe("base\n"));
+    await online.engine.settle();
+    online.engine.destroy();
+
+    const away = device("phone", null, disk, store);
+    await away.engine.start();
+    await away.engine.settle();
+    vi.setSystemTime(start + 10 * MINUTE);
+    expect(await handleOpRequest(laptop.engine, { op: "edit", path: "n.md", oldString: "base\n", newString: "laptop line\nbase\n", by: by("agent:laptop") })).toMatchObject({ ok: true });
+    await laptop.engine.settle();
+    vi.setSystemTime(start + 20 * MINUTE);
+    expect(await handleOpRequest(away.engine, { op: "edit", path: "n.md", oldString: "base\n", newString: "base\nphone line\n", by: by("agent:phone") })).toMatchObject({ ok: true });
+    await away.engine.settle();
+    away.engine.destroy();
+
+    vi.setSystemTime(reconnectAt(start));
+    const phone = device("phone", s.ws, disk, store);
+    await phone.engine.start();
+    await phone.engine.settle();
+    const merged = "laptop line\nbase\nphone line\n";
+    await eventually(() => expect(disk.files.get("n.md")).toBe(merged));
+    await eventually(() => expect(laptop.disk.files.get("n.md")).toBe(merged));
+    const onServer = (body: unknown) =>
+      fetch(`${s.http}/api/vaults/v/ops`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` }, body: JSON.stringify(body) }).then((r) => r.json());
+    return { s, laptop, phone, onServer, start };
+  }
+
+  const expected = [
+    { authors: ["agent:phone"], added: 1, removed: 0, preview: "+ phone line" },
+    { authors: ["agent:laptop"], added: 1, removed: 0, preview: "+ laptop line" },
+  ];
+
+  it("gives both devices their own versions, from each engine and from the server alike", async () => {
+    const { laptop, phone, onServer, start } = await offlineEdits((t) => t + 30 * MINUTE);
+    const req = { op: "history", path: "n.md" };
+    await eventually(async () => {
+      const list = (await entries(laptop.engine)).concat(await entries(phone.engine));
+      expect(seals(list).sort()).toEqual(["laptop", "laptop", "phone", "phone"]);
+    });
+    await eventually(async () => {
+      const answers = [await handleOpRequest(laptop.engine, req), await handleOpRequest(phone.engine, req), await onServer(req)];
+      for (const answer of answers) expect(JSON.parse(JSON.stringify(answer))).toMatchObject({ ok: true, result: { versions: expected } });
+      expect(JSON.parse(JSON.stringify(answers[0]))).toEqual(answers[2]);
+      expect(JSON.parse(JSON.stringify(answers[1]))).toEqual(answers[2]);
+    });
+    const read = (at: number) => onServer({ op: "read", path: "n.md", at });
+    expect(await read(start + 10 * MINUTE)).toMatchObject({ result: { content: "laptop line\nbase\n" } });
+    expect(await read(start + 20 * MINUTE)).toMatchObject({ result: { content: "base\nphone line\n" } });
+    expect(await read(Date.now())).toMatchObject({ result: { content: "laptop line\nbase\nphone line\n" } });
+  });
+
+  it("ends the phone's work when it reconnects in a later week", async () => {
+    const { laptop, phone, onServer, start } = await offlineEdits((t) => t + WEEK);
+    const earlier = weekOf(start);
+    await eventually(async () => expect(seals(await entries(phone.engine)).filter((d) => d === "phone")).toEqual(["phone"]));
+    await eventually(async () => expect((await onServer({ op: "history", path: "n.md" })).result.versions).toMatchObject(expected));
+    expect(seals(await entries(laptop.engine))).toContain("phone");
+    expect(seals((await laptop.engine.week(earlier)).entries)).toEqual([]);
+  });
+});
+
 describe("the server's own edits", () => {
   it("records an agent's write with the agent's name, and any device sees it live", async () => {
     const s = await server();
@@ -579,9 +656,13 @@ describe("the server's own edits", () => {
     const by = { agent: "agent:cli", why: "agent" };
     expect(await call({ op: "create", path: "n.md", content: "from the server\n", by })).toMatchObject({ ok: true });
     await eventually(() => expect(a.disk.files.get("n.md")).toBe("from the server\n"));
-    await eventually(async () => expect(await entries(a.engine)).toHaveLength(2));
+    await eventually(async () => expect(await entries(a.engine)).toHaveLength(3));
     const list = await entries(a.engine);
-    expect(list.map((e) => e.device)).toEqual(["server", "server"]);
+    expect(list.map((e) => [e.t, e.device])).toEqual([
+      ["edit", "server"],
+      ["seal", "server"],
+      ["tree", "server"],
+    ]);
     expect(edits(list)[0]).toMatchObject({ by: "agent:cli", removes: false });
     expect(tree(list)[0]).toMatchObject({ from: null, to: "n.md", binary: false });
     expect(a.engine.vaultIndex.weeks()).toEqual([weekOf(Date.now())]);

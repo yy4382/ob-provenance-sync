@@ -27,11 +27,27 @@ export interface TreeEntry {
   binary: boolean;
 }
 
+/**
+ * Where one device's work on a note stops. Each device edits its own branch, so
+ * another device's `pre` can lack this device's edits: only the device itself
+ * can say what its branch held.
+ */
+export interface SealEntry {
+  t: "seal";
+  id: FileId;
+  at: number;
+  device: string;
+  /** Y.encodeSnapshot of the note just before a remote change merged in, or just after a host's own write. */
+  post: Uint8Array;
+}
+
 /** Immutable once appended. */
-export type Entry = EditEntry | TreeEntry;
+export type Entry = EditEntry | TreeEntry | SealEntry;
 
 /** The longest a note's text between two restorable points can run while it's being edited. */
 export const PRE_EVERY = 5 * 60_000;
+/** Changes from elsewhere this close together are people typing live, not a branch merging in, so they don't each end a burst. */
+export const SEAL_GAP = 60_000;
 export const WEEK = 7 * 24 * 60 * 60_000;
 export const DAY = 24 * 60 * 60_000;
 export const HISTORY_DAYS = 365;
@@ -62,6 +78,13 @@ const entrySchema = z.discriminatedUnion("t", [
     to: z.string().nullable(),
     binary: z.boolean(),
   }),
+  z.object({
+    t: z.literal("seal"),
+    id: z.string(),
+    at: z.number(),
+    device: z.string(),
+    post: z.instanceof(Uint8Array),
+  }),
 ]);
 
 /** Parses at the read boundary. An entry this version doesn't know is skipped, so a newer writer can't break an older reader. */
@@ -83,6 +106,8 @@ export function markActor(doc: Y.Doc, by: AuthorId): void {
 interface WeekMemory {
   week: number;
   lastPre: Map<FileId, number>;
+  /** A note's seal, until a `pre` takes over from it. */
+  sealed: Map<FileId, SealEntry>;
   minute: number;
   seen: Set<string>;
 }
@@ -126,6 +151,8 @@ export class Recorder {
   /** A device's first scan is a baseline, not an event: installing doesn't report the vault as new. */
   paused = false;
   private memory: WeekMemory | null = null;
+  /** Notes edited here since their last seal. Outlives a week: offline work can cross one. */
+  private readonly dirty = new Set<FileId>();
 
   constructor(
     private readonly device: string,
@@ -142,21 +169,66 @@ export class Recorder {
     return !this.paused && this.ours(tr);
   }
 
+  /** Replays this device's entries from before the open week, which `weekEntries` can't reach. */
+  carry(entries: Entry[]): void {
+    for (const e of entries) this.track(e);
+  }
+
+  private track(e: Entry): void {
+    if (e.device !== this.device) return;
+    if (e.t === "edit") this.dirty.add(e.id);
+    if (e.t === "seal") this.dirty.delete(e.id);
+  }
+
   private remembered(at: number): WeekMemory {
     const week = weekOf(at);
     if (this.memory?.week === week) return this.memory;
-    const memory: WeekMemory = { week, lastPre: new Map(), minute: minuteOf(at), seen: new Set() };
+    const memory: WeekMemory = { week, lastPre: new Map(), sealed: new Map(), minute: minuteOf(at), seen: new Set() };
     for (const e of parseEntries(this.weekEntries(at).toArray())) {
-      if (e.t !== "edit" || e.device !== this.device) continue;
-      if (e.pre) memory.lastPre.set(e.id, Math.max(memory.lastPre.get(e.id) ?? 0, e.at));
+      this.track(e);
+      if (e.device !== this.device) continue;
+      if (e.t === "seal") {
+        memory.sealed.set(e.id, e);
+        memory.seen.clear();
+      }
+      if (e.t !== "edit") continue;
+      if (e.pre) {
+        memory.lastPre.set(e.id, Math.max(memory.lastPre.get(e.id) ?? 0, e.at));
+        memory.sealed.delete(e.id);
+      }
       if (minuteOf(e.at) === memory.minute) memory.seen.add(editKey(e.id, e.by, e.removes));
     }
     return (this.memory = memory);
   }
 
-  private preDue(id: FileId): boolean {
+  /** Whether something other than this device changed the note since its seal. If not, its next edit just carries on from there. */
+  private movedSinceSeal(id: FileId, doc: Y.Doc, memory: WeekMemory): boolean {
+    const sealed = memory.sealed.get(id);
+    return !!sealed && !this.dirty.has(id) && !Y.equalSnapshots(Y.decodeSnapshot(sealed.post), Y.snapshot(doc));
+  }
+
+  private preDue(id: FileId, doc: Y.Doc): boolean {
     const at = this.now();
-    return at - (this.remembered(at).lastPre.get(id) ?? -Infinity) >= PRE_EVERY;
+    const memory = this.remembered(at);
+    return at - (memory.lastPre.get(id) ?? -Infinity) >= PRE_EVERY || this.movedSinceSeal(id, doc, memory);
+  }
+
+  private seal(id: FileId, post: Y.Snapshot): void {
+    const at = this.now();
+    const memory = this.remembered(at);
+    const entry: SealEntry = { t: "seal", id, at, device: this.device, post: Y.encodeSnapshot(post) };
+    memory.sealed.set(id, entry);
+    // The next edit has to be on record, or the burst would seem to end here.
+    memory.seen.clear();
+    this.dirty.delete(id);
+    this.append(entry);
+  }
+
+  /** Ends a write for a host that holds a note only while writing it, and so never hears the change that would end its burst. */
+  sealWrite(id: FileId, doc: Y.Doc): void {
+    const at = this.now();
+    const last = this.remembered(at).sealed.get(id);
+    if (this.dirty.has(id) && (!last || at - last.at >= SEAL_GAP)) this.seal(id, Y.snapshot(doc));
   }
 
   private append(entry: Entry): void {
@@ -172,28 +244,48 @@ export class Recorder {
       memory.minute = minuteOf(at);
       memory.seen.clear();
     }
+    this.dirty.add(id);
     const key = editKey(id, by, removes);
     if (!pre && memory.seen.has(key)) return;
     memory.seen.add(key);
-    if (pre) memory.lastPre.set(id, at);
+    if (pre) {
+      memory.lastPre.set(id, at);
+      memory.sealed.delete(id);
+    }
     this.append({ t: "edit", id, at, device: this.device, by, removes, ...(pre ? { pre: Y.encodeSnapshot(pre) } : {}) });
   }
 
-  /** Watches a note until the returned function is called. */
-  watchNote(id: FileId, doc: Y.Doc): () => void {
+  /**
+   * Watches a note until the returned function is called. `hears` says whether
+   * a change that isn't ours can be another device's yet: a device's own stored
+   * text loads the same way, and must not read as a merge.
+   */
+  watchNote(id: FileId, doc: Y.Doc, hears: () => boolean = () => true): () => void {
     const ytext = doc.getText(TEXT_KEY);
     let stash: Y.Snapshot | null = null;
+    let heard = -Infinity;
+    const arriving = (tr: Y.Transaction) => !this.paused && !this.ours(tr) && hears();
+    const sealDue = () => {
+      const at = this.now();
+      if (at - heard < SEAL_GAP) return false;
+      this.remembered(at);
+      return this.dirty.has(id);
+    };
     const before = (tr: Y.Transaction) => {
-      if (!stash && this.live(tr) && this.preDue(id)) stash = Y.snapshot(doc);
+      if (!stash && (this.live(tr) ? this.preDue(id, doc) : arriving(tr) && sealDue())) stash = Y.snapshot(doc);
     };
     // A transaction that leaves the text alone mustn't pass its snapshot to a later edit, with remote changes in between.
     const after = () => {
       stash = null;
     };
     const observer = (e: Y.YTextEvent, tr: Y.Transaction) => {
-      if (!this.live(tr)) return;
+      const live = this.live(tr);
+      if (!live && !arriving(tr)) return;
+      if (!live) heard = this.now();
+      if (!live && !stash) return;
       const { inserted, removes } = textChange(e, ytext);
       if (!inserted && !removes) return;
+      if (!live) return this.seal(id, stash!);
       const by = (tr.meta.get(ACTOR) as AuthorId | undefined) ?? (inserted && authorAt(inserted)) ?? "unknown";
       this.recordEdit(id, by, removes, stash);
     };

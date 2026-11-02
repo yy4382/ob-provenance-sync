@@ -7,6 +7,7 @@ import {
   history,
   humanProvenance,
   insertText,
+  markActor,
   markNote,
   newFileId,
   parseEntries,
@@ -93,6 +94,13 @@ function arrives(v: ReturnType<typeof vault>, path: string, text: string) {
   index.set(id, { type: "markdown", path });
   Y.applyUpdate(v.index.doc, Y.encodeStateAsUpdate(index.doc), "net");
   return id;
+}
+
+function otherDeviceWrites(doc: Y.Doc, line: string) {
+  const other = new Y.Doc({ gc: false });
+  Y.applyUpdate(other, Y.encodeStateAsUpdate(doc));
+  other.getText(TEXT_KEY).insert(0, line);
+  return Y.encodeStateAsUpdate(other, Y.encodeStateVector(doc));
 }
 
 const versions = async (docs: VaultDocs, path: string, req = {}) => (await history(docs, { path, ...req })).versions;
@@ -265,6 +273,389 @@ describe("history", () => {
     const res = await history(v.docs, { path: "a.md" });
     expect(res.versions).toMatchObject([{ status: "created", added: null, removed: null }]);
     expect(res.incomplete).toBe("server");
+  });
+});
+
+describe("a note edited on two devices", () => {
+  const BASE = "base\n";
+
+  function devices(startText = BASE) {
+    const index = new VaultIndex(new Y.Doc({ gc: false }));
+    const weeks = new Map<number, Y.Doc>();
+    const weekDoc = (n: number) => {
+      if (!weeks.has(n)) weeks.set(n, new Y.Doc({ gc: false }));
+      return weeks.get(n)!;
+    };
+    const id = newFileId();
+    index.set(id, { type: "markdown", path: "a.md" });
+    const seed = new Y.Doc({ gc: false });
+    insertText(seed.getText(TEXT_KEY), 0, startText, humanProvenance("human:seed", "seed"));
+    const recorder = (name: string) =>
+      new Recorder(
+        name,
+        (at) => entriesOf(weekDoc(weekOf(at))),
+        (tr) => tr.local,
+        (w) => index.markJournalWeek(w),
+      );
+    const device = (name: string) => {
+      const doc = new Y.Doc({ gc: false });
+      Y.applyUpdate(doc, Y.encodeStateAsUpdate(seed), "net");
+      const text = doc.getText(TEXT_KEY);
+      const by = humanProvenance(`human:${name}`, name);
+      const d = {
+        doc,
+        text,
+        rec: recorder(name),
+        stop: () => {},
+        restart() {
+          d.stop();
+          d.rec = recorder(name);
+          d.stop = d.rec.watchNote(id, doc);
+        },
+        append: (line: string) => doc.transact(() => insertText(text, text.length, line, by)),
+        remove: (line: string) => doc.transact(() => replaceText(text, line, "", by)),
+      };
+      d.stop = d.rec.watchNote(id, doc);
+      return d;
+    };
+    const merge = (a: { doc: Y.Doc }, b: { doc: Y.Doc }) => {
+      Y.applyUpdate(b.doc, Y.encodeStateAsUpdate(a.doc, Y.encodeStateVector(b.doc)), "net");
+      Y.applyUpdate(a.doc, Y.encodeStateAsUpdate(b.doc, Y.encodeStateVector(a.doc)), "net");
+    };
+    const docs = (doc: Y.Doc): VaultDocs => ({
+      device: "reader",
+      index: async () => index,
+      updateIndex: async () => {
+        throw new Error("a reader doesn't write");
+      },
+      readText: async () => doc.getText(TEXT_KEY),
+      updateText: async () => {
+        throw new Error("a reader doesn't write");
+      },
+      week: async (n) => ({ entries: parseEntries(entriesOf(weekDoc(n)).toArray()), complete: true }),
+      peekText: async (_id, fn) => fn(doc.getText(TEXT_KEY)),
+    });
+    const entries = () => [...weeks.values()].flatMap((d) => parseEntries(entriesOf(d).toArray()));
+    /** Newest first: who, how many lines each way, and the changed lines. */
+    const shown = async (doc: Y.Doc) =>
+      (await history(docs(doc), { path: "a.md", fullDiff: true })).versions.map((x) => [x.authors, x.added, x.removed, x.diff?.split("\n").filter((l) => /^[-+]/.test(l))]);
+    const seals = (name: string) => entries().filter((e) => e.t === "seal" && e.device === name).length;
+    return { id, device, merge, docs, entries, shown, seals };
+  }
+
+  const version = (name: string, added: number, removed: number, ...lines: string[]) => [[`human:${name}`], added, removed, lines];
+
+  function overlapping(w: ReturnType<typeof devices>) {
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    laptop.append("laptop at 0\n");
+    pass(6 * MINUTE);
+    phone.append("phone at 6\n");
+    pass(6 * MINUTE);
+    laptop.append("laptop at 12\n");
+    pass(6 * MINUTE);
+    phone.append("phone at 18\n");
+    pass(6 * MINUTE);
+    w.merge(laptop, phone);
+    return { laptop, phone };
+  }
+
+  it("keeps each device's edits in its own versions when they overlap in time", async () => {
+    const w = devices();
+    const { laptop, phone } = overlapping(w);
+    const expected = [version("phone", 1, 0, "+phone at 18"), version("laptop", 1, 0, "+laptop at 12"), version("phone", 1, 0, "+phone at 6"), version("laptop", 1, 0, "+laptop at 0")];
+    expect(await w.shown(laptop.doc)).toEqual(expected);
+    expect(await w.shown(phone.doc)).toEqual(expected);
+  });
+
+  it("does the same for an edit made an hour later from an older state", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    pass(60 * MINUTE);
+    laptop.append("laptop line\n");
+    pass(60 * MINUTE);
+    phone.append("phone line\n");
+    pass(60 * MINUTE);
+    w.merge(laptop, phone);
+    pass(60 * MINUTE);
+    laptop.append("after the merge\n");
+    expect(await w.shown(laptop.doc)).toEqual([version("laptop", 1, 0, "+after the merge"), version("phone", 1, 0, "+phone line"), version("laptop", 1, 0, "+laptop line")]);
+  });
+
+  it("gives the text each device's version left when passed that version's time", async () => {
+    const w = devices();
+    const { laptop } = overlapping(w);
+    const merged = laptop.text.toString();
+    pass(60 * MINUTE);
+    const docs = w.docs(laptop.doc);
+    const list = (await history(docs, { path: "a.md" })).versions;
+    expect(await Promise.all(list.map((x) => textIn(docs, "a.md", x.at)))).toEqual(["base\nphone at 6\nphone at 18\n", "base\nlaptop at 0\nlaptop at 12\n", "base\nphone at 6\n", "base\nlaptop at 0\n"]);
+    expect(await textIn(docs, "a.md", Date.now())).toBe(merged);
+  });
+
+  it("gives the merged text for a quiet time after a merge", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    laptop.append("laptop line\n");
+    pass(10 * MINUTE);
+    phone.append("phone line\n");
+    pass(10 * MINUTE);
+    w.merge(laptop, phone);
+    const merged = laptop.text.toString();
+    const quiet = Date.now() + 30 * MINUTE;
+    pass(60 * MINUTE);
+    laptop.append("later\n");
+    expect(await textIn(w.docs(laptop.doc), "a.md", quiet)).toBe(merged);
+  });
+
+  it("attributes offline deletions to the device that made them", async () => {
+    const w = devices("one\ntwo\nthree\nfour\n");
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    laptop.remove("one\n");
+    pass(10 * MINUTE);
+    phone.remove("four\n");
+    pass(10 * MINUTE);
+    w.merge(laptop, phone);
+    expect(await w.shown(laptop.doc)).toEqual([version("phone", 0, 1, "-four"), version("laptop", 0, 1, "-one")]);
+  });
+
+  it("still ends a device's offline work after a restart while it was dirty", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    laptop.append("laptop line\n");
+    pass(10 * MINUTE);
+    phone.append("phone line\n");
+    pass(MINUTE);
+    phone.restart();
+    pass(10 * MINUTE);
+    w.merge(laptop, phone);
+    expect(w.seals("phone")).toBe(1);
+    expect(await w.shown(phone.doc)).toEqual([version("phone", 1, 0, "+phone line"), version("laptop", 1, 0, "+laptop line")]);
+  });
+
+  it("starts a new version on the first edit after a merge, even across a restart", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    phone.append("phone line\n");
+    pass(2 * MINUTE);
+    laptop.append("laptop line\n");
+    w.merge(laptop, phone);
+    phone.restart();
+    pass(MINUTE);
+    phone.append("after\n");
+    expect(await w.shown(phone.doc)).toEqual([version("phone", 1, 0, "+after"), version("laptop", 1, 0, "+laptop line"), version("phone", 1, 0, "+phone line")]);
+  });
+
+  it("carries a dirty note into a new week on a running device", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    phone.append("phone line\n");
+    vi.setSystemTime(2961 * WEEK + 60 * MINUTE);
+    laptop.append("laptop line\n");
+    w.merge(laptop, phone);
+    expect(w.seals("phone")).toBe(1);
+    expect(await w.shown(phone.doc)).toEqual([version("laptop", 1, 0, "+laptop line"), version("phone", 1, 0, "+phone line")]);
+  });
+
+  it("carries a dirty note into a new week through a restart, from the older entries its host hands over", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    phone.append("phone line\n");
+    const older = w.entries();
+    vi.setSystemTime(2961 * WEEK + 60 * MINUTE);
+    laptop.append("laptop line\n");
+    phone.restart();
+    phone.rec.carry(older);
+    w.merge(laptop, phone);
+    expect(w.seals("phone")).toBe(1);
+    expect(await w.shown(phone.doc)).toEqual([version("laptop", 1, 0, "+laptop line"), version("phone", 1, 0, "+phone line")]);
+  });
+
+  it("splits versions at each turn when two devices take turns online", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    for (const [i, d] of [laptop, phone, laptop, phone].entries()) {
+      d.append(`turn ${i}\n`);
+      w.merge(laptop, phone);
+      pass(2 * MINUTE);
+    }
+    expect(await w.shown(laptop.doc)).toEqual([version("phone", 1, 0, "+turn 3"), version("laptop", 1, 0, "+turn 2"), version("phone", 1, 0, "+turn 1"), version("laptop", 1, 0, "+turn 0")]);
+  });
+
+  it("reads the same whichever replica answers, once the devices have merged", async () => {
+    const w = devices();
+    const { laptop, phone } = overlapping(w);
+    const replica = new Y.Doc({ gc: false });
+    Y.applyUpdate(replica, Y.encodeStateAsUpdate(laptop.doc), "net");
+    expect(await w.shown(replica)).toEqual(await w.shown(laptop.doc));
+    expect(await w.shown(phone.doc)).toEqual(await w.shown(laptop.doc));
+  });
+
+  it("stays within its cap while two people type live", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    const typingFor = 20 * MINUTE;
+    const step = 2000;
+    for (let t = 0; t < typingFor; t += step) {
+      (t % (2 * step) === 0 ? laptop : phone).append("x");
+      w.merge(laptop, phone);
+      pass(step);
+    }
+    const bounds = (name: string) => w.entries().filter((e) => e.device === name && (e.t === "seal" || (e.t === "edit" && e.pre))).length;
+    expect(laptop.text.toString()).toBe(phone.text.toString());
+    // Both start on the usual one per PRE_EVERY. The laptop adds a seal and the snapshot after it at first contact, and the phone, which had just heard the laptop, adds nothing.
+    expect([bounds("laptop"), bounds("phone")]).toEqual([6, 4]);
+  });
+
+  it("records nothing for a remote change to a note this device hasn't edited", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    laptop.append("laptop line\n");
+    w.merge(laptop, phone);
+    pass(2 * MINUTE);
+    laptop.append("more\n");
+    w.merge(laptop, phone);
+    expect(w.entries().filter((e) => e.device === "phone")).toEqual([]);
+  });
+
+  it("seals once, however many remote changes follow", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    phone.append("phone line\n");
+    pass(2 * MINUTE);
+    laptop.append("laptop line\n");
+    w.merge(laptop, phone);
+    pass(2 * MINUTE);
+    laptop.append("laptop again\n");
+    w.merge(laptop, phone);
+    expect(w.seals("phone")).toBe(1);
+  });
+
+  it("records nothing for a remote change that only formats text", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    phone.append("phone line\n");
+    const before = w.entries();
+    pass(2 * MINUTE);
+    laptop.doc.transact(() => laptop.text.format(0, 4, { pa: "human:laptop" }));
+    w.merge(laptop, phone);
+    expect(w.entries()).toEqual(before);
+  });
+
+  it("never seals as a device's stored text loads", () => {
+    const w = devices();
+    const phone = w.device("phone");
+    phone.append("phone line\n");
+    phone.stop();
+    const reopened = new Y.Doc({ gc: false });
+    const rec = new Recorder(
+      "phone",
+      () => entriesOf(new Y.Doc()),
+      (tr) => tr.local,
+      () => {},
+    );
+    rec.carry(w.entries());
+    let hears = false;
+    rec.watchNote(w.id, reopened, () => hears);
+    Y.applyUpdate(reopened, Y.encodeStateAsUpdate(phone.doc), "store");
+    expect(w.seals("phone")).toBe(0);
+    hears = true;
+    expect(w.seals("phone")).toBe(0);
+  });
+
+  it("ends a device's work when it reconnects seconds into its first offline edit", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    laptop.append("laptop line\n");
+    pass(60 * MINUTE);
+    phone.append("phone line\n");
+    pass(5000);
+    w.merge(laptop, phone);
+    pass(1000);
+    phone.append("still typing\n");
+    expect(await w.shown(phone.doc)).toEqual([version("phone", 1, 0, "+still typing"), version("phone", 1, 0, "+phone line"), version("laptop", 1, 0, "+laptop line")]);
+  });
+
+  it("gives no count for a device that hasn't heard the merge, and the right one once it has", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    const server = { doc: new Y.Doc({ gc: false }) };
+    laptop.append("laptop line\n");
+    w.merge(laptop, server);
+    pass(60 * MINUTE);
+    phone.append("phone line\n");
+    pass(MINUTE);
+    w.merge(phone, server);
+    expect(await w.shown(server.doc)).toEqual([version("phone", 1, 0, "+phone line"), [["human:laptop"], null, null, undefined]]);
+    pass(60 * MINUTE);
+    w.merge(laptop, server);
+    expect(await w.shown(server.doc)).toEqual([version("phone", 1, 0, "+phone line"), version("laptop", 1, 0, "+laptop line")]);
+  });
+
+  it("ends a version at the next snapshot holding its work, when its device never hears from anyone", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    laptop.append("laptop line\n");
+    pass(10 * MINUTE);
+    Y.applyUpdate(phone.doc, Y.encodeStateAsUpdate(laptop.doc), "net");
+    laptop.stop();
+    pass(10 * MINUTE);
+    phone.append("phone line\n");
+    expect(await w.shown(phone.doc)).toEqual([version("phone", 1, 0, "+phone line"), version("laptop", 1, 0, "+laptop line")]);
+  });
+});
+
+describe("a host that only sees a note during its own writes", () => {
+  function server() {
+    const week = new Y.Doc({ gc: false });
+    const doc = new Y.Doc({ gc: false });
+    const id = newFileId();
+    const write = (line: string) => {
+      const recorder = new Recorder(
+        "server",
+        () => entriesOf(week),
+        (tr) => tr.local,
+        () => {},
+      );
+      const stop = recorder.watchNote(id, doc);
+      doc.transact(() => {
+        markActor(doc, "agent:cli");
+        doc.getText(TEXT_KEY).insert(0, line);
+      });
+      stop();
+      recorder.sealWrite(id, doc);
+    };
+    return { doc, write, entries: () => parseEntries(entriesOf(week).toArray()) };
+  }
+
+  it("seals a write, and keeps one burst across writes nothing came between", () => {
+    const s = server();
+    s.write("one\n");
+    pass(2 * MINUTE);
+    s.write("two\n");
+    expect(s.entries().map((e) => [e.t, e.t === "edit" && !!e.pre])).toEqual([
+      ["edit", true],
+      ["seal", false],
+      ["edit", false],
+      ["seal", false],
+    ]);
+  });
+
+  it("starts a new burst when something else changed the note since its last write", () => {
+    const s = server();
+    s.write("one\n");
+    pass(2 * MINUTE);
+    Y.applyUpdate(s.doc, otherDeviceWrites(s.doc, "theirs\n"), "net");
+    s.write("two\n");
+    expect(s.entries().flatMap((e) => (e.t === "edit" ? [!!e.pre] : []))).toEqual([true, true]);
+  });
+
+  it("seals at most once a minute under a run of writes", () => {
+    const s = server();
+    for (let i = 0; i < 12; i++) {
+      s.write(`${i}\n`);
+      pass(10_000);
+    }
+    expect(s.entries().filter((e) => e.t === "seal")).toHaveLength(2);
   });
 });
 

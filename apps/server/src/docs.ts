@@ -65,7 +65,8 @@ export class ServerVaultDocs implements VaultDocs {
 
   async updateText<T>(id: FileId, fn: (ytext: Y.Text) => T): Promise<T> {
     const conn = await this.connection(fileDocName(this.vault, id));
-    const stop = (await this.recorder()).watchNote(id, conn.document!);
+    const recorder = await this.recorder();
+    const stop = recorder.watchNote(id, conn.document!);
     let out!: T;
     try {
       await conn.transact((doc) => {
@@ -74,6 +75,7 @@ export class ServerVaultDocs implements VaultDocs {
     } finally {
       stop();
     }
+    recorder.sealWrite(id, conn.document!);
     return out;
   }
 

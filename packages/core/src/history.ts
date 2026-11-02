@@ -6,7 +6,7 @@ import { OpError, type VaultDocs } from "./ops";
 import { minuteOf, type AuthorId } from "./provenance";
 import { docAt, TEXT_KEY, textAt, type FileId } from "./vault";
 
-/** One recorded burst of one note: from one `pre` to the next. */
+/** One recorded burst of one note on one device: from a `pre` to that device's next `pre` or seal. */
 export interface NoteVersion {
   /** Its latest entry, to the minute. */
   at: number;
@@ -16,7 +16,7 @@ export interface NoteVersion {
   path: string;
   status: "created" | "modified" | "renamed" | "deleted";
   from?: string;
-  /** Lines, null if a side can't be restored here. */
+  /** Lines, null if a side can't be restored here or its device hasn't said where its work ended. */
   added: number | null;
   removed: number | null;
   preview: string;
@@ -45,25 +45,55 @@ const PREVIEW_POINTS = 100;
 const PREVIEW_MIN_REMOVED = 16;
 /** A preview shows 100 code points, so a huge changed block needn't be compared whole. */
 const CROP_SOURCE = 2000;
+const MINUTE = 60_000;
 
+/** One device's stretch of work on its own branch of a note. Bursts from different devices can overlap in time. */
 interface Burst {
-  entries: Entry[];
+  device: string;
+  entries: Array<EditEntry | TreeEntry>;
   /** The text it starts from, if it starts with a snapshot. */
   pre: Uint8Array | null;
+  /** The device's next `pre` or seal, which holds this burst's work and nothing merged after it. */
+  end: { snapshot: Uint8Array; at: number } | null;
 }
 
-/** Oldest first. `entries` is one note's, sorted by `at`. */
+/** Ordered by their latest entries, oldest first. `entries` is one note's, sorted by `at`. */
 function burstsOf(entries: Entry[]): Burst[] {
   const bursts: Burst[] = [];
+  const latest = new Map<string, Burst>();
+  const open = new Map<string, Burst[]>();
+  const ending = (device: string, end: Burst["end"]) => {
+    for (const burst of open.get(device) ?? []) burst.end = end;
+    open.delete(device);
+  };
+  const opening = (burst: Burst) => open.set(burst.device, [...(open.get(burst.device) ?? []), burst]);
+
   for (const entry of entries) {
-    const last = bursts.at(-1);
+    const { device } = entry;
+    if (entry.t === "seal") {
+      ending(device, { snapshot: entry.post, at: entry.at });
+      continue;
+    }
+    const last = latest.get(device);
     const pre = entry.t === "edit" ? (entry.pre ?? null) : null;
+    if (pre) ending(device, { snapshot: pre, at: entry.at });
     // A rename long after the last edit isn't part of that edit, whose time and counts it would otherwise take over.
     const apart = entry.t === "tree" && !!last && entry.at - last.entries.at(-1)!.at >= PRE_EVERY;
-    if (!last || pre || apart) bursts.push({ entries: [entry], pre });
-    else last.entries.push(entry);
+    if (!last || pre || apart) {
+      const burst: Burst = { device, entries: [entry], pre, end: null };
+      bursts.push(burst);
+      latest.set(device, burst);
+      opening(burst);
+      continue;
+    }
+    last.entries.push(entry);
+    // A host seals every write, and writing on from the sealed text is the same burst.
+    if (entry.t === "edit" && last.end) {
+      last.end = null;
+      opening(last);
+    }
   }
-  return bursts;
+  return bursts.sort((a, b) => a.entries.at(-1)!.at - b.entries.at(-1)!.at);
 }
 
 const noteEntries = (entries: Entry[], id: FileId) => entries.filter((e) => e.id === id).sort((a, b) => a.at - b.at);
@@ -109,14 +139,69 @@ function notFound(path: string, incomplete: Incomplete | undefined): OpError {
 
 type Bound = { pre: Uint8Array } | "current" | "empty" | null;
 
-/** Where the text stands as burst `i` starts. A burst of tree changes alone leaves the text as the next one found it. */
-function startOf(bursts: Burst[], i: number): Bound {
-  for (; i < bursts.length; i++) {
-    const { pre, entries } = bursts[i]!;
-    if (pre) return { pre };
-    if (entries.some((e) => e.t === "edit")) return null;
+/** Whether `outer` has everything `inner` has. Both come from Y.snapshot, so each client's delete ranges are sorted and merged. */
+function contains(outer: Y.Snapshot, inner: Y.Snapshot): boolean {
+  for (const [client, clock] of inner.sv) if ((outer.sv.get(client) ?? 0) < clock) return false;
+  for (const [client, ranges] of inner.ds.clients) {
+    const theirs = outer.ds.clients.get(client) ?? [];
+    let at = 0;
+    for (const { clock, len } of ranges) {
+      while (at < theirs.length && theirs[at]!.clock + theirs[at]!.len <= clock) at++;
+      const range = theirs[at];
+      if (!range || range.clock > clock || range.clock + range.len < clock + len) return false;
+    }
   }
-  return "current";
+  return true;
+}
+
+/**
+ * Where the text stands as burst `i` ends. With no bound of its own device,
+ * another device's later `pre` serves if it can hold this burst's edits, which
+ * means it has this burst's start and more. If later `pre`s exist and none can,
+ * they're on other branches and the current text has their edits in it, so
+ * nothing here shows this burst alone until its device or a later edit says.
+ */
+function endOf(bursts: Burst[], i: number): Bound {
+  const burst = bursts[i]!;
+  if (burst.end) return { pre: burst.end.snapshot };
+  const ended = burst.entries.at(-1)!.at;
+  const later = bursts.slice(i + 1).flatMap((b) => (b.pre && b.entries[0]!.at >= ended ? [b.pre] : []));
+  const start = burst.pre && snapshotOf(burst.pre);
+  if (!start) return later[0] ? { pre: later[0] } : "current";
+  const holding = later.find((pre) => {
+    const snapshot = snapshotOf(pre);
+    return snapshot && contains(snapshot, start) && !Y.equalSnapshots(snapshot, start);
+  });
+  return holding ? { pre: holding } : later.length ? null : "current";
+}
+
+/** Where the text stands as burst `i` starts. A burst of tree changes alone leaves the text as it found it. */
+function startOf(bursts: Burst[], i: number): Bound {
+  const { pre, entries } = bursts[i]!;
+  if (pre) return { pre };
+  return entries.some((e) => e.t === "edit") ? null : endOf(bursts, i);
+}
+
+/** Where the text stood at `cut`: the one bound a version's own time has to land on, and otherwise at most PRE_EVERY early. */
+function boundAt(bursts: Burst[], cut: number): Bound {
+  const editedBy = (b: Burst, at: number) => b.entries.some((e) => e.t === "edit" && e.at < at);
+  let i = bursts.length - 1;
+  while (i >= 0 && !editedBy(bursts[i]!, cut)) i--;
+  if (i < 0) {
+    const [first] = bursts.filter((b) => b.pre).sort((a, b) => a.entries[0]!.at - b.entries[0]!.at);
+    return first ? { pre: first.pre! } : bursts.some((b) => editedBy(b, Infinity)) ? null : "current";
+  }
+  const burst = bursts[i]!;
+  if (burst.entries.some((e) => e.t === "edit" && e.at >= cut)) return startOf(bursts, i);
+  const ownTime = minuteOf(burst.entries.at(-1)!.at) + MINUTE === cut;
+  const merged = !ownTime && burst.end && burst.end.at < cut ? snapshotOf(burst.end.snapshot) : null;
+  if (!merged) return endOf(bursts, i);
+  // A seal before this time means the branch merged, so the text since is that merge, which only the next edit or the note itself holds.
+  const next = bursts.slice(i + 1).find((b) => {
+    const snapshot = b.pre && snapshotOf(b.pre);
+    return snapshot && contains(snapshot, merged);
+  });
+  return next ? { pre: next.pre! } : "current";
 }
 
 /** One version in every field but those that need the note's text. */
@@ -139,7 +224,7 @@ function shapesOf(bursts: Burst[], currentPath: string) {
       status,
       ...(status === "renamed" ? { from: first!.from! } : {}),
       before: status === "created" ? ("empty" as const) : startOf(bursts, i),
-      after: status === "deleted" ? ("empty" as const) : startOf(bursts, i + 1),
+      after: status === "deleted" ? ("empty" as const) : endOf(bursts, i),
     });
     path = first?.from ?? first?.to ?? path;
   }
@@ -274,12 +359,11 @@ const utc = (ms: number) => new Date(ms).toISOString();
 
 /**
  * The text at time `at`. Times are printed to the minute, so `at` means the end
- * of its minute, and a version's own time gives the text it left. The text is
- * then the latest `pre` at or before the first edit after that: exact if the
+ * of its minute, and a version's own time gives the text it left. Exact if the
  * note was quiet, at most PRE_EVERY early if it was being edited.
  */
 export async function readAt(docs: VaultDocs, path: string, at: number, now: () => number = Date.now): Promise<PastText> {
-  const cut = minuteOf(at) + 60_000;
+  const cut = minuteOf(at) + MINUTE;
   const found = await scan(docs, path, now() + SCAN_MS, now, (_mine, next) => next < weekOf(cut));
   if (!found.id) throw notFound(path, found.incomplete);
   const id = found.id;
@@ -290,12 +374,9 @@ export async function readAt(docs: VaultDocs, path: string, at: number, now: () 
   const last = tree.at(-1);
   if (!(await docs.index()).get(id) && last?.to === null && last.at < cut) throw new OpError("not-found", `${path} no longer existed at that time: it was deleted at ${utc(last.at)}`);
 
-  const edits = mine.filter((e): e is EditEntry => e.t === "edit");
-  const first = edits.find((e) => e.at >= cut);
-  const pres = edits.filter((e) => e.pre);
-  const base = first && ([...pres].reverse().find((e) => e.at <= first.at) ?? pres[0]);
-  const snapshot = base ? snapshotOf(base.pre!) : null;
-  const doc = first && !snapshot ? null : await docs.peekText(id, (ytext) => docAt(ytext.doc!, snapshot ?? Y.snapshot(ytext.doc!)));
+  const bound = boundAt(burstsOf(mine), cut);
+  const snapshot = bound && bound !== "current" && bound !== "empty" ? snapshotOf(bound.pre) : null;
+  const doc = bound !== "current" && !snapshot ? null : await docs.peekText(id, (ytext) => docAt(ytext.doc!, snapshot ?? Y.snapshot(ytext.doc!)));
   if (!doc) throw new OpError("unavailable", "this note's text from that time hasn't reached this device yet. It will once sync reconnects.");
   return { doc, ...(found.incomplete ? { incomplete: found.incomplete } : {}) };
 }

@@ -33,8 +33,8 @@ const version = z.object({
   path: z.string().describe("The note's path at that time."),
   status: z.enum(["created", "modified", "renamed", "deleted"]),
   from: z.string().optional().describe("The path before a rename."),
-  added: z.number().nullable().describe("Lines added. Null if this text can't be restored here."),
-  removed: z.number().nullable().describe("Lines removed. Null if this text can't be restored here."),
+  added: z.number().nullable().describe("Lines added. Null if this can't be worked out here yet."),
+  removed: z.number().nullable().describe("Lines removed. Null if this can't be worked out here yet."),
   preview: z.string(),
   diff: z.string().optional().describe("Unified hunks, when asked for."),
   truncated: z.boolean().optional().describe("Part or all of this version's diff was cut."),
@@ -106,6 +106,7 @@ export const TOOLS: readonly ToolDef[] = [
     description:
       "List a note's past versions, newest first: when, its path then, who changed it, lines added and removed, and a preview of what changed. " +
       "A version is a stretch of editing, so a new one starts about every 5 minutes while a note is being edited. " +
+      "Each device's edits are versions of their own, so edits made offline keep their real times and authors, and two devices' versions can overlap. " +
       "History starts when this feature first ran on the vault, so nothing before that appears, and the sync server keeps it for a year unless the vault's owner set another limit. " +
       "A note keeps its history through renames, and an old path or a deleted note's path still works. " +
       "Renames and deletions have no recorded author, so they show as unknown. " +

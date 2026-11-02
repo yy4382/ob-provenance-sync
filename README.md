@@ -99,7 +99,7 @@ ob-provenance --vault Notes history --path today.md
 ob-provenance --vault Notes read --path today.md --at 2h
 ```
 
-A version is a stretch of editing, so a new one starts about every 5 minutes while a note is being edited. History starts when this feature first ran on the vault. It follows a note through renames and still works for a deleted note, and it can be viewed but not restored. Renames and deletions have no recorded author. Older history comes from the server automatically, by the same command. If the server can't be reached, the answer says it's incomplete.
+A version is a stretch of editing, so a new one starts about every 5 minutes while a note is being edited. Each device's edits are versions of their own, so edits made offline keep their real times and authors, and two devices' versions can overlap. History starts when this feature first ran on the vault. It follows a note through renames and still works for a deleted note, and it can be viewed but not restored. Renames and deletions have no recorded author. Older history comes from the server automatically, by the same command. If the server can't be reached, the answer says it's incomplete.
 
 Every call names its vault, with `--vault <name or id>` or `OB_PROVENANCE_VAULT`, and `--vault` wins. Without one, the call stops and lists your vaults. Nothing else picks a vault, neither the folder it runs in nor window focus, so a call means the same vault wherever it runs and whether or not Obsidian is open.
 

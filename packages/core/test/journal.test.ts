@@ -193,12 +193,13 @@ describe("Recorder on a note", () => {
     let exchanging = false;
     let cleanups = 0;
     let recorded = 0;
+    const work = () => j.all().filter((e) => e.t !== "seal").length;
     const run = concurrentRounds((go) => {
-      const before = j.all().length;
+      const before = work();
       exchanging = true;
       go();
       exchanging = false;
-      recorded += j.all().length - before;
+      recorded += work() - before;
     }, "net");
     run((doc, text) => {
       j.recorder().watchNote(ID, doc);

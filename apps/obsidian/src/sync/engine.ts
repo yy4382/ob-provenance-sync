@@ -163,7 +163,7 @@ export class MarkdownFile {
       if (this.editors > 0) this.recordEditorState();
       if (tr.origin !== FROM_DISK) this.scheduleWrite();
     });
-    this.stopRecording = engine.recorder.watchNote(id, this.doc);
+    this.stopRecording = engine.recorder.watchNote(id, this.doc, () => this.provider !== null);
     this.ready = this.open();
   }
 
@@ -603,6 +603,7 @@ export class SyncEngine implements VaultDocs {
     this.unsentWeeks = new Set(((await this.indexPersistence?.get(UNSENT_WEEKS_KEY)) ?? []) as number[]);
     this.enterWeek(weekOf(Date.now()));
     await this.thisWeek!.persistence?.whenSynced;
+    await this.recallOlderWork(weekOf(Date.now()));
     void this.dropOldWeeks();
     this.weekDropTimer = setInterval(() => void this.dropOldWeeks(), DAY);
     this.stopRecordingIndex = this.recorder.watchIndex(this.vaultIndex.files);
@@ -1354,6 +1355,17 @@ export class SyncEngine implements VaultDocs {
     void synced(open.provider).then(() => {
       for (const past of this.unsentWeeks) if (past !== week) void this.pastWeek(past);
     });
+  }
+
+  /** Offline work can span weeks, and the recorder still has to end it when this device next hears from another. */
+  private async recallOlderWork(week: number) {
+    const older = [...new Set([week - 1, ...this.unsentWeeks])].filter((n) => n < week && this.keepsWeek(n)).sort((a, b) => a - b);
+    for (const n of older) {
+      const held = this.openWeek(n);
+      await held.persistence?.whenSynced;
+      this.recorder.carry(parseEntries(entriesOf(held.doc).toArray()));
+      closeWeek(held);
+    }
   }
 
   private entriesFor(at: number): Y.Array<Entry> {
