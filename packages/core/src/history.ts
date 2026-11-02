@@ -10,7 +10,7 @@ import { docAt, TEXT_KEY, textAt, type FileId } from "./vault";
 export interface NoteVersion {
   /** Its latest entry, to the minute. */
   at: number;
-  /** Who made its entries. A tree change counts as unknown. */
+  /** Who made its entries. A rename or a deletion counts as unknown, and creating a note names whoever wrote its first text. */
   authors: AuthorId[];
   /** The note's path at that time. */
   path: string;
@@ -222,7 +222,7 @@ function shapesOf(bursts: Burst[], currentPath: string) {
     const status: NoteVersion["status"] =
       last?.to === null ? "deleted" : tree.some((e) => e.from === null) ? "created" : first?.from != null && first.from !== last?.to ? "renamed" : "modified";
     const known = entries.flatMap((e) => (e.t === "edit" && e.by !== "unknown" ? [e.by] : []));
-    const unknown = entries.some((e) => e.t === "tree" || e.by === "unknown");
+    const unknown = !known.length || entries.some((e) => (e.t === "tree" ? e.from !== null : e.by === "unknown"));
     shapes.push({
       at: minuteOf(entries.at(-1)!.at),
       authors: [...new Set(known), ...(unknown ? ["unknown" as const] : [])],

@@ -148,8 +148,23 @@ describe("history", () => {
     expect(await versions(v.docs, "a.md")).toMatchObject([
       { status: "modified", authors: ["human:a"], path: "a.md", added: 1, removed: 1 },
       { status: "modified", authors: ["agent:cli"], path: "a.md", added: 1, removed: 0 },
-      { status: "created", authors: ["agent:cli", "unknown"], path: "a.md", added: 2, removed: 0 },
+      { status: "created", authors: ["agent:cli"], path: "a.md", added: 2, removed: 0 },
     ]);
+  });
+
+  it("has no author for a note created blank, because nothing wrote to it", async () => {
+    const v = vault();
+    await v.create("a.md", "");
+    expect(await versions(v.docs, "a.md")).toMatchObject([{ status: "created", authors: ["unknown"], added: 0, removed: 0 }]);
+  });
+
+  it("shows unknown beside a known author when a rename joins an edit", async () => {
+    const v = vault();
+    await v.create("a.md", "one\n");
+    pass(PRE_EVERY);
+    await v.edit("a.md", "one\n", "two\n");
+    await v.run({ op: "rename", from: "a.md", to: "b.md" });
+    expect((await versions(v.docs, "b.md"))[0]).toMatchObject({ status: "renamed", authors: ["agent:cli", "unknown"] });
   });
 
   it("counts a deletion as removing what the note held, and finds it by its old path", async () => {
