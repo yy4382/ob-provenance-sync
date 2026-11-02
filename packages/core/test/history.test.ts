@@ -606,6 +606,42 @@ describe("a note edited on two devices", () => {
     expect(await w.shown(server.doc)).toEqual([version("phone", 1, 0, "+phone line"), version("laptop", 1, 0, "+laptop line")]);
   });
 
+  it("won't credit a sleeping device with what an offline device wrote before it", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    const server = { doc: new Y.Doc({ gc: false }) };
+    phone.append("phone first\n");
+    pass(6 * MINUTE);
+    phone.append("phone second\n");
+    pass(6 * MINUTE);
+    laptop.append("laptop line\n");
+    w.merge(laptop, server);
+    pass(6 * MINUTE);
+    w.merge(phone, server);
+    expect(await w.shown(phone.doc)).toEqual([[["human:laptop"], null, null, undefined], version("phone", 1, 0, "+phone second"), version("phone", 1, 0, "+phone first")]);
+    pass(60 * MINUTE);
+    w.merge(laptop, server);
+    expect(await w.shown(laptop.doc)).toEqual([version("laptop", 1, 0, "+laptop line"), version("phone", 1, 0, "+phone second"), version("phone", 1, 0, "+phone first")]);
+  });
+
+  it("won't end a sleeping device's version at a later snapshot that lacks its work", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    const server = { doc: new Y.Doc({ gc: false }) };
+    laptop.append("laptop line\n");
+    w.merge(laptop, server);
+    pass(6 * MINUTE);
+    phone.append("phone first\n");
+    pass(6 * MINUTE);
+    phone.append("phone second\n");
+    pass(6 * MINUTE);
+    w.merge(phone, server);
+    expect(await w.shown(phone.doc)).toEqual([version("phone", 1, 0, "+phone second"), version("phone", 1, 0, "+phone first"), [["human:laptop"], null, null, undefined]]);
+    pass(60 * MINUTE);
+    w.merge(laptop, server);
+    expect(await w.shown(laptop.doc)).toEqual([version("phone", 1, 0, "+phone second"), version("phone", 1, 0, "+phone first"), version("laptop", 1, 0, "+laptop line")]);
+  });
+
   it("ends a version at the next snapshot holding its work, when its device never hears from anyone", async () => {
     const w = devices();
     const [laptop, phone] = [w.device("laptop"), w.device("phone")];

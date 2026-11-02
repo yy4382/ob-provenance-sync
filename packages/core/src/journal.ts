@@ -14,6 +14,8 @@ export interface EditEntry {
   removes: boolean;
   /** Y.encodeSnapshot of the note just before this entry's first change. */
   pre?: Uint8Array;
+  /** One character this edit inserted, by id, which tells a reader whether another device's snapshot has this work. A removal alone has none. */
+  wrote?: [client: number, clock: number];
 }
 
 /** from null: created. to null: deleted. from === to: an attachment's bytes changed. */
@@ -68,6 +70,7 @@ const entrySchema = z.discriminatedUnion("t", [
     by: z.string(),
     removes: z.boolean(),
     pre: z.instanceof(Uint8Array).optional(),
+    wrote: z.tuple([z.number(), z.number()]).optional(),
   }),
   z.object({
     t: z.literal("tree"),
@@ -237,7 +240,7 @@ export class Recorder {
     entries.push([entry]);
   }
 
-  private recordEdit(id: FileId, by: AuthorId, removes: boolean, pre: Y.Snapshot | null): void {
+  private recordEdit(id: FileId, by: AuthorId, removes: boolean, pre: Y.Snapshot | null, inserted: Y.Item | null): void {
     const at = this.now();
     const memory = this.remembered(at);
     if (minuteOf(at) !== memory.minute) {
@@ -252,7 +255,7 @@ export class Recorder {
       memory.lastPre.set(id, at);
       memory.sealed.delete(id);
     }
-    this.append({ t: "edit", id, at, device: this.device, by, removes, ...(pre ? { pre: Y.encodeSnapshot(pre) } : {}) });
+    this.append({ t: "edit", id, at, device: this.device, by, removes, ...(pre ? { pre: Y.encodeSnapshot(pre) } : {}), ...(inserted ? { wrote: [inserted.id.client, inserted.id.clock] } : {}) });
   }
 
   /**
@@ -287,7 +290,7 @@ export class Recorder {
       if (!inserted && !removes) return;
       if (!live) return this.seal(id, stash!);
       const by = (tr.meta.get(ACTOR) as AuthorId | undefined) ?? (inserted && authorAt(inserted)) ?? "unknown";
-      this.recordEdit(id, by, removes, stash);
+      this.recordEdit(id, by, removes, stash, inserted);
     };
     doc.on("beforeTransaction", before);
     doc.on("afterTransaction", after);

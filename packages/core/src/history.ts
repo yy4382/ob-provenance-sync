@@ -160,12 +160,15 @@ function contains(outer: Y.Snapshot, inner: Y.Snapshot): boolean {
   return true;
 }
 
+const wroteIn = ({ entries }: Burst) => entries.flatMap((e) => (e.t === "edit" && e.wrote ? [e.wrote] : []));
+const has = (snapshot: Y.Snapshot, [client, clock]: [number, number]) => (snapshot.sv.get(client) ?? 0) > clock;
+
 /**
  * Where the text stands as burst `i` ends. With no bound of its own device,
- * another device's later `pre` serves if it can hold this burst's edits, which
- * means it has this burst's start and more. If later `pre`s exist and none can,
- * they're on other branches and the current text has their edits in it, so
- * nothing here shows this burst alone until its device or a later edit says.
+ * another device's later `pre` serves if it holds this burst's edits. Failing
+ * that, the current text serves only if nothing from another branch is in it.
+ * Otherwise nothing here shows this burst alone until its device or a later
+ * edit says, and a wrong author is worse than no count.
  */
 function endOf(bursts: Burst[], i: number): Bound {
   const burst = bursts[i]!;
@@ -174,11 +177,14 @@ function endOf(bursts: Burst[], i: number): Bound {
   const later = bursts.slice(i + 1).flatMap((b) => (b.pre && b.entries[0]!.at >= ended ? [b.pre] : []));
   const start = burst.pre && snapshotOf(burst.pre);
   if (!start) return later[0] ? { pre: later[0] } : "current";
+  const own = wroteIn(burst);
   const holding = later.find((pre) => {
     const snapshot = snapshotOf(pre);
-    return snapshot && contains(snapshot, start) && !Y.equalSnapshots(snapshot, start);
+    return snapshot && contains(snapshot, start) && !Y.equalSnapshots(snapshot, start) && own.every((id) => has(snapshot, id));
   });
-  return holding ? { pre: holding } : later.length ? null : "current";
+  if (holding) return { pre: holding };
+  const foreign = bursts.some((b) => b.device !== burst.device && wroteIn(b).some((id) => !has(start, id)));
+  return later.length || foreign ? null : "current";
 }
 
 /** Where the text stands as burst `i` starts. A burst of tree changes alone leaves the text as it found it. */

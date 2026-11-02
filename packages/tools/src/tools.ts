@@ -109,6 +109,7 @@ export const TOOLS: readonly ToolDef[] = [
       "List a note's past versions, newest first: when, its path then, who changed it, lines added and removed, and a preview of what changed. " +
       "A version is a stretch of editing, so a new one starts about every 5 minutes while a note is being edited. " +
       "Each device's edits are versions of their own, so edits made offline keep their real times and authors, and two devices' versions can overlap. " +
+      "Counts of +? -? (null in JSON) mean a version's lines can't be told apart from another device's yet, usually until its device next connects. " +
       "History starts when this feature first ran on the vault, so nothing before that appears, and the sync server keeps it for a year unless the vault's owner set another limit. " +
       "A note keeps its history through renames, and an old path or a deleted note's path still works. " +
       "Renames and deletions have no recorded author, so they show as unknown. " +
