@@ -401,6 +401,25 @@ try {
   check("ob-provenance prints an op error and exits 1", ob(["read", "--path", "Cli/missing.md"]).status === 1);
   check("ob-provenance searches", ob(["search", "--query", "AgentBridge"]).stdout.includes("Projects/Roadmap.md"));
   check("a read ignores a bad agent name", ob(["--vault", "vault", "read", "--path", "Cli/shell.md"], { env: { ...instance.env, OB_PROVENANCE_AGENT: "Claude Code" } }).status === 0);
+
+  ob(["create", "--path", "Cli/history.md", "--content", "First words.\n", "--why", "agent", "--agent", "shell-agent"]);
+  const versions = JSON.parse(ob(["history", "--path", "Cli/history.md", "--json"]).stdout || "{}").versions ?? [];
+  check("history through the plugin shows who made a note", versions[0]?.status === "created" && versions[0].authors.includes("agent:shell-agent"), JSON.stringify(versions));
+  ob(["append", "--path", "Cli/history.md", "--text", "More words.\n", "--why", "agent", "--agent", "shell-agent"]);
+  check("a read from before a note existed says so", ob(["read", "--path", "Cli/history.md", "--at", "1w"]).stderr.includes("didn't exist yet"));
+  check("a version's time reads back through the plugin", ob(["read", "--path", "Cli/history.md", "--at", versions[0]?.at ?? "1m"]).stdout.startsWith("First words."));
+  const stored = await cdp.eval(`const e = ${plugin}.engine;
+    const before = (await indexedDB.databases()).map((d) => d.name);
+    const index = before.find((n) => n.endsWith("/e2e/index"));
+    const old = index.replace(/index$/, "journal/5");
+    await new Promise((resolve, reject) => { const q = indexedDB.open(old); q.onsuccess = () => { q.result.close(); resolve(); }; q.onerror = () => reject(q.error); });
+    const listed = await e.opts.stored.names();
+    await e.dropOldWeeks();
+    const after = (await indexedDB.databases()).map((d) => d.name);
+    return { listed: listed.includes("e2e/journal/5"), old: after.includes(old), index: after.includes(index), week: after.some((n) => /\\/e2e\\/journal\\/\\d{4}$/.test(n)) }`);
+  check("real IndexedDB lists a journal week by its document's name", stored.listed, JSON.stringify(stored));
+  check("real IndexedDB drops an old journal week and nothing else", !stored.old && stored.index && stored.week, JSON.stringify(stored));
+
   const mcpClient = new Client({ name: "shell client", version: "0" });
   await mcpClient.connect(new StdioClientTransport({ command: process.execPath, args: [join(repo, "apps/cli/dist/cli.js"), "--vault", "e2evault", "mcp"], env: instance.env, cwd: work }));
   const overMcp = await mcpClient.callTool({ name: "get_backlinks", arguments: { path: "Welcome.md" } });
