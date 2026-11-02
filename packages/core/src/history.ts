@@ -104,7 +104,6 @@ function burstsOf(entries: Entry[]): Burst[] {
 
 const noteEntries = (entries: Entry[], id: FileId) => entries.filter((e) => e.id === id).sort((a, b) => a.at - b.at);
 
-/** The note the newest tree entry naming `path` belongs to. */
 function namedBy(entries: Entry[], path: string): FileId | null {
   let newest: TreeEntry | null = null;
   for (const e of entries) if (e.t === "tree" && (e.to === path || e.from === path) && (!newest || e.at > newest.at)) newest = e;
@@ -117,7 +116,6 @@ interface Scan {
   incomplete?: Incomplete;
 }
 
-/** Reads weeks newest first until `enough`, given the note's entries so far. */
 async function scan(docs: VaultDocs, path: string, deadline: number, now: () => number, enough: (mine: Entry[]) => boolean): Promise<Scan> {
   const index = await docs.index();
   const weeks = index.weeks();

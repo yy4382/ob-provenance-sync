@@ -58,7 +58,7 @@ export const LOCAL_HISTORY_DAYS = 30;
 
 export const weekOf = (at: number): number => Math.floor(at / WEEK);
 export const entriesOf = (doc: Y.Doc): Y.Array<Entry> => doc.getArray<Entry>("entries");
-/** The oldest week a host keeps. Weeks go whole, so a host keeps at least `days`. */
+/** The oldest week a host keeps. Weeks go whole, so a host keeps at least `historyDays`. */
 export const oldestWeek = (historyDays: number, now: number): number => weekOf(now - historyDays * DAY);
 
 const entrySchema = z.discriminatedUnion("t", [
@@ -115,7 +115,6 @@ interface WeekMemory {
   seen: Set<string>;
 }
 
-/** The author in force at `item`. */
 function authorAt(item: Y.Item): AuthorId | undefined {
   for (let left = item.left; left; left = left.left) {
     if (!left.deleted && left.content instanceof Y.ContentFormat && left.content.key === "pa") return (left.content.value as AuthorId | null) ?? undefined;
@@ -161,7 +160,6 @@ export class Recorder {
     private readonly device: string,
     /** The array for the week holding `at`. Synchronous: it runs inside a Yjs observer. */
     private readonly weekEntries: (at: number) => Y.Array<Entry>,
-    /** Changes this host originated. */
     private readonly ours: (tr: Y.Transaction) => boolean,
     /** Called before a week's first entry, so readers can find the week. */
     private readonly opening: (week: number) => void,

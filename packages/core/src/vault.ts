@@ -20,7 +20,6 @@ export const fileDocName = (vault: string, id: FileId) => `${vault}/md/${id}`;
 export const journalDocName = (vault: string, week: number) => `${vault}/journal/${week}`;
 const JOURNAL_NAME = /^(.+)\/journal\/(\d+)$/;
 
-/** The week of a journal document's name, or null if it isn't one. */
 export function journalWeekOf(name: string): number | null {
   const week = JOURNAL_NAME.exec(name)?.[2];
   return week === undefined ? null : Number(week);
