@@ -28,6 +28,10 @@ export const agentIdSchema = z
   .string()
   .regex(/^agent:[\w.@-]+$/, "must look like agent:<name>")
   .transform((s) => s as AgentId);
+export const authorIdSchema = z
+  .string()
+  .regex(/^(?:(?:human|agent):[\w.@-]+|unknown)$/, "must look like human:<name>, agent:<name> or unknown")
+  .transform((s) => s as AuthorId);
 export const noteSchema = z
   .string()
   .max(NOTE_MAX_LENGTH)

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
+  activities,
   agentProvenance,
   entriesOf,
   handleOpRequest,
@@ -17,6 +18,7 @@ import {
   replaceText,
   setText,
   TEXT_KEY,
+  unknownProvenance,
   VaultIndex,
   WEEK,
   weekOf,
@@ -496,6 +498,36 @@ describe("a note edited on two devices", () => {
     expect(await w.shown(laptop.doc)).toEqual([version("phone", 1, 0, "+turn 3"), version("laptop", 1, 0, "+turn 2"), version("phone", 1, 0, "+turn 1"), version("laptop", 1, 0, "+turn 0")]);
   });
 
+  it("credits a phone's offline edits in a range to the phone, once merged", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    const since = Date.now();
+    laptop.append("laptop line\n");
+    pass(10 * MINUTE);
+    phone.append("phone line\n");
+    const written = Date.now();
+    pass(10 * MINUTE);
+    w.merge(laptop, phone);
+    const change = async (req = {}) => (await activities(w.docs(laptop.doc), { since, fullDiff: true, ...req })).changes;
+    expect(await change()).toMatchObject([{ at: Math.floor(written / MINUTE) * MINUTE, authors: ["human:laptop", "human:phone"], added: 2, removed: 0 }]);
+    expect(await change({ authors: ["human:phone"] })).toMatchObject([{ authors: ["human:phone"], added: 1, removed: 0, preview: "+ phone line" }]);
+    expect(await change({ authors: ["human:laptop"] })).toMatchObject([{ authors: ["human:laptop"], added: 1, removed: 0, preview: "+ laptop line" }]);
+  });
+
+  it("shows nothing for offline edits older than the range that merged during it", async () => {
+    const w = devices();
+    const [laptop, phone] = [w.device("laptop"), w.device("phone")];
+    laptop.append("laptop line\n");
+    pass(10 * MINUTE);
+    phone.append("phone line\n");
+    pass(10 * MINUTE);
+    const since = Date.now();
+    pass(10 * MINUTE);
+    w.merge(laptop, phone);
+    expect(w.seals("phone")).toBe(1);
+    expect((await activities(w.docs(laptop.doc), { since })).changes).toEqual([]);
+  });
+
   it("reads the same whichever replica answers, once the devices have merged", async () => {
     const w = devices();
     const { laptop, phone } = overlapping(w);
@@ -963,5 +995,620 @@ describe("reading a past time", () => {
     pass(PRE_EVERY);
     await v.docs.updateText(v.index.idOf("a.md")!, (t) => replaceText(t, "two\n", "", agentProvenance("agent:cli", "agent", null, "mac")));
     expect((await versions(v.docs, "a.md"))[0]).toMatchObject({ authors: ["agent:cli"], added: 0, removed: 1 });
+  });
+});
+
+describe("what changed across a vault", () => {
+  const HOUR = 60 * MINUTE;
+  const agent = { agent: "agent:cli", why: "agent" } as const;
+  type Vault = ReturnType<typeof vault>;
+
+  async function recent(v: Vault, since: number, req = {}) {
+    const res = await v.run({ op: "activities", since, ...req });
+    if (!res.ok || res.result.op !== "activities") throw new Error(JSON.stringify(res));
+    return res.result;
+  }
+  const paths = async (v: Vault, since: number, req = {}) => (await recent(v, since, req)).changes.map((c) => c.path);
+  const diffsOf = async (v: Vault, since: number, req = {}) => (await recent(v, since, { ...req, fullDiff: true })).changes.map((c) => c.diff);
+  const remove = (v: Vault, path: string) => v.docs.updateIndex((i) => i.delete(i.idOf(path)!));
+  const rename = (v: Vault, from: string, to: string) => v.docs.updateIndex((i) => i.rename(i.idOf(from)!, to));
+  const writes = (v: Vault, path: string, line: string, by = humanProvenance("human:a", "mac")) => v.docs.updateText(v.index.idOf(path)!, (t) => insertText(t, t.length, line, by));
+  const fixes = (v: Vault, path: string, from: string, to: string) => v.docs.updateText(v.index.idOf(path)!, (t) => replaceText(t, from, to, humanProvenance("human:a", "mac")));
+
+  it("squashes many edits by two authors into one line with the net counts and the last time", async () => {
+    const v = vault();
+    await v.create("a.md", "one\n");
+    pass(HOUR);
+    const since = Date.now();
+    await v.edit("a.md", "one\n", "one\ntwo\n");
+    pass(6 * MINUTE);
+    await v.human(v.index.idOf("a.md")!, "one\ntwo\nthree\n");
+    pass(6 * MINUTE);
+    await v.edit("a.md", "two\n", "TWO\n");
+    const last = Date.now();
+    pass(30 * MINUTE);
+    expect((await recent(v, since)).changes).toEqual([{ at: last, authors: ["agent:cli", "human:a"], path: "a.md", status: "modified", added: 2, removed: 0, preview: "+ TWO / three" }]);
+  });
+
+  it("leaves out what changed before the range, and starts from a quiet note's exact text", async () => {
+    const v = vault();
+    await v.create("quiet.md", "old\n");
+    await v.create("a.md", "first\n");
+    pass(PRE_EVERY);
+    await v.edit("a.md", "first\n", "second\n");
+    pass(HOUR);
+    const since = Date.now();
+    pass(HOUR);
+    await v.edit("a.md", "second\n", "third\n");
+    expect(await paths(v, since)).toEqual(["a.md"]);
+    expect(await diffsOf(v, since)).toEqual(["@@ -1,1 +1,1 @@\n-second\n+third"]);
+  });
+
+  it("counts a change in the minute of since, and not one in the minute before", async () => {
+    const v = vault();
+    await v.create("a.md", "one\n");
+    pass(HOUR + 10_000);
+    await v.edit("a.md", "one\n", "two\n");
+    const edited = Date.now();
+    expect(await paths(v, edited + 40_000)).toEqual(["a.md"]);
+    expect(await paths(v, edited + 50_000)).toEqual([]);
+  });
+
+  it("shows nothing for edits that cancel out", async () => {
+    const v = vault();
+    await v.create("a.md", "one\n");
+    pass(HOUR);
+    const since = Date.now();
+    await v.edit("a.md", "one\n", "two\n");
+    pass(6 * MINUTE);
+    await v.edit("a.md", "two\n", "one\n");
+    expect(await paths(v, since)).toEqual([]);
+  });
+
+  it("shows nothing for a change that only reattributes text", async () => {
+    const v = vault();
+    await v.create("a.md", "one\n");
+    pass(HOUR);
+    const since = Date.now();
+    await v.docs.updateText(v.index.idOf("a.md")!, (t) => {
+      t.delete(0, 4);
+      insertText(t, 0, "one\n", humanProvenance("human:a", "mac"));
+    });
+    expect(await paths(v, since)).toEqual([]);
+  });
+
+  it("shows nothing for a note created and deleted in the range", async () => {
+    const v = vault();
+    const since = Date.now();
+    await v.create("a.md", "one\n");
+    pass(6 * MINUTE);
+    await remove(v, "a.md");
+    expect(await paths(v, since)).toEqual([]);
+  });
+
+  it("shows nothing for edits to a note that's already gone, with no deletion on record in the range", async () => {
+    const v = vault();
+    await v.create("a.md", "one\n");
+    pass(HOUR);
+    const since = Date.now();
+    await v.edit("a.md", "one\n", "two\n");
+    const elsewhere = new Y.Doc({ gc: false });
+    Y.applyUpdate(elsewhere, Y.encodeStateAsUpdate(v.index.doc));
+    new VaultIndex(elsewhere).delete(v.index.idOf("a.md")!);
+    Y.applyUpdate(v.index.doc, Y.encodeStateAsUpdate(elsewhere), "net");
+    expect(await paths(v, since)).toEqual([]);
+  });
+
+  it("shows nothing for a rename away and back with no edit", async () => {
+    const v = vault();
+    await v.create("a.md", "one\n");
+    pass(HOUR);
+    const since = Date.now();
+    await rename(v, "a.md", "b.md");
+    pass(6 * MINUTE);
+    await rename(v, "b.md", "a.md");
+    expect(await paths(v, since)).toEqual([]);
+  });
+
+  it("calls a move away and back with an edit a plain change", async () => {
+    const v = vault();
+    await v.create("a.md", "one\n");
+    pass(HOUR);
+    const since = Date.now();
+    await rename(v, "a.md", "b.md");
+    await v.edit("b.md", "one\n", "two\n");
+    await rename(v, "b.md", "a.md");
+    expect((await recent(v, since)).changes).toMatchObject([{ status: "modified", path: "a.md", added: 1, removed: 1 }]);
+  });
+
+  it("puts a rename and an edit on one line under the new path, with the edit's counts", async () => {
+    const v = vault();
+    await v.create("a.md", "one\n");
+    pass(HOUR);
+    const since = Date.now();
+    await v.edit("a.md", "one\n", "one\ntwo\n");
+    pass(6 * MINUTE);
+    await rename(v, "a.md", "b.md");
+    expect((await recent(v, since)).changes).toMatchObject([{ status: "renamed", path: "b.md", from: "a.md", authors: ["agent:cli", "unknown"], added: 1, removed: 0, preview: "+ two" }]);
+  });
+
+  it("reports a created note by whoever wrote it", async () => {
+    const v = vault();
+    const since = Date.now();
+    await v.create("a.md", "one\ntwo\n");
+    expect((await recent(v, since)).changes).toEqual([{ at: since, authors: ["agent:cli"], path: "a.md", status: "created", added: 2, removed: 0, preview: "+ one / two" }]);
+  });
+
+  it("counts all of a created note, even text written just before the range", async () => {
+    const v = vault();
+    const id = newFileId();
+    await v.docs.updateText(id, (t) => insertText(t, 0, "one\n", humanProvenance("human:a", "mac")));
+    pass(MINUTE);
+    const since = Date.now();
+    await v.docs.updateIndex((i) => i.set(id, { type: "markdown", path: "a.md" }));
+    expect((await recent(v, since)).changes).toMatchObject([{ status: "created", added: 1, removed: 0, preview: "+ one" }]);
+  });
+
+  it("reports a deletion under the path it left, removing what the note held", async () => {
+    const v = vault();
+    await v.create("a.md", "one\ntwo\n");
+    pass(HOUR);
+    const since = Date.now();
+    await remove(v, "a.md");
+    expect((await recent(v, since)).changes).toEqual([{ at: since, authors: ["unknown"], path: "a.md", status: "deleted", added: 0, removed: 2, preview: "- one / two" }]);
+  });
+
+  it("reports a rename alone with no counts, and without opening the note", async () => {
+    const v = vault();
+    await v.create("a.md", "one\n");
+    pass(HOUR);
+    const since = Date.now();
+    await rename(v, "a.md", "b.md");
+    const peek = vi.spyOn(v.docs, "peekText");
+    expect((await recent(v, since)).changes).toEqual([{ at: since, authors: ["unknown"], path: "b.md", status: "renamed", from: "a.md", added: 0, removed: 0, preview: "" }]);
+    expect(peek).not.toHaveBeenCalled();
+  });
+
+  it("gives a new note at a renamed note's old path a line of its own", async () => {
+    const v = vault();
+    await v.create("a.md", "old\n");
+    pass(HOUR);
+    const since = Date.now();
+    await rename(v, "a.md", "b.md");
+    pass(MINUTE);
+    await v.create("a.md", "new\n");
+    expect((await recent(v, since)).changes).toMatchObject([
+      { status: "created", path: "a.md", added: 1, preview: "+ new" },
+      { status: "renamed", path: "b.md", from: "a.md", added: 0, removed: 0 },
+    ]);
+  });
+
+  it("keeps a preview to 100 code points with added text first, and gives hunks when asked", async () => {
+    const v = vault();
+    await v.create("a.md", "old\n");
+    pass(HOUR);
+    const since = Date.now();
+    await v.human(v.index.idOf("a.md")!, `${"word ".repeat(40)}\n`);
+    const [change] = (await recent(v, since)).changes;
+    expect([...change!.preview].length).toBeLessThanOrEqual(100);
+    expect(change!.preview.startsWith("+ word")).toBe(true);
+    expect(change!.preview).not.toContain(" - ");
+    expect(change!.diff).toBeUndefined();
+    expect(await diffsOf(v, since)).toEqual([`@@ -1,1 +1,1 @@\n-old\n+${"word ".repeat(40)}`]);
+  });
+
+  describe("for some authors", () => {
+    /** One note holding a line each from an agent, a person and no recorded author, all in the range. */
+    async function shared() {
+      const v = vault();
+      await v.create("a.md", "base\n");
+      pass(HOUR);
+      const since = Date.now();
+      await v.run({ op: "append", path: "a.md", text: "agent line\n", by: agent });
+      pass(6 * MINUTE);
+      await writes(v, "a.md", "human line\n");
+      pass(6 * MINUTE);
+      await writes(v, "a.md", "file line\n", unknownProvenance("mac"));
+      return { v, since };
+    }
+
+    it("shows every line and author unfiltered", async () => {
+      const { v, since } = await shared();
+      expect((await recent(v, since)).changes).toMatchObject([{ authors: ["agent:cli", "human:a", "unknown"], added: 3 }]);
+    });
+
+    it("keeps one author's added lines, drops another's, and keeps unknown lines", async () => {
+      const { v, since } = await shared();
+      const req = { authors: ["human:a"] };
+      expect((await recent(v, since, req)).changes).toMatchObject([{ authors: ["human:a", "unknown"], added: 2, removed: 0, preview: "+ human line / file line" }]);
+      expect(await diffsOf(v, since, req)).toEqual(["@@ -1,1 +1,3 @@\n base\n+human line\n+file line"]);
+    });
+
+    it("drops unknown lines when asked", async () => {
+      const { v, since } = await shared();
+      expect((await recent(v, since, { authors: ["human:a"], skipUnknown: true })).changes).toMatchObject([{ authors: ["human:a"], added: 1, preview: "+ human line" }]);
+      expect((await recent(v, since, { skipUnknown: true })).changes).toMatchObject([{ authors: ["agent:cli", "human:a"], added: 2, preview: "+ agent line / human line" }]);
+    });
+
+    it("shows only unknown when that's the author asked for", async () => {
+      const { v, since } = await shared();
+      expect((await recent(v, since, { authors: ["unknown"] })).changes).toMatchObject([{ authors: ["unknown"], added: 1, preview: "+ file line" }]);
+    });
+
+    it("drops a file none of the asked-for authors touched, before reading its text", async () => {
+      const v = vault();
+      await v.create("a.md", "one\n");
+      pass(HOUR);
+      const since = Date.now();
+      await v.edit("a.md", "one\n", "two\n");
+      const peek = vi.spyOn(v.docs, "peekText");
+      expect(await paths(v, since, { authors: ["human:a"] })).toEqual([]);
+      expect(peek).not.toHaveBeenCalled();
+      expect(await paths(v, since, { authors: ["agent:cli"] })).toEqual(["a.md"]);
+      expect(peek).toHaveBeenCalledTimes(1);
+    });
+
+    it("finds each line's place across hunks", async () => {
+      const v = vault();
+      const lines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`);
+      await v.create("a.md", `${lines.join("\n")}\n`);
+      pass(HOUR);
+      const since = Date.now();
+      await v.edit("a.md", "line 2\n", "line two\n");
+      pass(6 * MINUTE);
+      await fixes(v, "a.md", "line 18\n", "line eighteen\n");
+      expect(await diffsOf(v, since, { authors: ["human:a"] })).toEqual(["@@ -1,5 +1,4 @@\n line 1\n-line 2\n line 3\n line 4\n line 5\n@@ -15,6 +15,6 @@\n line 15\n line 16\n line 17\n-line 18\n+line eighteen\n line 19\n line 20"]);
+      expect((await recent(v, since, { authors: ["agent:cli"] })).changes).toMatchObject([{ added: 1, removed: 2, preview: "+ two - 2 / line 18" }]);
+    });
+
+    it("drops a no-newline marker with its line, and recounts the hunk", async () => {
+      const v = vault();
+      await v.create("a.md", "base\n");
+      pass(HOUR);
+      const since = Date.now();
+      await v.docs.updateText(v.index.idOf("a.md")!, (t) => insertText(t, 0, "mine\n", humanProvenance("human:a", "mac")));
+      pass(6 * MINUTE);
+      await v.run({ op: "append", path: "a.md", text: "two", by: agent });
+      expect(await diffsOf(v, since)).toEqual(["@@ -1,1 +1,3 @@\n+mine\n base\n+two\n\\ No newline at end of file"]);
+      expect(await diffsOf(v, since, { authors: ["human:a"] })).toEqual(["@@ -1,1 +1,2 @@\n+mine\n base"]);
+    });
+
+    it("gives a blank added line to whoever wrote it", async () => {
+      const v = vault();
+      await v.create("a.md", "base\n");
+      pass(HOUR);
+      const since = Date.now();
+      await writes(v, "a.md", "\ntwo\n");
+      expect((await recent(v, since, { authors: ["human:a"], skipUnknown: true })).changes).toMatchObject([{ added: 2 }]);
+    });
+
+    it("leaves a line out of the author who only ended it, by appending the next one", async () => {
+      const v = vault();
+      await v.create("a.md", "base\n");
+      pass(HOUR);
+      const since = Date.now();
+      await writes(v, "a.md", "human line");
+      pass(6 * MINUTE);
+      await v.run({ op: "append", path: "a.md", text: "\nagent line\n", by: agent });
+      expect((await recent(v, since, { authors: ["agent:cli"] })).changes).toMatchObject([{ added: 1, preview: "+ agent line" }]);
+    });
+
+    it("gives a one-word fix in an old line to the fixer, not the old author", async () => {
+      const v = vault();
+      await v.create("a.md", "the lazy dog\n");
+      pass(HOUR);
+      const since = Date.now();
+      await fixes(v, "a.md", "lazy", "sleepy");
+      pass(6 * MINUTE);
+      await v.run({ op: "append", path: "a.md", text: "other\n", by: agent });
+      expect((await recent(v, since, { authors: ["human:a"] })).changes).toMatchObject([{ authors: ["human:a"], added: 1, removed: 1, preview: "+ sleepy - lazy" }]);
+      expect((await recent(v, since, { authors: ["agent:cli"] })).changes).toMatchObject([{ authors: ["agent:cli"], added: 1, removed: 0, preview: "+ other" }]);
+    });
+
+    it("gives removed lines to whoever removed text in that file", async () => {
+      const v = vault();
+      await v.create("a.md", "one\ntwo\n");
+      pass(HOUR);
+      const since = Date.now();
+      await fixes(v, "a.md", "two\n", "");
+      pass(6 * MINUTE);
+      await v.run({ op: "append", path: "a.md", text: "three\n", by: agent });
+      expect((await recent(v, since, { authors: ["human:a"] })).changes).toMatchObject([{ added: 0, removed: 1, preview: "- two" }]);
+      expect((await recent(v, since, { authors: ["agent:cli"] })).changes).toMatchObject([{ added: 1, removed: 0, preview: "+ three" }]);
+    });
+
+    it("counts everyone who edited as a remover when nobody removed text, because an insertion in a line diffs as a replaced line", async () => {
+      const v = vault();
+      await v.create("a.md", "one\n");
+      pass(HOUR);
+      const since = Date.now();
+      await v.docs.updateText(v.index.idOf("a.md")!, (t) => insertText(t, 3, " more", humanProvenance("human:a", "mac")));
+      expect((await recent(v, since, { authors: ["human:a"] })).changes).toMatchObject([{ added: 1, removed: 1 }]);
+    });
+
+    it("treats a rename alone as unknown", async () => {
+      const v = vault();
+      await v.create("a.md", "one\n");
+      pass(HOUR);
+      const since = Date.now();
+      await rename(v, "a.md", "b.md");
+      expect((await recent(v, since, { authors: ["human:a"] })).changes).toMatchObject([{ status: "renamed", authors: ["unknown"] }]);
+      expect(await paths(v, since, { skipUnknown: true })).toEqual([]);
+    });
+
+    it("treats a deletion alone as unknown", async () => {
+      const v = vault();
+      await v.create("a.md", "one\n");
+      pass(HOUR);
+      const since = Date.now();
+      await remove(v, "a.md");
+      expect((await recent(v, since, { authors: ["human:a"] })).changes).toMatchObject([{ status: "deleted", authors: ["unknown"], removed: 1 }]);
+      expect(await paths(v, since, { skipUnknown: true })).toEqual([]);
+    });
+
+    it("still shows a rename when a kept author edited the file too, and hides a deletion whose lines were all removed by nobody on record", async () => {
+      const v = vault();
+      await v.create("a.md", "one\n");
+      await v.create("b.md", "one\n");
+      pass(HOUR);
+      const since = Date.now();
+      await v.edit("a.md", "one\n", "one\ntwo\n");
+      await v.edit("b.md", "one\n", "one\ntwo\n");
+      pass(6 * MINUTE);
+      await rename(v, "a.md", "c.md");
+      await remove(v, "b.md");
+      expect((await recent(v, since, { authors: ["agent:cli"], skipUnknown: true })).changes).toMatchObject([{ status: "renamed", path: "c.md", authors: ["agent:cli"], added: 1 }]);
+    });
+
+    it("keeps a file whose text can't be restored, with the authors asked for", async () => {
+      const { v, since } = await shared();
+      const empty = new Y.Doc({ gc: false });
+      v.docs.peekText = async (_id, fn) => fn(empty.getText(TEXT_KEY));
+      expect((await recent(v, since, { authors: ["human:a"] })).changes).toMatchObject([{ authors: ["human:a", "unknown"], added: null, removed: null, preview: "" }]);
+    });
+
+    it("refuses an author that isn't one", async () => {
+      const v = vault();
+      for (const author of ["alice", "human:", "agent:a b", "Unknown"]) expect(await v.run({ op: "activities", since: 0, authors: [author] }), author).toMatchObject({ ok: false, code: "invalid" });
+      expect(await v.run({ op: "activities", since: 0, authors: ["human:a", "agent:b.c-d", "unknown"] })).toMatchObject({ ok: true });
+    });
+  });
+
+  describe("an attachment", () => {
+    const png = (hash: string, path = "p.png") => ({ type: "binary" as const, path, hash, size: 1, mtime: 0 });
+
+    it("shows as binary with no document read, while a note beside it is read", async () => {
+      const v = vault();
+      await v.create("a.md", "one\n");
+      const id = newFileId();
+      await v.docs.updateIndex((i) => i.set(id, png("h")));
+      pass(HOUR);
+      const since = Date.now();
+      await v.docs.updateIndex((i) => i.set(id, png("h2")));
+      await v.edit("a.md", "one\n", "two\n");
+      pass(MINUTE);
+      await v.docs.updateIndex((i) => i.set(newFileId(), png("h3", "q.png")));
+      const peek = vi.spyOn(v.docs, "peekText");
+      expect((await recent(v, since)).changes).toEqual([
+        { at: since + MINUTE, authors: ["unknown"], path: "q.png", status: "created", added: null, removed: null, preview: "", binary: true },
+        { at: since, authors: ["agent:cli"], path: "a.md", status: "modified", added: 1, removed: 1, preview: "+ two - one" },
+        { at: since, authors: ["unknown"], path: "p.png", status: "modified", added: null, removed: null, preview: "", binary: true },
+      ]);
+      expect(peek).toHaveBeenCalledTimes(1);
+    });
+
+    it("is unknown like any change with no recorded author", async () => {
+      const v = vault();
+      const since = Date.now();
+      await v.docs.updateIndex((i) => i.set(newFileId(), png("h")));
+      expect(await paths(v, since, { skipUnknown: true })).toEqual([]);
+      expect(await paths(v, since, { authors: ["human:a"] })).toEqual(["p.png"]);
+    });
+  });
+
+  describe("reading weeks", () => {
+    async function aged() {
+      const v = vault();
+      await v.create("a.md", "0\n");
+      for (let i = 1; i <= 12; i++) {
+        pass(WEEK);
+        await v.edit("a.md", `${i - 1}\n`, `${i}\n`);
+      }
+      v.weekReads.length = 0;
+      return v;
+    }
+
+    it("finds a burst's snapshot in the previous week for an edit across the boundary", async () => {
+      const v = vault();
+      await v.create("a.md", "one\n");
+      await v.create("b.md", "before the range\n");
+      const boundary = 2961 * WEEK;
+      vi.setSystemTime(boundary - 3 * MINUTE);
+      await v.edit("a.md", "one\n", "two\n");
+      vi.setSystemTime(boundary - 2 * MINUTE);
+      // The transaction opens in one week and ends in the next, so no snapshot comes due for it.
+      await v.docs.updateText(v.index.idOf("a.md")!, (t) => {
+        vi.setSystemTime(boundary + MINUTE);
+        replaceText(t, "two\n", "three\n", humanProvenance("human:a", "mac"));
+      });
+      expect((await v.docs.week(2961)).entries.flatMap((e) => (e.t === "edit" ? [!!e.pre] : []))).toEqual([false]);
+      vi.setSystemTime(boundary + 10_000);
+      await fixes(v, "b.md", "before", "ahead of");
+      vi.setSystemTime(boundary + 2 * MINUTE);
+      v.weekReads.length = 0;
+      expect((await recent(v, boundary + MINUTE + 30_000)).changes).toMatchObject([{ path: "a.md", added: 1, removed: 1, preview: "+ three - one" }]);
+      expect(v.weekReads).toEqual([2961, 2960]);
+    });
+
+    it("reads only the week it needs in a long-lived vault", async () => {
+      const v = await aged();
+      pass(3 * HOUR);
+      expect((await recent(v, Date.now() - 2 * HOUR)).changes).toEqual([]);
+      expect(v.weekReads).toEqual([weekOf(Date.now())]);
+    });
+
+    it("reads one week further when the newest doesn't reach back past the cut", async () => {
+      const v = await aged();
+      expect((await recent(v, Date.now() - 2 * HOUR)).changes).toMatchObject([{ preview: "+ 12 - 11" }]);
+      const week = weekOf(Date.now());
+      expect(v.weekReads).toEqual([week, week - 1]);
+    });
+
+    it("reads every week a long range covers", async () => {
+      const v = await aged();
+      expect((await recent(v, Date.now() - 10 * WEEK - HOUR)).changes).toMatchObject([{ added: 1, removed: 1, preview: "+ 12 - 1" }]);
+      expect(v.weekReads).toHaveLength(12);
+    });
+
+    it("isn't stopped by a week that reads empty on its way to the record's reach", async () => {
+      const v = vault();
+      await v.create("a.md", "one\n");
+      const oldest = weekOf(Date.now());
+      vi.setSystemTime((oldest + 3) * WEEK + HOUR);
+      await v.edit("a.md", "one\n", "two\n");
+      const edited = Date.now();
+      v.index.markJournalWeek(oldest + 1);
+      v.index.markJournalWeek(oldest + 2);
+      v.weekReads.length = 0;
+      const res = await recent(v, edited - 30 * MINUTE);
+      expect(res.changes).toMatchObject([{ path: "a.md", added: 1, removed: 1 }]);
+      expect(res.recordStart).toBeUndefined();
+      expect(v.weekReads).toEqual([oldest + 3, oldest + 2, oldest + 1, oldest]);
+
+      const expired = entriesOf(v.weeks.get(oldest)!);
+      expired.delete(0, expired.length);
+      expect((await recent(v, edited - 30 * MINUTE)).recordStart).toBe(edited);
+    });
+
+    it("says where the record starts only when the range reaches past it", async () => {
+      const v = vault();
+      expect(await recent(v, START - WEEK)).toEqual({ op: "activities", changes: [], offsets: [] });
+      await v.create("a.md", "one\n");
+      pass(HOUR);
+      await v.edit("a.md", "one\n", "two\n");
+      expect((await recent(v, START - WEEK)).recordStart).toBe(START);
+      expect((await recent(v, START)).recordStart).toBe(START);
+      expect((await recent(v, START + MINUTE)).recordStart).toBeUndefined();
+    });
+  });
+
+  describe("paging", () => {
+    /** Five notes edited one after another. Those in `cancelled` end as they began. */
+    async function five(cancelled: number[] = []) {
+      const v = vault();
+      for (let i = 0; i < 5; i++) await v.create(`n${i}.md`, "one\n");
+      pass(HOUR);
+      const since = Date.now();
+      for (let i = 0; i < 5; i++) {
+        await v.edit(`n${i}.md`, "one\n", "two\n");
+        if (cancelled.includes(i)) await v.edit(`n${i}.md`, "two\n", "one\n");
+        pass(MINUTE);
+      }
+      return { v, since };
+    }
+
+    it("cuts at limit and says where to go on, with no file repeated or skipped", async () => {
+      const { v, since } = await five();
+      const first = await recent(v, since, { limit: 2 });
+      expect(first.changes.map((c) => c.path)).toEqual(["n4.md", "n3.md"]);
+      expect(first.next_offset).toBe(2);
+      const second = await recent(v, since, { limit: 2, offset: 2 });
+      expect(second.changes.map((c) => c.path)).toEqual(["n2.md", "n1.md"]);
+      expect(second.next_offset).toBe(4);
+      const third = await recent(v, since, { limit: 2, offset: 4 });
+      expect(third.changes.map((c) => c.path)).toEqual(["n0.md"]);
+      expect(third.next_offset).toBeUndefined();
+    });
+
+    it("doesn't count a file with no net change toward limit, and steps past it", async () => {
+      const { v, since } = await five([3, 1]);
+      const first = await recent(v, since, { limit: 2 });
+      expect(first.changes.map((c) => c.path)).toEqual(["n4.md", "n2.md"]);
+      expect(first).toMatchObject({ offsets: [0, 2], next_offset: 3 });
+      const second = await recent(v, since, { limit: 2, offset: 3 });
+      expect(second.changes.map((c) => c.path)).toEqual(["n0.md"]);
+      expect(second.next_offset).toBeUndefined();
+    });
+
+    it("orders files changed in the same moment by path, whichever was written first", async () => {
+      const v = vault();
+      for (const name of ["c", "a", "b"]) await v.create(`${name}.md`, "one\n");
+      pass(HOUR);
+      const since = Date.now();
+      for (const name of ["c", "a", "b"]) await v.edit(`${name}.md`, "one\n", "two\n");
+      expect(await paths(v, since)).toEqual(["a.md", "b.md", "c.md"]);
+    });
+
+    it("pages over what an author filter left, not over everything", async () => {
+      const v = vault();
+      for (let i = 0; i < 4; i++) await v.create(`n${i}.md`, "one\n");
+      pass(HOUR);
+      const since = Date.now();
+      for (let i = 0; i < 4; i++) {
+        if (i % 2) await v.edit(`n${i}.md`, "one\n", "two\n");
+        else await fixes(v, `n${i}.md`, "one\n", "two\n");
+        pass(MINUTE);
+      }
+      const first = await recent(v, since, { authors: ["human:a"], limit: 1 });
+      expect(first.changes.map((c) => c.path)).toEqual(["n2.md"]);
+      expect(first.next_offset).toBe(1);
+      expect((await recent(v, since, { authors: ["human:a"], limit: 1, offset: 1 })).changes.map((c) => c.path)).toEqual(["n0.md"]);
+    });
+  });
+
+  describe("when an answer is cut short", () => {
+    it("always reads one file, and says when time ran out", async () => {
+      const v = vault();
+      await v.create("a.md", "one\n");
+      await v.create("b.md", "one\n");
+      pass(HOUR);
+      const since = Date.now();
+      await v.edit("a.md", "one\n", "two\n");
+      pass(MINUTE);
+      await v.edit("b.md", "one\n", "two\n");
+      let clock = 0;
+      const peek = v.docs.peekText;
+      v.docs.peekText = (id, fn) => {
+        clock += 13_000;
+        return peek(id, fn);
+      };
+      const res = await activities(v.docs, { since }, () => clock);
+      expect(res.changes.map((c) => c.path)).toEqual(["b.md"]);
+      expect(res).toMatchObject({ incomplete: "time", next_offset: 1 });
+    });
+
+    it("keeps the newest changes when reading weeks runs out of time", async () => {
+      const v = vault();
+      for (let n = 2900; n < 2940; n++) v.index.markJournalWeek(n);
+      await v.create("a.md", "one\n");
+      let clock = 0;
+      const week = v.docs.week;
+      v.docs.week = async (n) => {
+        clock += 1000;
+        return week(n);
+      };
+      const res = await activities(v.docs, { since: 2900 * WEEK }, () => clock);
+      expect(res.changes.map((c) => c.path)).toEqual(["a.md"]);
+      expect(res.incomplete).toBe("time");
+      expect(res.recordStart).toBeUndefined();
+      expect(v.weekReads.length).toBeLessThan(40);
+    });
+
+    it("says only this device's record was read when a week can't be reached", async () => {
+      const v = vault();
+      await v.create("a.md", "one\n");
+      const week = v.docs.week;
+      v.docs.week = async (n) => ({ ...(await week(n)), complete: false });
+      const res = await recent(v, START - WEEK);
+      expect(res).toMatchObject({ incomplete: "server", changes: [{ path: "a.md" }] });
+      expect(res.recordStart).toBeUndefined();
+    });
+
+    it("keeps a line with no counts when a note's text can't be had in time", async () => {
+      const v = vault();
+      await v.create("a.md", "one\n");
+      v.docs.peekText = async () => null;
+      expect(await recent(v, START)).toMatchObject({ incomplete: "server", changes: [{ path: "a.md", status: "created", added: null, removed: null, preview: "" }] });
+    });
   });
 });
