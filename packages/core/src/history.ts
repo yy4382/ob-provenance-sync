@@ -127,7 +127,7 @@ async function scan(docs: VaultDocs, path: string, deadline: number, now: () => 
     if (now() >= deadline) return { id, entries, incomplete: "time" };
     const reads = await Promise.all(weeks.splice(0, WEEKS_AT_ONCE).map((n) => docs.week(n)));
     for (const read of reads) {
-      entries.push(...read.entries);
+      for (const entry of read.entries) entries.push(entry);
       unreached ||= !read.complete;
     }
     id ??= namedBy(entries, path);
@@ -296,8 +296,9 @@ function previewOf(hunks: Hunk[]): string {
   let run: { removed: string[]; added: string[] } = { removed: [], added: [] };
   const flush = () => {
     const crop = cropped(run.removed, run.added);
-    added.push(...crop.added);
-    removed.push(...crop.removed);
+    // A whole note can land here, more lines than one call can take as arguments.
+    for (const line of crop.added) added.push(line);
+    for (const line of crop.removed) removed.push(line);
     run = { removed: [], added: [] };
   };
   for (const hunk of hunks) {

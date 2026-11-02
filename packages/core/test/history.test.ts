@@ -741,6 +741,12 @@ describe("a version's preview", () => {
   it("joins lines with a slash", async () => {
     expect(await previewOf("keep\n", "keep\nfirst\nsecond\n")).toBe("+ first / second");
   });
+
+  it("handles a note of hundreds of thousands of lines, added or removed", async () => {
+    const lines = "A long line of a long note.\n".repeat(190_000);
+    expect(await previewOf("", lines)).toMatch(/^\+ A long line of a long note\. \/ A long line/);
+    expect(await previewOf(lines, "")).toMatch(/^- A long line of a long note\. \/ A long line/);
+  });
 });
 
 describe("a full diff", () => {
