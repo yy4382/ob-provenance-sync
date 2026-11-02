@@ -23,6 +23,8 @@ module.exports = class QuirkProbe extends Plugin {
       };
     };
     const record = ({ fileObject, ...entry }) => log.push(entry);
+    // binding.ts and obsidian.ts ask this, through clickingTask, while the edit happens.
+    const clickingTask = () => !!window.event?.target?.classList?.contains("task-list-item-checkbox");
 
     this.registerEditorExtension(
       ViewPlugin.fromClass(
@@ -36,7 +38,7 @@ module.exports = class QuirkProbe extends Plugin {
           update(u) {
             const now = describe(u.view);
             for (const tr of u.transactions) {
-              if (tr.docChanged) record({ kind: "edit", state: this.state, event: tr.annotation(Transaction.userEvent) ?? null, ...now });
+              if (tr.docChanged) record({ kind: "edit", state: this.state, event: tr.annotation(Transaction.userEvent) ?? null, clickingTask: clickingTask(), ...now });
             }
             record({ kind: "update", state: this.state, sameFileObject: now.fileObject === this.first.fileObject, ...now });
           }
@@ -47,7 +49,7 @@ module.exports = class QuirkProbe extends Plugin {
     const vault = this.app.vault;
     const modify = vault.modify;
     vault.modify = function (file, data, options) {
-      log.push({ kind: "vault.modify", file: file.path, data });
+      log.push({ kind: "vault.modify", file: file.path, data, clickingTask: clickingTask() });
       return modify.call(this, file, data, options);
     };
     this.register(() => {

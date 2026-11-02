@@ -134,6 +134,8 @@ export class MarkdownFile {
   /** Tracked writes in flight, and a count bumped as each starts and lands, so a read that overlapped one reads again. */
   private readonly writes = new Set<Promise<unknown>>();
   private writeEvents = 0;
+  /** Texts the user's clicks wrote, whose merge is theirs rather than another program's. */
+  private readonly clicks = new Set<string>();
   private editors = 0;
   private writeTimer: ReturnType<typeof setTimeout> | null = null;
   private provider: HocuspocusProvider | null = null;
@@ -232,7 +234,7 @@ export class MarkdownFile {
       this.engine.log("debug", `Merging a change made on disk into note ${short(this.id)} (${difference(base.text, disk)})`, this.path);
       const fork = Y.createDocFromSnapshot(this.doc, base.snapshot);
       const before = Y.encodeStateVector(fork);
-      setText(fork.getText(TEXT_KEY), disk, unknownProvenance(this.engine.opts.device));
+      setText(fork.getText(TEXT_KEY), disk, this.clicks.delete(disk) ? this.human() : this.unknown());
       Y.applyUpdate(this.doc, Y.encodeStateAsUpdate(fork, before), FROM_DISK);
       this.setBase(Y.snapshot(fork), disk);
     }
@@ -267,9 +269,15 @@ export class MarkdownFile {
   /**
    * The host is about to write `text` to this file, usually an editor saving.
    * If the CRDT held that text, in its current state or one an editor showed,
-   * that state becomes the base once the write lands.
+   * that state becomes the base once the write lands. A click on a task
+   * (`byUser`) is a new edit even if it puts back an earlier text, so it is
+   * merged from the file like another program's edit, as the user's.
    */
-  async trackWrite<T>(text: string, write: () => Promise<T>): Promise<T> {
+  async trackWrite<T>(text: string, write: () => Promise<T>, byUser = false): Promise<T> {
+    if (byUser) {
+      this.clicks.add(text);
+      return write();
+    }
     const state =
       text === this.ytext.toJSON() ? { snapshot: Y.snapshot(this.doc), text } : [...this.editorStates].reverse().find((s) => s.text === text);
     if (!state) return write();
@@ -1129,9 +1137,9 @@ export class SyncEngine implements VaultDocs {
   }
 
   /** The host is about to write `text` to `path`; see MarkdownFile.trackWrite. */
-  trackWrite<T>(path: string, text: string, write: () => Promise<T>): Promise<T> {
+  trackWrite<T>(path: string, text: string, write: () => Promise<T>, byUser = false): Promise<T> {
     const file = this.fileAt(path);
-    return file ? file.trackWrite(text, write) : write();
+    return file ? file.trackWrite(text, write, byUser) : write();
   }
 
   onDelete(path: string): Promise<void> {

@@ -20,12 +20,13 @@ import { editorInfoField, moment, normalizePath, TextFileView, type App, type Ma
  * quirk: note-names-obsidian-cannot-use
  */
 
-export type EditKind = "human" | "unknown" | "copy";
+export type EditKind = "human" | "task" | "unknown" | "copy";
 
 /**
  * Typing, pasting, undo and Obsidian's own editing commands carry a CodeMirror
  * user event and are the human's. Other plugins editing through the Editor API
- * carry none, so their changes are unknown. Obsidian copying an edit into the
+ * carry none, so their changes are unknown, and neither does a click on a task,
+ * which only `clickingTask` tells apart. Obsidian copying an edit into the
  * file's other panes, or reloading a file another program changed, is "set".
  *
  * quirk: typing-has-user-event
@@ -38,7 +39,23 @@ export type EditKind = "human" | "unknown" | "copy";
 export function editKind(tr: Transaction): EditKind {
   const event = tr.annotation(Transaction.userEvent);
   if (event === "set") return "copy";
-  return event === undefined ? "unknown" : "human";
+  if (event !== undefined) return "human";
+  return clickingTask() ? "task" : "unknown";
+}
+
+/**
+ * Whether a click on a task's checkbox is being handled right now. Obsidian edits
+ * the note from inside that event: as a CodeMirror transaction in Live Preview,
+ * through vault.modify in reading view. The event is on `window` for a popout's
+ * clicks too, since the main window's code handles them. A script clicking the
+ * box can't be told apart: the browser's input event after it is trusted.
+ *
+ * quirk: live-preview-task-click-edits-in-its-event
+ * quirk: reading-view-task-click-saves-in-its-event
+ */
+export function clickingTask(): boolean {
+  const { event } = window as unknown as { event?: { target: Partial<Element> | null } };
+  return !!event?.target?.classList?.contains("task-list-item-checkbox");
 }
 
 /**

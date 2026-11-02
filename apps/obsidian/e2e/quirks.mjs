@@ -101,6 +101,35 @@ const QUIRKS = [
     },
   },
   {
+    id: "live-preview-task-click-edits-in-its-event",
+    async probe() {
+      await openNote("Intro.\n\n- [ ] Plain task\n\n> [!note] Heading\n> - [ ] Callout task\n\nEnd.");
+      for (const index of [0, 1]) {
+        await cdp.click(".markdown-source-view .task-list-item-checkbox", index);
+        await sleep(500);
+      }
+      const edits = await logOf(["edit"]);
+      expect(edits.length === 2 && edits.every((e) => e.event === null && e.clickingTask), "a click on a task, plain or in a callout, is an edit with no user event made inside the checkbox's event", edits);
+      expect(edits[1].doc.includes("> - [x] Callout task"), "the click ticks the task", edits);
+    },
+  },
+  {
+    id: "reading-view-task-click-saves-in-its-event",
+    async probe() {
+      const path = await openNote("- [ ] Task\n");
+      const setMode = (mode) =>
+        cdp.eval(`const l = app.workspace.activeLeaf; await l.setViewState({ type: "markdown", state: { file: ${JSON.stringify(path)}, mode: ${JSON.stringify(mode)}, source: false } });
+          await new Promise((r) => setTimeout(r, 500)); return true`);
+      await setMode("preview");
+      await clearLog();
+      await cdp.click(".markdown-reading-view .task-list-item-checkbox");
+      await sleep(500);
+      const saves = await logOf(["vault.modify"]);
+      await setMode("source");
+      expect(saves.length === 1 && saves[0].data === "- [x] Task\n" && saves[0].clickingTask, "a click on a task in reading view calls app.vault.modify inside the click's event", saves);
+    },
+  },
+  {
     id: "pane-copies-are-set",
     desktopOnly: true,
     async probe() {

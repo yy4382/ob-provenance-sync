@@ -1,6 +1,6 @@
 import { Annotation, EditorSelection, RangeSetBuilder, StateEffect, Transaction, type ChangeSpec, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, hoverTooltip, layer, RectangleMarker, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
-import { attribute, insertText, type Segment } from "@provenance/core";
+import { attribute, insertText, rewriteRange, type Segment } from "@provenance/core";
 import diff from "fast-diff";
 import type { TFile } from "obsidian";
 import type * as Y from "yjs";
@@ -167,12 +167,16 @@ class ProvenanceView {
         // Positions after a skipped copy no longer line up with the CRDT;
         // such batches are rare, and the primary re-converges afterwards.
         if (kind === "copy") break;
-        const by = kind === "human" ? file.human() : file.unknown();
+        const by = kind === "unknown" ? file.unknown() : file.human();
         let adj = 0;
         tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
           const text = inserted.sliceString(0, inserted.length, "\n");
-          if (toA > fromA) file.ytext.delete(fromA + adj, toA - fromA);
-          insertText(file.ytext, fromA + adj, text, by);
+          // A task in a callout rewrites the whole callout, and only the box changed.
+          if (kind === "task") rewriteRange(file.ytext, fromA + adj, tr.startState.sliceDoc(fromA, toA), text, by);
+          else {
+            if (toA > fromA) file.ytext.delete(fromA + adj, toA - fromA);
+            insertText(file.ytext, fromA + adj, text, by);
+          }
           adj += text.length - (toA - fromA);
         });
       }

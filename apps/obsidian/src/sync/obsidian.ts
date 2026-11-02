@@ -1,7 +1,7 @@
 import { normalizePath, requestUrl, TFile, type App, type Plugin, type TAbstractFile } from "obsidian";
 import { IndexeddbPersistence } from "y-indexeddb";
 import type * as Y from "yjs";
-import { communityPluginOn, corePluginOn, deviceVaultId, replaceIfHolds, wrapEditorSaves } from "../quirks";
+import { clickingTask, communityPluginOn, corePluginOn, deviceVaultId, replaceIfHolds, wrapEditorSaves } from "../quirks";
 import type { Blobs, Disk, Persistence, SyncEngine } from "./engine";
 
 const isBinary = (file: TFile) => file.extension !== "md";
@@ -43,10 +43,11 @@ export function watchVault(plugin: Plugin, engine: () => SyncEngine | null) {
   );
   // An editor saves through vault.modify with the exact text it writes;
   // the engine needs that text to tell the save from other programs' edits.
+  // A click on a task in reading view comes through here too.
   plugin.register(
     wrapEditorSaves(app, (file, data, write) => {
       const running = engine();
-      return running && isSyncedPath(app, file.path) && !isBinary(file) ? running.trackWrite(file.path, data, write) : write();
+      return running && isSyncedPath(app, file.path) && !isBinary(file) ? running.trackWrite(file.path, data, write, clickingTask()) : write();
     }),
   );
 }
