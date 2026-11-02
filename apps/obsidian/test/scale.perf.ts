@@ -20,14 +20,16 @@ function rng(seed: number) {
 
 const WORDS = "the of and a to in is you that it he was for on are as with his they at be this have from or one had by word but not what all were we when your can said there use an each which she do how their if will up other about out many then them these so some her would make like him into time has look two more write go see number no way could people my than first water been call who oil its now find long down day did get come made may part".split(" ");
 
+const wordsFrom = (rand: () => number) => (n: number) => {
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) out.push(WORDS[Math.floor(rand() * WORDS.length)]!);
+  return out.join(" ").replace(/((?:\S+ ){12}\S+) /g, "$1. ");
+};
+
 function buildVault() {
   const rand = rng(42);
   const disk = new MemoryDisk();
-  const words = (n: number) => {
-    const out: string[] = [];
-    for (let i = 0; i < n; i++) out.push(WORDS[Math.floor(rand() * WORDS.length)]!);
-    return out.join(" ").replace(/((?:\S+ ){12}\S+) /g, "$1. ");
-  };
+  const words = wordsFrom(rand);
   for (let i = 0; i < NOTES; i++) disk.files.set(`folder-${i % 50}/note-${i}.md`, `# Note ${i}\n\n${words(500 + Math.floor(rand() * 500))}\n`);
   for (let i = 0; i < 20; i++) disk.files.set(`small/tiny-${i}.md`, words(5));
   for (let i = 0; i < 3; i++) disk.files.set(`large/big-${i}.md`, words(150_000));
@@ -77,6 +79,115 @@ function slowLink(port: number, rtt: number) {
   );
 }
 
+const timed = async (name: string, run: () => Promise<unknown>) => {
+  const delay = monitorEventLoopDelay({ resolution: 1 });
+  delay.enable();
+  const t = performance.now();
+  const out = await run();
+  delay.disable();
+  console.log(`${name}: ${Math.round(performance.now() - t)} ms, longest block ${Math.round(delay.max / 1e6)} ms`);
+  return out as { ok: boolean; result?: { versions: unknown[]; incomplete?: string } };
+};
+
+it("lists a week's changes across a vault", { timeout: 600_000 }, async () => {
+  const EDITED = 30;
+  const SESSIONS = 40;
+  const WRITES = 15;
+  const RUNS = 5;
+  const words = wordsFrom(rng(11));
+  const server = await startServer();
+  // A week's range usually crosses into the week before, so this one starts on the fourth day of its week.
+  const week = weekOf(Date.now()) - 2;
+  vi.useFakeTimers({ toFake: ["Date"], now: week * WEEK + 4 * 24 * 3_600_000 });
+  const blobs = server.blobs("v");
+  const device = (name: string, url: string, disk: MemoryDisk, store: MemoryStore) => {
+    const engine = new SyncEngine({ vault: "v", author: "human:chris", device: name, disk, persist: store.persist, stored: store.stored, server: { url, token: TOKEN, blobs } });
+    disk.engine = engine;
+    return engine;
+  };
+  const openNotes = (engine: SyncEngine) => (engine as unknown as { files: Map<unknown, unknown> }).files.size;
+
+  const disk = new MemoryDisk();
+  const store = new MemoryStore();
+  const texts = Array.from({ length: EDITED }, (_, i) => `# Note ${i}\n\n${words(500 + (i * 17) % 500)}\n`);
+  texts.forEach((text, i) => disk.files.set(`notes/note-${i}.md`, text));
+  const a = device("mac", server.ws, disk, store);
+  await a.start();
+  await a.settle();
+  await eventually(() => expect(a.isConnected).toBe(true));
+
+  // The shape busyWeek stands for, with notes that exist: busyWeek's ids and snapshots can't be read back.
+  const since = Date.now();
+  const gap = (6 * 24 * 3_600_000) / SESSIONS;
+  for (let s = 0; s < SESSIONS; s++) {
+    vi.setSystemTime(since + s * gap);
+    const i = s % EDITED;
+    for (let w = 0; w < WRITES; w++) {
+      texts[i] += `Session ${s}, line ${w}.\n`;
+      await disk.write(`notes/note-${i}.md`, texts[i]!);
+      await a.settle();
+      vi.setSystemTime(Date.now() + 60_000);
+    }
+  }
+  const entries = (await Promise.all([a.week(week), a.week(week + 1)])).flatMap((w) => w.entries);
+  console.log(`journal: ${entries.length} entries, ${entries.filter((e) => e.t === "edit" && e.pre).length} snapshots`);
+
+  type Change = { added: number | null };
+  const expectAll = (res: Awaited<ReturnType<typeof timed>>) => {
+    const { changes, incomplete } = res.result as unknown as { changes: Change[]; incomplete?: string };
+    expect(incomplete).toBeUndefined();
+    expect(changes).toHaveLength(EDITED);
+    expect(changes.reduce((n, c) => n + c.added!, 0)).toBe(SESSIONS * WRITES);
+  };
+  const all = { op: "activities", since, limit: 100 };
+  const http = (body: unknown) =>
+    fetch(`${server.http}/api/vaults/v/ops`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` }, body: JSON.stringify(body) }).then((r) => r.json());
+  await eventually(async () => expectAll((await http(all)) as never), 30_000);
+
+  const { hocuspocus } = server.app.server;
+  const measure = async (name: string, engine: SyncEngine | null, run: () => Promise<unknown>) => {
+    console.log(`${name}: ${engine ? `${openNotes(engine)} notes open` : `${hocuspocus.documents.size} documents loaded`}`);
+    for (let i = 0; i < RUNS; i++) expectAll(await timed(`${name} #${i}`, run));
+  };
+  const byAuthor = { ...all, authors: ["human:chris"] };
+
+  await measure("server, device connected", null, () => http(all));
+  await measure("plugin, notes open", a, () => handleOpRequest(a, all));
+  await measure("plugin, notes open, by author", a, () => handleOpRequest(a, byAuthor));
+
+  a.destroy();
+  await eventually(() => expect(hocuspocus.documents.size).toBe(0), 30_000);
+  await measure("server, no device connected", null, () => http(all));
+
+  const restarted = device("mac", server.ws, disk, store);
+  await restarted.start();
+  await restarted.settle();
+  await eventually(() => expect(restarted.isConnected).toBe(true));
+  await measure("plugin, after a restart", restarted, () => handleOpRequest(restarted, all));
+  restarted.destroy();
+
+  const link = await slowLink(server.app.server.address.port, 50);
+  const phoneDisk = new MemoryDisk();
+  const phoneStore = new MemoryStore();
+  const phone = device("phone", link.url, phoneDisk, phoneStore);
+  await phone.start();
+  await phone.settle();
+  await eventually(() => expect(phone.isConnected).toBe(true), 30_000);
+  await eventually(() => expect(phoneDisk.files.size).toBe(EDITED), 30_000);
+  await phone.settle();
+  phone.destroy();
+  const phoneAgain = device("phone", link.url, phoneDisk, phoneStore);
+  await phoneAgain.start();
+  await phoneAgain.settle();
+  await eventually(() => expect(phoneAgain.isConnected).toBe(true), 30_000);
+  await measure("plugin at 50 ms round trip, after a restart", phoneAgain, () => handleOpRequest(phoneAgain, all));
+
+  vi.useRealTimers();
+  phoneAgain.destroy();
+  link.close();
+  await server.app.close();
+});
+
 it("reads 53 weeks of history for a note edited once a week", { timeout: 600_000 }, async () => {
   const WEEKS = 53;
   const rand = rng(7);
@@ -119,26 +230,17 @@ it("reads 53 weeks of history for a note edited once a week", { timeout: 600_000
   expect(kept).toBeLessThan(10);
   console.log(`journal: ${WEEKS} weeks, ${Math.round(bytes / WEEKS / 1024)} KB a week, ${Math.round(bytes / 1024 / 1024)} MB in all; device keeps ${kept} weeks`);
 
-  const scan = async (name: string, run: () => Promise<unknown>) => {
-    const delay = monitorEventLoopDelay({ resolution: 1 });
-    delay.enable();
-    const t = performance.now();
-    const out = await run();
-    delay.disable();
-    console.log(`${name}: ${Math.round(performance.now() - t)} ms, longest block ${Math.round(delay.max / 1e6)} ms`);
-    return out as { ok: boolean; result?: { versions: unknown[]; incomplete?: string } };
-  };
   const all = { op: "history", path: "quiet.md", limit: 100 };
-  const expectAll = (res: Awaited<ReturnType<typeof scan>>) => {
+  const expectAll = (res: Awaited<ReturnType<typeof timed>>) => {
     expect(res.result?.incomplete).toBeUndefined();
     expect(res.result?.versions).toHaveLength(WEEKS);
   };
 
   const http = (body: unknown) =>
     fetch(`${server.http}/api/vaults/v/ops`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` }, body: JSON.stringify(body) }).then((r) => r.json());
-  expectAll(await scan("server, every week", () => http(all)));
-  for (let i = 0; i < 3; i++) expectAll(await scan(`plugin on loopback, every week #${i}`, () => handleOpRequest(a, all)));
-  await scan("plugin on loopback, newest 20", () => handleOpRequest(a, { op: "history", path: "quiet.md" }));
+  expectAll(await timed("server, every week", () => http(all)));
+  for (let i = 0; i < 3; i++) expectAll(await timed(`plugin on loopback, every week #${i}`, () => handleOpRequest(a, all)));
+  await timed("plugin on loopback, newest 20", () => handleOpRequest(a, { op: "history", path: "quiet.md" }));
 
   const link = await slowLink(server.app.server.address.port, 50);
   const phoneDisk = new MemoryDisk();
@@ -147,8 +249,8 @@ it("reads 53 weeks of history for a note edited once a week", { timeout: 600_000
   await phone.settle();
   await eventually(() => expect(phone.isConnected).toBe(true), 30_000);
   await eventually(() => expect(phoneDisk.files.has("quiet.md")).toBe(true), 30_000);
-  for (let i = 0; i < 3; i++) expectAll(await scan(`plugin at 50 ms round trip, every week #${i}`, () => handleOpRequest(phone, all)));
-  await scan("plugin at 50 ms round trip, newest 20", () => handleOpRequest(phone, { op: "history", path: "quiet.md" }));
+  for (let i = 0; i < 3; i++) expectAll(await timed(`plugin at 50 ms round trip, every week #${i}`, () => handleOpRequest(phone, all)));
+  await timed("plugin at 50 ms round trip, newest 20", () => handleOpRequest(phone, { op: "history", path: "quiet.md" }));
 
   vi.useRealTimers();
   phone.destroy();

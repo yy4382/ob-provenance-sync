@@ -408,6 +408,38 @@ try {
   ob(["append", "--path", "Cli/history.md", "--text", "More words.\n", "--why", "agent", "--agent", "shell-agent"]);
   check("a read from before a note existed says so", ob(["read", "--path", "Cli/history.md", "--at", "1w"]).stderr.includes("didn't exist yet"));
   check("a version's time reads back through the plugin", ob(["read", "--path", "Cli/history.md", "--at", versions[0]?.at ?? "1m"]).stdout.startsWith("First words."));
+
+  const since = new Date().toISOString();
+  const recent = () => JSON.parse(ob(["activities", "--since", since, "--limit", "100", "--json"]).stdout || "{}").changes ?? [];
+  const recentLine = (path) => recent().find((c) => c.path === path);
+  const lineBecomes = (path, ok) => eventually(async () => [recentLine(path)].find((c) => c && ok(c)));
+  const newestVersion = (path) => JSON.parse(ob(["history", "--path", path, "--json"]).stdout || "{}").versions?.[0];
+  ob(["create", "--path", "Cli/activity.md", "--content", "First line.\n", "--why", "agent", "--agent", "shell-agent"]);
+  const made = await lineBecomes("Cli/activity.md", (c) => c.status === "created" && c.added === 1 && c.authors.includes("agent:shell-agent"));
+  check("activities through the plugin shows a new note", !!made, JSON.stringify(recent()));
+  ob(["append", "--path", "Cli/activity.md", "--text", "Second line.\n", "--why", "agent", "--agent", "shell-agent"]);
+  const squashed = await lineBecomes("Cli/activity.md", (c) => c.status === "created" && c.added === 2 && c.removed === 0);
+  check("activities through the plugin squashes a note's changes into one line", !!squashed && recent().filter((c) => c.path === "Cli/activity.md").length === 1, JSON.stringify(recent()));
+  check("activities prints a line with its time zone, path, author, counts and preview", /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{2}:\d{2} {2}Cli\/activity\.md \(new\) {2}agent:shell-agent {2}\+2 -0 {2}\+ First line\. \/ Second line\.$/m.test(ob(["activities", "--since", since, "--limit", "100"]).stdout), ob(["activities", "--since", since, "--limit", "100"]).stdout);
+  check("activities drops a note none of the asked-for authors touched", !JSON.parse(ob(["activities", "--since", since, "--limit", "100", "--author", "human:nobody", "--skip-unknown", "--json"]).stdout || "{}").changes?.some((c) => c.path === "Cli/activity.md"));
+  check("activities refuses a bad author as a wrong call", ob(["activities", "--since", "2h", "--author", "nobody"]).status === 2);
+
+  ob(["append", "--path", "Bulk/n7.md", "--text", "Added here.\n", "--why", "agent", "--agent", "shell-agent"]);
+  const olderNote = await lineBecomes("Bulk/n7.md", (c) => c.status === "modified" && c.added === 1 && c.removed === 0);
+  check("activities through the plugin shows an edit to an older note", !!olderNote, JSON.stringify(recent()));
+  ob(["rename", "--from", "Bulk/n7.md", "--to", "Cli/activity-moved.md"]);
+  const renamedLine = await lineBecomes("Cli/activity-moved.md", (c) => c.status === "renamed" && c.from === "Bulk/n7.md" && c.added === 1 && c.authors.includes("agent:shell-agent") && c.authors.includes("unknown"));
+  check("activities through the plugin shows a rename under the new path, with the edit's counts", !!renamedLine, JSON.stringify(recent()));
+  const renamedVersion = newestVersion("Bulk/n7.md");
+  check("history through the plugin follows a rename from the old path", renamedVersion?.status === "renamed" && renamedVersion.path === "Cli/activity-moved.md" && renamedVersion.from === "Bulk/n7.md", JSON.stringify(renamedVersion));
+  check("history through the plugin gives the same versions under the new path", JSON.stringify(newestVersion("Cli/activity-moved.md")) === JSON.stringify(renamedVersion), JSON.stringify(newestVersion("Cli/activity-moved.md")));
+  ob(["delete", "--path", "Cli/activity-moved.md"]);
+  const gone = await lineBecomes("Bulk/n7.md", (c) => c.status === "deleted" && c.added === 0 && c.removed === 1);
+  check("activities through the plugin shows a deletion under the path the range began with", !!gone, JSON.stringify(recent()));
+  check("activities through the plugin leaves no line under the renamed path after a deletion", !recentLine("Cli/activity-moved.md"), JSON.stringify(recent()));
+  const deletedVersion = newestVersion("Cli/activity-moved.md");
+  check("history through the plugin follows a deleted note by its last path", deletedVersion?.status === "deleted" && deletedVersion.path === "Cli/activity-moved.md", JSON.stringify(deletedVersion));
+  check("history through the plugin follows a deleted note by a path it had before", JSON.stringify(newestVersion("Bulk/n7.md")) === JSON.stringify(deletedVersion), JSON.stringify(newestVersion("Bulk/n7.md")));
   const stored = await cdp.eval(`const e = ${plugin}.engine;
     const before = (await indexedDB.databases()).map((d) => d.name);
     const index = before.find((n) => n.endsWith("/e2e/index"));
