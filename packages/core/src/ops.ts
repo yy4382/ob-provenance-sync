@@ -2,6 +2,7 @@ import { z } from "zod";
 import type * as Y from "yjs";
 import { attribute } from "./attribution";
 import { agentIdSchema, agentProvenance, noteSchema, type SegmentKind } from "./provenance";
+import type { Entry } from "./journal";
 import { EditError, insertText, replaceText } from "./text";
 import { isMarkdownPath, markNote, newFileId, pathClash, type FileId, type VaultIndex } from "./vault";
 
@@ -105,6 +106,12 @@ export interface VaultDocs {
   updateIndex(fn: (index: VaultIndex) => void): Promise<void>;
   readText(id: FileId): Promise<Y.Text>;
   updateText<T>(id: FileId, fn: (ytext: Y.Text) => T): Promise<T>;
+  /** How many days of the journal this host keeps. */
+  readonly historyDays: number;
+  /** One week's journal. complete: false when a server exists and couldn't be reached, so this is only what this device holds. */
+  week(n: number): Promise<{ entries: Entry[]; complete: boolean }>;
+  /** Runs `fn` on a note's text without keeping it open, also for a deleted note. Null if the text can't be had in time. */
+  peekText<T>(id: FileId, fn: (ytext: Y.Text) => T): Promise<T | null>;
 }
 
 async function requireId(docs: VaultDocs, path: string): Promise<FileId> {
