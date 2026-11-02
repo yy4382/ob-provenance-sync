@@ -100,6 +100,7 @@ export class MemoryStore {
       set: async (key, value) => void this.meta.set(`${name}:${key}`, value),
     };
   };
+  unsentWeeks = async (vault: string) => (this.meta.get(`${vault}/index:unsent-weeks`) ?? []) as number[];
 }
 
 export async function eventually(check: () => void | Promise<void>, ms = 4000) {

@@ -442,6 +442,20 @@ function synced(provider: HocuspocusProvider): Promise<void> {
   return new Promise((resolve) => provider.on("synced", () => resolve()));
 }
 
+/** The server has applied everything this document holds. `synced` only says its answer arrived, with ours perhaps still on the way. */
+function acknowledged(provider: HocuspocusProvider): Promise<void> {
+  const done = () => provider.isSynced && !provider.hasUnsyncedChanges;
+  if (done()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const check = () => {
+      if (!done()) return;
+      provider.off("unsyncedChanges", check);
+      resolve();
+    };
+    provider.on("unsyncedChanges", check);
+  });
+}
+
 interface OpenWeek {
   week: number;
   doc: Y.Doc;
@@ -487,6 +501,8 @@ export class SyncEngine implements VaultDocs {
   private thisWeek: OpenWeek | null = null;
   /** Weeks this device may hold entries for that the server hasn't confirmed. A past week has no open provider to send them. */
   private unsentWeeks = new Set<number>();
+  /** A socket takes one provider per document, so readers of one past week share its read. */
+  private readonly weekReads = new Map<number, Promise<{ entries: Entry[]; complete: boolean }>>();
   private stopRecordingIndex: () => void = () => {};
   started = false;
 
@@ -502,6 +518,11 @@ export class SyncEngine implements VaultDocs {
 
   get device(): string {
     return this.opts.device;
+  }
+
+  /** Whether this week's journal has heard from the server. */
+  get isConnected(): boolean {
+    return !!this.thisWeek?.provider?.isSynced;
   }
 
   async index(): Promise<VaultIndex> {
@@ -1275,14 +1296,23 @@ export class SyncEngine implements VaultDocs {
     return { week, doc, persistence: this.opts.persist?.(name, doc) ?? null, provider: null };
   }
 
+  private pastWeek(n: number): Promise<{ entries: Entry[]; complete: boolean }> {
+    let read = this.weekReads.get(n);
+    if (!read) {
+      read = this.readPastWeek(n).finally(() => this.weekReads.delete(n));
+      this.weekReads.set(n, read);
+    }
+    return read;
+  }
+
   /** A past week, open for as long as it takes to read it, and to send what the server is missing. */
-  private async pastWeek(n: number): Promise<{ entries: Entry[]; complete: boolean }> {
+  private async readPastWeek(n: number): Promise<{ entries: Entry[]; complete: boolean }> {
     const week = this.openWeek(n);
     try {
       await week.persistence?.whenSynced;
       // This week's provider answers for the server. Waiting on each past week would use up a read while offline.
-      if (this.thisWeek?.provider?.isSynced) week.provider = this.connect(journalDocName(this.opts.vault, n), week.doc);
-      const sent = week.provider ? await within(synced(week.provider).then(() => true), OPEN_WAIT, false) : false;
+      if (this.isConnected) week.provider = this.connect(journalDocName(this.opts.vault, n), week.doc);
+      const sent = week.provider ? await within(acknowledged(week.provider).then(() => true), OPEN_WAIT, false) : false;
       if (sent) this.confirmSent(n);
       return { entries: parseEntries(entriesOf(week.doc).toArray()), complete: !this.socket || sent };
     } finally {

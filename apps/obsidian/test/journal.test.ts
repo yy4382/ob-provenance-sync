@@ -1,7 +1,7 @@
 import { newFileId, textAt, weekOf, WEEK, type EditEntry, type Entry, type TreeEntry } from "@provenance/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { startOldServer } from "../../server/test/old-server";
+import { startDeafServer, startOldServer } from "../../server/test/old-server";
 import { SyncEngine } from "../src/sync/engine";
 import { eventually, MemoryDisk, MemoryStore, startServer, TOKEN } from "./harness";
 
@@ -231,6 +231,52 @@ describe("an old server, which refuses journal documents", () => {
     await reader.engine.start();
     await reader.engine.settle();
     await eventually(async () => expect(edits(await entries(reader.engine, week))).toHaveLength(1));
+  });
+});
+
+describe("confirming a week", () => {
+  async function pastWeekHeldBy(store: MemoryStore, disk: MemoryDisk) {
+    const refusing = await startOldServer();
+    stopped.push(refusing.close);
+    const week = weekOf(Date.now());
+    const first = device("a", refusing.url, disk, store);
+    disk.files.set("n.md", "hello\n");
+    await first.engine.start();
+    await first.engine.settle();
+    await disk.write("n.md", "hello\nagain\n");
+    await first.engine.settle();
+    first.engine.destroy();
+    return week;
+  }
+
+  it("takes the server's acknowledgement, not its answer, as proof a week arrived", async () => {
+    const store = new MemoryStore();
+    const disk = new MemoryDisk();
+    const week = await pastWeekHeldBy(store, disk);
+    vi.useFakeTimers({ toFake: ["Date"], now: (week + 1) * WEEK + 60_000 });
+    const deaf = await startDeafServer();
+    stopped.push(deaf.close);
+    const after = device("a", deaf.url, disk, store);
+    await after.engine.start();
+    await after.engine.settle();
+    await eventually(() => expect(after.engine.isConnected).toBe(true));
+    expect((await after.engine.week(week)).complete).toBe(false);
+    expect(await store.unsentWeeks("v")).toContain(week);
+  });
+
+  it("serves two reads of one past week at once", async () => {
+    const store = new MemoryStore();
+    const disk = new MemoryDisk();
+    const week = await pastWeekHeldBy(store, disk);
+    vi.useFakeTimers({ toFake: ["Date"], now: (week + 1) * WEEK + 60_000 });
+    const { ws } = await server();
+    const after = device("a", ws, disk, store);
+    await after.engine.start();
+    await after.engine.settle();
+    await eventually(() => expect(after.engine.isConnected).toBe(true));
+    const [one, two] = await Promise.all([after.engine.week(week), after.engine.week(week)]);
+    expect(edits(one.entries)).toHaveLength(1);
+    expect(two).toEqual(one);
   });
 });
 
