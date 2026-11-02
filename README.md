@@ -49,6 +49,8 @@ The config has two kinds of tokens:
 - `device` tokens are for Obsidian. Each device you sync gets one.
 - `agent` tokens are for agents. Each one may pin an identity, e.g. `"agent": "agent:andy"` for a personal agent. If the identity is left out, the client names itself (`?agent=claude-code`).
 
+`historyDays` in the config sets how long the server keeps note history, 365 days by default. The server checks at start and once a day, and deletes whole weeks once they're past that. Deleted text stays in each note's own data.
+
 ### 2. Install the Obsidian plugin
 
 In [BRAT](https://community.obsidian.md/plugins/obsidian42-brat), choose **Add beta plugin** and enter `yy4382/ob-provenance-sync`. In the plugin's settings:
@@ -56,6 +58,7 @@ In [BRAT](https://community.obsidian.md/plugins/obsidian42-brat), choose **Add b
 - **Your name**: Text you type is attributed to `human:<name>`.
 - **Device name**: Recorded with every change.
 - **Server URL**, **Device token**, **Vault ID**: The device token is kept in Obsidian's keychain. The Vault ID must be the same on every device. Leave the server empty to track provenance on one device without syncing.
+- **History kept on this device**: Days of note history this device keeps offline, 30 by default. Older history is still available from the server.
 
 Sentences are colored by who wrote them:
 
@@ -89,11 +92,20 @@ ob-provenance --vault Notes append --path today.md --text "A note." --why agent 
 
 Each write has to name its agent, with `--agent <name>` or `OB_PROVENANCE_AGENT`. To use MCP instead, use **Copy Claude Code command** or **Copy MCP JSON config** in the plugin's settings. The copied command starts `ob-provenance mcp`, fixed to this vault. Edits are attributed to the name each MCP client reports in its handshake, so several agents can share one configuration (`--agent <name>` pins a name instead). MCP commands copied before this version no longer work, so copy them again.
 
+Agents can look back at how a note changed. `history` lists its versions, and `read --at` shows the note at a past time:
+
+```sh
+ob-provenance --vault Notes history --path today.md
+ob-provenance --vault Notes read --path today.md --at 2h
+```
+
+A version is a stretch of editing, so a new one starts about every 5 minutes while a note is being edited. Each device's edits are versions of their own, so edits made offline keep their real times and authors, and two devices' versions can overlap. History starts when this feature first ran on the vault. It follows a note through renames and still works for a deleted note, and it can be viewed but not restored. Renames and deletions have no recorded author. Older history comes from the server automatically, by the same command. If the server can't be reached, the answer says it's incomplete. `read --at` for a time older than a note's first recorded change gives the earliest text on record and says so.
+
 Every call names its vault, with `--vault <name or id>` or `OB_PROVENANCE_VAULT`, and `--vault` wins. Without one, the call stops and lists your vaults. Nothing else picks a vault, neither the folder it runs in nor window focus, so a call means the same vault wherever it runs and whether or not Obsidian is open.
 
 While Obsidian answers, every operation goes through the plugin. A vault that's registered but closed opens in a new window. When Obsidian can't answer, reads and writes go to the server instead, and `rename`, `delete`, `links`, `backlinks`, `search`, `daily` and `create-daily` fail with the reason. If the server is also unreachable, the agent is told the vault is unavailable. A call the plugin started and never finished, by a timeout or by Obsidian crashing, isn't sent to the server, because the write may already have landed: the agent is told to read the note first. `ob-provenance status` shows which way a call would go.
 
-**Remote, limited mode.** Long-running agents connect to the server over Streamable HTTP at `https://sync.example.com/mcp/<vault-id>`, sending `Authorization: Bearer <agent token>`. Add `?agent=<name>` if the token doesn't pin an identity. Limited mode offers `list_files`, `read_file`, `edit_file`, `append_to_file` and `create_file`.
+**Remote, limited mode.** Long-running agents connect to the server over Streamable HTTP at `https://sync.example.com/mcp/<vault-id>`, sending `Authorization: Bearer <agent token>`. Add `?agent=<name>` if the token doesn't pin an identity. Limited mode offers `list_files`, `read_file`, `get_file_history`, `edit_file`, `append_to_file` and `create_file`.
 
 Every write requires `why`. Use `agent` when the agent wrote the content itself, and `human-via-agent` when the agent is inserting words the human dictated. Writes also accept an optional one-sentence `note`.
 

@@ -1,10 +1,13 @@
 import diff from "fast-diff";
 import type * as Y from "yjs";
 import { runsOf } from "./attribution";
+import { markActor } from "./journal";
 import { toAttrs, type Provenance } from "./provenance";
 
 export function insertText(ytext: Y.Text, index: number, text: string, by: Provenance): void {
-  if (text) ytext.insert(index, text, toAttrs(by));
+  if (!text) return;
+  markActor(ytext.doc!, by.author);
+  ytext.insert(index, text, toAttrs(by));
 }
 
 /**
@@ -14,6 +17,7 @@ export function insertText(ytext: Y.Text, index: number, text: string, by: Prove
  * instead of stealing the whole sentence.
  */
 export function rewriteRange(ytext: Y.Text, index: number, oldText: string, newText: string, by: Provenance): void {
+  markActor(ytext.doc!, by.author);
   let pos = index;
   for (const [op, chunk] of meaningfulDiff(oldText, newText)) {
     if (op === diff.EQUAL) pos += chunk.length;

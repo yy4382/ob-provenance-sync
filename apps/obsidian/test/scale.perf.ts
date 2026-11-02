@@ -1,7 +1,10 @@
 import { writeFileSync } from "node:fs";
 import { Session } from "node:inspector/promises";
+import { createConnection, createServer } from "node:net";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
-import { expect, it } from "vitest";
+import { entriesOf, handleOpRequest, journalDocName, newFileId, weekOf, WEEK, type Entry, type FileId } from "@provenance/core";
+import { expect, it, vi } from "vitest";
+import * as Y from "yjs";
 import { SyncEngine } from "../src/sync/engine";
 import { eventually, MemoryDisk, MemoryStore, startServer, TOKEN } from "./harness";
 
@@ -42,6 +45,117 @@ function buildVault() {
 }
 
 const mb = () => Math.round(process.memoryUsage().rss / 1024 / 1024);
+
+/** A week at 10 hours' editing, as measured for the design: 40 snapshots of about 3 KB and 600 entries without one. */
+function busyWeek(week: number, rand: () => number): Entry[] {
+  const ids = Array.from({ length: 30 }, () => newFileId());
+  return Array.from({ length: 640 }, (_, i): Entry => {
+    const id = ids[Math.floor(rand() * ids.length)]! as FileId;
+    const at = week * WEEK + Math.floor(rand() * WEEK);
+    const edit = { t: "edit" as const, id, at, device: "mac", by: "human:chris" as const, removes: rand() < 0.3 };
+    return i < 40 ? { ...edit, pre: new Uint8Array(3000).map(() => rand() * 256) } : edit;
+  });
+}
+
+/** A TCP relay adding `rtt` ms to each round trip, because a loopback server hides the cost of opening a document per week. */
+function slowLink(port: number, rtt: number) {
+  const relay = createServer((near) => {
+    const far = createConnection(port, "127.0.0.1");
+    const pipe = (from: typeof near, to: typeof near) => from.on("data", (d) => setTimeout(() => to.writable && to.write(d), rtt / 2));
+    pipe(near, far);
+    pipe(far, near);
+    for (const [a, b] of [[near, far], [far, near]] as const) {
+      a.on("close", () => b.destroy());
+      a.on("error", () => b.destroy());
+    }
+  });
+  return new Promise<{ url: string; close: () => void }>((resolve) =>
+    relay.listen(0, "127.0.0.1", () => {
+      const { port: relayed } = relay.address() as { port: number };
+      resolve({ url: `ws://127.0.0.1:${relayed}`, close: () => relay.close() });
+    }),
+  );
+}
+
+it("reads 53 weeks of history for a note edited once a week", { timeout: 600_000 }, async () => {
+  const WEEKS = 53;
+  const rand = rng(7);
+  const server = await startServer();
+  const first = weekOf(Date.now()) - WEEKS + 1;
+  vi.useFakeTimers({ toFake: ["Date"], now: first * WEEK + 3_600_000 });
+  const blobs = server.blobs("v");
+  const device = (name: string, url: string, disk: MemoryDisk, store: MemoryStore) => {
+    const engine = new SyncEngine({ vault: "v", author: "human:chris", device: name, disk, persist: store.persist, stored: store.stored, server: { url, token: TOKEN, blobs } });
+    disk.engine = engine;
+    return engine;
+  };
+
+  const disk = new MemoryDisk();
+  const store = new MemoryStore();
+  disk.files.set("quiet.md", "# Quiet\n");
+  const a = device("mac", server.ws, disk, store);
+  await a.start();
+  await a.settle();
+  await eventually(() => expect(a.isConnected).toBe(true));
+  for (let i = 0; i < WEEKS; i++) {
+    vi.setSystemTime((first + i) * WEEK + 7_200_000);
+    await disk.write("quiet.md", `# Quiet\n\nWeek ${i}.\n`);
+    await a.settle();
+    await eventually(async () => expect((await a.week(first + i)).entries.length).toBeGreaterThan(0));
+  }
+
+  let bytes = 0;
+  const { hocuspocus } = server.app.server;
+  for (let i = 0; i < WEEKS; i++) {
+    const name = journalDocName("v", first + i);
+    const conn = await hocuspocus.openDirectConnection(name, {});
+    await conn.transact((doc) => entriesOf(doc).push(busyWeek(first + i, rand)));
+    bytes += Y.encodeStateAsUpdate(conn.document!).length;
+    await conn.disconnect();
+  }
+  await eventually(async () => expect((await store.unsentWeeks("v")).length).toBeLessThanOrEqual(1), 30_000);
+  await a.dropOldWeeks();
+  const kept = (await store.stored.names()).filter((n) => n.includes("/journal/")).length;
+  expect(kept).toBeLessThan(10);
+  console.log(`journal: ${WEEKS} weeks, ${Math.round(bytes / WEEKS / 1024)} KB a week, ${Math.round(bytes / 1024 / 1024)} MB in all; device keeps ${kept} weeks`);
+
+  const scan = async (name: string, run: () => Promise<unknown>) => {
+    const delay = monitorEventLoopDelay({ resolution: 1 });
+    delay.enable();
+    const t = performance.now();
+    const out = await run();
+    delay.disable();
+    console.log(`${name}: ${Math.round(performance.now() - t)} ms, longest block ${Math.round(delay.max / 1e6)} ms`);
+    return out as { ok: boolean; result?: { versions: unknown[]; incomplete?: string } };
+  };
+  const all = { op: "history", path: "quiet.md", limit: 100 };
+  const expectAll = (res: Awaited<ReturnType<typeof scan>>) => {
+    expect(res.result?.incomplete).toBeUndefined();
+    expect(res.result?.versions).toHaveLength(WEEKS);
+  };
+
+  const http = (body: unknown) =>
+    fetch(`${server.http}/api/vaults/v/ops`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` }, body: JSON.stringify(body) }).then((r) => r.json());
+  expectAll(await scan("server, every week", () => http(all)));
+  for (let i = 0; i < 3; i++) expectAll(await scan(`plugin on loopback, every week #${i}`, () => handleOpRequest(a, all)));
+  await scan("plugin on loopback, newest 20", () => handleOpRequest(a, { op: "history", path: "quiet.md" }));
+
+  const link = await slowLink(server.app.server.address.port, 50);
+  const phoneDisk = new MemoryDisk();
+  const phone = device("phone", link.url, phoneDisk, new MemoryStore());
+  await phone.start();
+  await phone.settle();
+  await eventually(() => expect(phone.isConnected).toBe(true), 30_000);
+  await eventually(() => expect(phoneDisk.files.has("quiet.md")).toBe(true), 30_000);
+  for (let i = 0; i < 3; i++) expectAll(await scan(`plugin at 50 ms round trip, every week #${i}`, () => handleOpRequest(phone, all)));
+  await scan("plugin at 50 ms round trip, newest 20", () => handleOpRequest(phone, { op: "history", path: "quiet.md" }));
+
+  vi.useRealTimers();
+  phone.destroy();
+  a.destroy();
+  link.close();
+  await server.app.close();
+});
 
 it(`syncs ${NOTES} notes and ${ASSET_MB} MB of attachments`, { timeout: 3_600_000 }, async () => {
   const server = await startServer();

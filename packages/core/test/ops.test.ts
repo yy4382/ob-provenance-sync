@@ -21,6 +21,8 @@ function memoryVault(): VaultDocs & { files: Map<FileId, Y.Doc> } {
       t.doc!.transact(() => (out = fn(t)));
       return out;
     },
+    week: async () => ({ entries: [], complete: true }),
+    peekText: async (id, fn) => fn(textOf(id)),
   };
 }
 

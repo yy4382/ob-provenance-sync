@@ -39,7 +39,7 @@ describe("MCP tools", () => {
   it("limited mode only offers the edit and read tools", async () => {
     const names = async (mode: "full" | "limited") =>
       (await (await connect(async () => ({ ok: true, result: { op: "append" } }), mode)).listTools()).tools.map((t) => t.name).sort();
-    expect(await names("limited")).toEqual(["append_to_file", "create_file", "edit_file", "list_files", "read_file"]);
+    expect(await names("limited")).toEqual(["append_to_file", "create_file", "edit_file", "get_file_history", "list_files", "read_file"]);
     expect(await names("full")).toContain("get_backlinks");
   });
 
@@ -59,6 +59,43 @@ describe("MCP tools", () => {
     const client = await connect(async () => ({ ok: true, result: { op: "read", content: "", sentences } }), "limited");
     const res = await client.callTool({ name: "read_file", arguments: { path: "a.md", provenance: true } });
     expect(res.content).toEqual([{ type: "text", text: "[unknown] From disk.\n[mixed agent:claude-code,unknown] Half half." }]);
+  });
+
+  it("declares the history tool's output and returns it structured beside its text", async () => {
+    const at = Date.parse("2026-11-02T06:05:00Z");
+    const version = { at, authors: ["human:a"], path: "a.md", status: "modified", added: 1, removed: 0, preview: "+ new" };
+    const client = await connect(async () => ({ ok: true, result: { op: "history", versions: [version], next_offset: 1 } as never }), "limited");
+    const tool = (await client.listTools()).tools.find((t) => t.name === "get_file_history")!;
+    expect(tool.outputSchema).toMatchObject({ properties: { versions: {}, next_offset: {}, incomplete: {} } });
+    expect(tool.annotations).toMatchObject({ readOnlyHint: true, openWorldHint: false });
+    const res = await client.callTool({ name: "get_file_history", arguments: { path: "a.md" } });
+    expect(res.structuredContent).toMatchObject({ versions: [{ path: "a.md", added: 1 }], next_offset: 1 });
+    expect((res.content as Array<{ text: string }>)[0]!.text).toContain("a.md  human:a  +1 -0  + new");
+  });
+
+  it("keeps a failed history call an error, with nothing structured", async () => {
+    const client = await connect(async () => ({ ok: false, code: "not-found", message: "no such file: a.md" }), "limited");
+    const res = await client.callTool({ name: "get_file_history", arguments: { path: "a.md" } });
+    expect(res.isError).toBe(true);
+    expect(res.structuredContent).toBeUndefined();
+  });
+
+  it("passes the agent's limits and refuses one above the maximum", async () => {
+    const seen: OpRequest[] = [];
+    const client = await connect(async (req) => (seen.push(req), { ok: true, result: { op: "history", versions: [] } as never }), "limited");
+    await client.callTool({ name: "get_file_history", arguments: { path: "a.md", limit: 5, offset: 10, full_diff: true } });
+    expect(seen).toEqual([{ op: "history", path: "a.md", limit: 5, offset: 10, fullDiff: true }]);
+    expect((await client.callTool({ name: "get_file_history", arguments: { path: "a.md", limit: 101 } })).isError).toBe(true);
+  });
+
+  it("reads a past time, and refuses one it can't parse before it reaches the vault", async () => {
+    const seen: OpRequest[] = [];
+    const client = await connect(async (req) => (seen.push(req), { ok: true, result: { op: "read", content: "then" } }), "limited");
+    const res = await client.callTool({ name: "read_file", arguments: { path: "a.md", at: "2026-11-02T14:05+08:00" } });
+    expect(res.content).toEqual([{ type: "text", text: "then" }]);
+    expect(seen).toEqual([{ op: "read", path: "a.md", provenance: false, at: Date.parse("2026-11-02T14:05+08:00") }]);
+    expect((await client.callTool({ name: "read_file", arguments: { path: "a.md", at: "yesterday" } })).isError).toBe(true);
+    expect(seen).toHaveLength(1);
   });
 
   it("rejects a multi-line note before it reaches the vault", async () => {

@@ -52,8 +52,8 @@ const program = buildProgram({
     const agent = recordsAuthor(t) ? pinnedAgent(target) : null;
     const vault = await selected(target);
     const noAgent = "name yourself with --agent <name> or OB_PROVENANCE_AGENT, e.g. --agent claude-code";
-    const { text, isError, code } = await runTool(t, input, { ops: agentOps({ select: async () => ({ ok: true, vault }) }), agent, noAgent });
-    if (!isError) return void print(text);
+    const { text, isError, code, structured } = await runTool(t, input, { ops: agentOps({ select: async () => ({ ok: true, vault }) }), agent, noAgent });
+    if (!isError) return void print(target.json ? JSON.stringify(structured, null, 2) : text);
     process.stderr.write(`${text}\n`);
     process.exitCode = code === "invalid" ? 2 : 1;
   },

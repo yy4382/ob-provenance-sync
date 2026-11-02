@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { slug, type AgentId } from "@provenance/core";
-import { instructions, runTool, toolsFor, type Mode, type OpsTransport } from "@provenance/tools";
+import { instructions, MCP_DIFF_CHARS, runTool, toolsFor, type Mode, type OpsTransport } from "@provenance/tools";
 import pkg from "../package.json" with { type: "json" };
 
 /** The identity an MCP client announces in its handshake, e.g. "Claude Code" becomes agent:claude-code. */
@@ -23,10 +23,11 @@ export function createMcpServer(opts: { ops: OpsTransport; agent: AgentId | null
   const server = new McpServer({ name: "obsidian-provenance", version: pkg.version }, { instructions: instructions(opts.mode) });
   const identity = () => opts.agent ?? agentFromClientName(server.server.getClientVersion()?.name);
   for (const t of toolsFor(opts.mode)) {
-    const { description, input: inputSchema, annotations } = t;
-    server.registerTool(t.mcpName, { description, inputSchema, ...(annotations ? { annotations } : {}) }, async (args: unknown): Promise<CallToolResult> => {
-      const { text, isError } = await runTool(t, args, { ops: opts.ops, agent: identity(), noAgent: "this MCP client sent no name; start the server with --agent <name>" });
-      return { ...(isError ? { isError } : {}), content: [{ type: "text", text }] };
+    const { description, input: inputSchema, annotations, title, output: outputSchema } = t;
+    const config = { description, inputSchema, ...(annotations ? { annotations } : {}), ...(title ? { title } : {}), ...(outputSchema ? { outputSchema } : {}) };
+    server.registerTool(t.mcpName, config, async (args: unknown): Promise<CallToolResult> => {
+      const { text, isError, structured } = await runTool(t, args, { ops: opts.ops, agent: identity(), noAgent: "this MCP client sent no name; start the server with --agent <name>", diffChars: MCP_DIFF_CHARS });
+      return { ...(isError ? { isError } : {}), content: [{ type: "text", text }], ...(structured ? { structuredContent: structured } : {}) };
     });
   }
   return server;

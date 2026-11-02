@@ -1,9 +1,11 @@
 import { z } from "zod";
 import type * as Y from "yjs";
 import { attribute } from "./attribution";
+import { history, readAt, type HistoryResult, type PastGap } from "./history";
 import { agentIdSchema, agentProvenance, noteSchema, type SegmentKind } from "./provenance";
+import type { Entry } from "./journal";
 import { EditError, insertText, replaceText } from "./text";
-import { isMarkdownPath, markNote, newFileId, pathClash, type FileId, type VaultIndex } from "./vault";
+import { isMarkdownPath, markNote, newFileId, pathClash, TEXT_KEY, type FileId, type VaultIndex } from "./vault";
 
 /** Only Obsidian's own normalized form, so one file can never be reached under two spellings. */
 const pathSchema = z
@@ -32,7 +34,14 @@ const bySchema = z.object({
  */
 export const opRequestSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("list"), prefix: z.string().optional() }),
-  z.object({ op: z.literal("read"), path: markdownPath, provenance: z.boolean().optional() }),
+  z.object({ op: z.literal("read"), path: markdownPath, provenance: z.boolean().optional(), at: z.number().optional() }),
+  z.object({
+    op: z.literal("history"),
+    path: markdownPath,
+    limit: z.number().int().min(1).optional(),
+    offset: z.number().int().min(0).optional(),
+    fullDiff: z.boolean().optional(),
+  }),
   z.object({
     op: z.literal("edit"),
     path: markdownPath,
@@ -64,7 +73,8 @@ export interface AttributedSentence {
 
 export type OpResult =
   | { op: "list"; files: string[] }
-  | { op: "read"; content: string; sentences?: AttributedSentence[] }
+  | ({ op: "read"; content: string; sentences?: AttributedSentence[] } & PastGap)
+  | ({ op: "history" } & HistoryResult)
   | { op: "edit"; replaced: number }
   | { op: "append" | "create" | "delete" }
   | { op: "rename"; linksPending?: boolean }
@@ -105,6 +115,10 @@ export interface VaultDocs {
   updateIndex(fn: (index: VaultIndex) => void): Promise<void>;
   readText(id: FileId): Promise<Y.Text>;
   updateText<T>(id: FileId, fn: (ytext: Y.Text) => T): Promise<T>;
+  /** One week's journal. complete: false when a server exists and couldn't be reached, so this is only what this device holds. */
+  week(n: number): Promise<{ entries: Entry[]; complete: boolean }>;
+  /** Runs `fn` on a note's text without keeping it open, also for a deleted note. Null if the text can't be had in time. */
+  peekText<T>(id: FileId, fn: (ytext: Y.Text) => T): Promise<T | null>;
 }
 
 async function requireId(docs: VaultDocs, path: string): Promise<FileId> {
@@ -127,16 +141,19 @@ export async function executeOp(docs: VaultDocs, req: OpRequest): Promise<OpResu
       return { op: "list", files };
     }
     case "read": {
-      const ytext = await docs.readText(await requireId(docs, req.path));
+      const past = req.at === undefined ? null : await readAt(docs, req.path, req.at);
+      const ytext = past ? past.doc.getText(TEXT_KEY) : await docs.readText(await requireId(docs, req.path));
       const content = ytext.toString();
-      if (!req.provenance) return { op: "read", content };
+      if (!req.provenance) return { op: "read", content, ...past?.gap };
       const sentences = attribute(ytext).map((s) => ({
         text: content.slice(s.from, s.to),
         kind: s.kind,
         authors: [...new Set(s.contributors.map((c) => c.author))],
       }));
-      return { op: "read", content, sentences };
+      return { op: "read", content, sentences, ...past?.gap };
     }
+    case "history":
+      return { op: "history", ...(await history(docs, req)) };
     case "edit": {
       const by = byOf(req, docs);
       const id = await requireId(docs, req.path);

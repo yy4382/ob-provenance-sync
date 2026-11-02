@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Database } from "@hocuspocus/extension-database";
 import { Server } from "@hocuspocus/server";
-import { executeOp, FULL_ONLY_OPS, handleOpRequest, OpError, parseDocName, type OpRequest } from "@provenance/core";
+import { DAY, executeOp, FULL_ONLY_OPS, handleOpRequest, OpError, oldestWeek, parseDocName, type OpRequest } from "@provenance/core";
 import { createMcpServer, serveMcpHttp } from "@provenance/mcp";
 import { agentFor, credentialFor, type Config, type Credential } from "./config";
 import { ServerVaultDocs } from "./docs";
@@ -116,7 +116,7 @@ export function createApp(config: Config) {
           if (!agent) throw new HttpError(403, "this token needs a valid agent name");
           by.agent = agent;
         }
-        const docs = new ServerVaultDocs(server.hocuspocus, vault!);
+        const docs = new ServerVaultDocs(server.hocuspocus, storage, vault!);
         try {
           send(res, 200, await handleOpRequest(docs, body, (op) => runLimited(docs, op)));
         } finally {
@@ -151,7 +151,7 @@ export function createApp(config: Config) {
           agent,
           mode: "limited",
           ops: async (op) => {
-            const docs = new ServerVaultDocs(server.hocuspocus, vault!);
+            const docs = new ServerVaultDocs(server.hocuspocus, storage, vault!);
             try {
               return await handleOpRequest(docs, op, (r) => runLimited(docs, r));
             } finally {
@@ -164,14 +164,22 @@ export function createApp(config: Config) {
     },
   ];
 
+  const expireHistory = () => storage.dropJournalBefore(oldestWeek(config.historyDays, Date.now()));
+  let expiry: ReturnType<typeof setInterval> | null = null;
+
   return {
     server,
     storage,
+    expireHistory,
     async listen() {
+      expireHistory();
+      expiry = setInterval(expireHistory, DAY);
+      expiry.unref();
       await server.listen();
       return server;
     },
     async close() {
+      if (expiry) clearInterval(expiry);
       await server.destroy();
       storage.close();
     },

@@ -3,22 +3,33 @@ import {
   adoptText,
   agentProvenance,
   conflictPath,
+  DAY,
   difference,
+  entriesOf,
   errorMessage,
   fileDocName,
   hasState,
   humanProvenance,
   indexDocName,
   isMarkdownPath,
+  journalDocName,
+  journalWeekOf,
+  LOCAL_HISTORY_DAYS,
   markNote,
   newFileId,
+  oldestWeek,
   OpError,
   pairRenames,
+  parseEntries,
+  Recorder,
   repairedConflictPath,
   setText,
   TEXT_KEY,
+  textAt,
   unknownProvenance,
   VaultIndex,
+  weekOf,
+  type Entry,
   type FileEntry,
   type AgentId,
   type AgentWhy,
@@ -65,6 +76,10 @@ export interface EngineOptions {
   /** Absent when no server is configured: provenance still works, it just doesn't leave this device. */
   server?: { url: string; token: string; blobs: Blobs; WebSocketPolyfill?: unknown };
   persist?: (name: string, doc: Y.Doc) => Persistence;
+  /** The documents behind `persist`. `names` is null where the host can't list them. */
+  stored?: { names(): Promise<string[] | null>; drop(name: string): Promise<void> };
+  /** Days of history this device keeps offline, read as it's needed. It never limits what a read returns. Defaults to LOCAL_HISTORY_DAYS. */
+  localHistoryDays?: () => number;
   onStatus?: (status: SyncStatus) => void;
   onEvent?: (event: SyncEvent) => void;
 }
@@ -97,17 +112,9 @@ export async function sha256(data: ArrayBuffer): Promise<string> {
 }
 
 const BASE_KEY = "disk-base";
+const UNSENT_WEEKS_KEY = "unsent-weeks";
 const SAVED_STATES = 64;
 
-/** A snapshot is usable only if the document holds every update it refers to. */
-function textAt(doc: Y.Doc, snapshot: Y.Snapshot): string | null {
-  for (const [client, clock] of snapshot.sv) if (clock > Y.getState(doc.store, client)) return null;
-  try {
-    return Y.createDocFromSnapshot(doc, snapshot).getText(TEXT_KEY).toJSON();
-  } catch {
-    return null;
-  }
-}
 const MIRROR_KEY = "on-disk";
 
 /**
@@ -142,6 +149,7 @@ export class MarkdownFile {
   private persistence: Persistence | null = null;
   private destroyed = false;
   private knownLocally = false;
+  private readonly stopRecording: () => void;
   /** Opened, and holding the server's content if this device had none. */
   loaded = false;
 
@@ -155,6 +163,7 @@ export class MarkdownFile {
       if (this.editors > 0) this.recordEditorState();
       if (tr.origin !== FROM_DISK) this.scheduleWrite();
     });
+    this.stopRecording = engine.recorder.watchNote(id, this.doc, () => this.provider !== null);
     this.ready = this.open();
   }
 
@@ -374,6 +383,7 @@ export class MarkdownFile {
 
   destroy(): void {
     this.destroyed = true;
+    this.stopRecording();
     if (this.writeTimer) clearTimeout(this.writeTimer);
     this.provider?.destroy();
     this.persistence?.destroy();
@@ -437,6 +447,33 @@ function synced(provider: HocuspocusProvider): Promise<void> {
   return new Promise((resolve) => provider.on("synced", () => resolve()));
 }
 
+/** The server has applied everything this document holds. `synced` only says its answer arrived, with ours perhaps still on the way. */
+function acknowledged(provider: HocuspocusProvider): Promise<void> {
+  const done = () => provider.isSynced && !provider.hasUnsyncedChanges;
+  if (done()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const check = () => {
+      if (!done()) return;
+      provider.off("unsyncedChanges", check);
+      resolve();
+    };
+    provider.on("unsyncedChanges", check);
+  });
+}
+
+interface OpenWeek {
+  week: number;
+  doc: Y.Doc;
+  persistence: Persistence | null;
+  provider: HocuspocusProvider | null;
+}
+
+function closeWeek({ doc, persistence, provider }: OpenWeek) {
+  provider?.destroy();
+  persistence?.destroy();
+  doc.destroy();
+}
+
 /**
  * Keeps a vault folder and the server's CRDT documents in agreement.
  *
@@ -449,6 +486,7 @@ function synced(provider: HocuspocusProvider): Promise<void> {
  */
 export class SyncEngine implements VaultDocs {
   readonly vaultIndex: VaultIndex;
+  readonly recorder: Recorder;
   readonly files = new Map<FileId, MarkdownFile>();
   private readonly onDisk = new DiskMirror();
   private readonly binaryHashes = new Map<FileId, string>();
@@ -464,14 +502,31 @@ export class SyncEngine implements VaultDocs {
   private mirrorTimer: ReturnType<typeof setTimeout> | null = null;
   /** The last syncTree left files unplaced behind files not synced yet; vault events retry it. */
   private treeIncomplete = false;
+  /** Only this week stays open, so a phone carries one week of the journal in memory. */
+  private thisWeek: OpenWeek | null = null;
+  /** Weeks this device may hold entries for that the server hasn't confirmed. A past week has no open provider to send them. */
+  private unsentWeeks = new Set<number>();
+  private stopRecordingIndex: () => void = () => {};
+  private weekDropTimer: ReturnType<typeof setInterval> | null = null;
   started = false;
 
   constructor(readonly opts: EngineOptions) {
     this.vaultIndex = new VaultIndex(new Y.Doc({ gc: false }));
+    this.recorder = new Recorder(
+      opts.device,
+      (at) => this.entriesFor(at),
+      (tr) => tr.local || tr.origin === FROM_DISK,
+      (week) => this.vaultIndex.markJournalWeek(week),
+    );
   }
 
   get device(): string {
     return this.opts.device;
+  }
+
+  /** Whether this week's journal has heard from the server. */
+  get isConnected(): boolean {
+    return !!this.thisWeek?.provider?.isSynced;
   }
 
   async index(): Promise<VaultIndex> {
@@ -492,9 +547,9 @@ export class SyncEngine implements VaultDocs {
     this.opts.onEvent?.({ level, message, ...(path === undefined ? {} : { path }) });
   }
 
-  connect(name: string, document: Y.Doc): HocuspocusProvider | null {
+  connect(name: string, document: Y.Doc, sessionAwareness = false): HocuspocusProvider | null {
     if (!this.socket) return null;
-    const provider = new HocuspocusProvider({ websocketProvider: this.socket, name, document, token: this.opts.server!.token });
+    const provider = new HocuspocusProvider({ websocketProvider: this.socket, name, document, token: this.opts.server!.token, sessionAwareness });
     provider.attach();
     return provider;
   }
@@ -545,7 +600,16 @@ export class SyncEngine implements VaultDocs {
     else if (this.indexProvider) await within(synced(this.indexProvider), OPEN_WAIT, undefined);
 
     const lastSeen = ((await this.indexPersistence?.get(MIRROR_KEY)) ?? {}) as Record<string, string>;
+    this.unsentWeeks = new Set(((await this.indexPersistence?.get(UNSENT_WEEKS_KEY)) ?? []) as number[]);
+    this.enterWeek(weekOf(Date.now()));
+    await this.thisWeek!.persistence?.whenSynced;
+    await this.recallOlderWork(weekOf(Date.now()));
+    void this.dropOldWeeks();
+    this.weekDropTimer = setInterval(() => void this.dropOldWeeks(), DAY);
+    this.stopRecordingIndex = this.recorder.watchIndex(this.vaultIndex.files);
+    this.recorder.paused = Object.keys(lastSeen).length === 0;
     await this.enqueue(() => this.scanDisk(lastSeen));
+    this.recorder.paused = false;
     this.vaultIndex.files.observe((_e, tr) => {
       if (tr.origin !== FROM_DISK) this.scheduleTree();
     });
@@ -937,13 +1001,19 @@ export class SyncEngine implements VaultDocs {
     this.files.delete(id);
   }
 
-  /** The text this device last had on disk for a note it doesn't keep open, or null if the note didn't load in time. */
-  private async peekDiskText(id: FileId): Promise<string | null> {
+  /** Runs `fn` on a note, leaving it as open or closed as it was; null if the note didn't load in time. */
+  private async peek<T>(id: FileId, fn: (file: MarkdownFile) => T): Promise<T | null> {
+    const kept = this.files.has(id);
     const file = this.openFile(id, false);
     const ready = await within(file.ready.then(() => true), OPEN_WAIT, false);
-    const text = ready ? file.diskText : null;
-    this.closeFile(id);
-    return text;
+    const out = ready ? fn(file) : null;
+    if (!kept) this.closeFile(id);
+    return out;
+  }
+
+  /** The text this device last had on disk for a note it doesn't keep open, or null if the note didn't load in time. */
+  private peekDiskText(id: FileId): Promise<string | null> {
+    return this.peek(id, (file) => file.diskText);
   }
 
   /** Drops everything this device knows about `id` being on disk. */
@@ -1211,6 +1281,98 @@ export class SyncEngine implements VaultDocs {
     return out;
   }
 
+  /** The queue keeps a tree pass from opening a note in the moment a peek closes it. */
+  peekText<T>(id: FileId, fn: (ytext: Y.Text) => T): Promise<T | null> {
+    const peek = () => this.peek(id, (file) => fn(file.ytext));
+    return this.files.has(id) ? peek() : this.enqueue(peek);
+  }
+
+  async week(n: number): Promise<{ entries: Entry[]; complete: boolean }> {
+    const open = this.thisWeek;
+    if (open?.week === n) return { entries: parseEntries(entriesOf(open.doc).toArray()), complete: !open.provider || open.provider.isSynced };
+    return this.pastWeek(n);
+  }
+
+  private openWeek(week: number): OpenWeek {
+    const name = journalDocName(this.opts.vault, week);
+    const doc = new Y.Doc({ gc: false });
+    return { week, doc, persistence: this.opts.persist?.(name, doc) ?? null, provider: null };
+  }
+
+  /** A past week, open for as long as it takes to read it, and to send what the server is missing. */
+  private async pastWeek(n: number): Promise<{ entries: Entry[]; complete: boolean }> {
+    // Outside the cache there's no persistence, so reading old history doesn't refill it.
+    const week = this.keepsWeek(n) ? this.openWeek(n) : { week: n, doc: new Y.Doc({ gc: false }), persistence: null, provider: null };
+    try {
+      await week.persistence?.whenSynced;
+      // This week's provider answers for the server. Waiting on each past week would use up a read while offline.
+      // Each read gets a session of its own: on one socket, a provider opened as the last one closes loses its handshake to the closing connection.
+      if (this.isConnected) week.provider = this.connect(journalDocName(this.opts.vault, n), week.doc, true);
+      const sent = week.provider ? await within(acknowledged(week.provider).then(() => true), OPEN_WAIT, false) : false;
+      if (sent) this.confirmSent(n);
+      return { entries: parseEntries(entriesOf(week.doc).toArray()), complete: !this.socket || sent };
+    } finally {
+      closeWeek(week);
+    }
+  }
+
+  /** A week the server hasn't confirmed stays whatever its age: here may be its only copy. */
+  private keepsWeek(n: number): boolean {
+    return this.unsentWeeks.has(n) || n >= oldestWeek(this.opts.localHistoryDays?.() ?? LOCAL_HISTORY_DAYS, Date.now());
+  }
+
+  /** Drops weeks past this device's limit from its storage, always whole. The server still has them, and a read goes through to it. */
+  async dropOldWeeks(): Promise<void> {
+    const { stored, vault } = this.opts;
+    if (!stored) return;
+    try {
+      const names = (await stored.names()) ?? this.vaultIndex.weeks().map((week) => journalDocName(vault, week));
+      for (const name of names) {
+        const week = journalWeekOf(name);
+        if (week !== null && name === journalDocName(vault, week) && !this.keepsWeek(week)) await stored.drop(name);
+      }
+    } catch (e) {
+      this.log("warn", `Couldn't drop old history from this device: ${errorMessage(e)}`);
+    }
+  }
+
+  private saveUnsentWeeks() {
+    void this.indexPersistence?.set(UNSENT_WEEKS_KEY, [...this.unsentWeeks]);
+  }
+
+  private confirmSent(week: number) {
+    if (this.unsentWeeks.delete(week)) this.saveUnsentWeeks();
+  }
+
+  private enterWeek(week: number) {
+    if (this.thisWeek) closeWeek(this.thisWeek);
+    const open = this.openWeek(week);
+    this.thisWeek = open;
+    this.unsentWeeks.add(week);
+    this.saveUnsentWeeks();
+    open.provider = this.connect(journalDocName(this.opts.vault, week), open.doc);
+    if (!open.provider) return;
+    void synced(open.provider).then(() => {
+      for (const past of this.unsentWeeks) if (past !== week) void this.pastWeek(past);
+    });
+  }
+
+  /** Offline work can span weeks, and the recorder still has to end it when this device next hears from another. */
+  private async recallOlderWork(week: number) {
+    const older = [...new Set([week - 1, ...this.unsentWeeks])].filter((n) => n < week && this.keepsWeek(n)).sort((a, b) => a - b);
+    for (const n of older) {
+      const held = this.openWeek(n);
+      await held.persistence?.whenSynced;
+      this.recorder.carry(parseEntries(entriesOf(held.doc).toArray()));
+      closeWeek(held);
+    }
+  }
+
+  private entriesFor(at: number): Y.Array<Entry> {
+    if (this.thisWeek?.week !== weekOf(at)) this.enterWeek(weekOf(at));
+    return entriesOf(this.thisWeek!.doc);
+  }
+
   /**
    * Resolves once queued disk work and pending writes are done; for tests and
    * shutdown. Files still waiting for the server (offline, fresh device) are
@@ -1236,8 +1398,12 @@ export class SyncEngine implements VaultDocs {
   destroy(): void {
     if (this.treeTimer) clearTimeout(this.treeTimer);
     if (this.mirrorTimer) clearTimeout(this.mirrorTimer);
+    if (this.weekDropTimer) clearInterval(this.weekDropTimer);
     for (const f of this.files.values()) f.destroy();
     this.files.clear();
+    this.stopRecordingIndex();
+    if (this.thisWeek) closeWeek(this.thisWeek);
+    this.thisWeek = null;
     this.indexProvider?.destroy();
     this.indexPersistence?.destroy();
     this.socket?.destroy();
