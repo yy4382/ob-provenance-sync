@@ -1216,6 +1216,17 @@ describe("what changed across a vault", () => {
     expect(await diffsOf(v, since)).toEqual([`@@ -1,1 +1,1 @@\n-old\n+${"word ".repeat(40)}`]);
   });
 
+  it("answers for the whole vault beside a note of hundreds of thousands of lines", async () => {
+    const v = vault();
+    const since = Date.now();
+    await v.create("big.md", "A long line.\n".repeat(190_000));
+    await v.create("small.md", "Short.\n");
+    expect((await recent(v, since)).changes.map((c) => [c.path, c.added])).toEqual([
+      ["big.md", 190_000],
+      ["small.md", 1],
+    ]);
+  });
+
   describe("for some authors", () => {
     /** One note holding a line each from an agent, a person and no recorded author, all in the range. */
     async function shared() {

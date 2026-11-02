@@ -374,8 +374,6 @@ try {
   check("the handler renames and deletes", cliRenamed.ok === true && cliCall({ op: "delete", path: "Cli/renamed.md" }).ok === true, JSON.stringify(cliRenamed));
   const invalid = cliCall({ op: "read", path: "../outside.md" });
   check("the handler rejects a bad request as an op response", invalid.ok === false && invalid.code === "invalid", JSON.stringify(invalid));
-  const big = "A long line of a long note.\n".repeat(190_000);
-  check("a 5 MB note goes through a request file", cliCall({ op: "create", path: "Cli/big.md", content: big, by }).ok === true && cliCall({ op: "read", path: "Cli/big.md" }).result?.content === big);
 
   check("ob-provenance lists the registered vault", ob(["vaults"]).stdout.startsWith("vault\t"));
   check("ob-provenance reaches Obsidian", ob(["status"]).stdout.includes("Obsidian: reachable"), JSON.stringify(ob(["status"])));
@@ -442,6 +440,18 @@ try {
   const deletedVersion = newestVersion("Cli/activity-moved.md");
   check("history through the plugin follows a deleted note by its last path", deletedVersion?.status === "deleted" && deletedVersion.path === "Cli/activity-moved.md", JSON.stringify(deletedVersion));
   check("history through the plugin follows a deleted note by a path it had before", JSON.stringify(newestVersion("Bulk/n7.md")) === JSON.stringify(deletedVersion), JSON.stringify(newestVersion("Bulk/n7.md")));
+
+  // Obsidian holds every rename until it has indexed the vault, so this stays after the renames: it was still indexing this note 90 seconds on.
+  const beforeBig = new Date().toISOString();
+  const big = "A long line of a long note.\n".repeat(190_000);
+  check("a 5 MB note goes through a request file", cliCall({ op: "create", path: "Cli/big.md", content: big, by }).ok === true && cliCall({ op: "read", path: "Cli/big.md" }).result?.content === big);
+  const bigLine = (() => {
+    const answer = ob(["activities", "--since", beforeBig, "--limit", "100", "--json"]);
+    return { answer, line: JSON.parse(answer.stdout || "{}").changes?.find((c) => c.path === "Cli/big.md") };
+  })();
+  check("activities through the plugin answers beside a 5 MB note", bigLine.line?.status === "created" && bigLine.line.added === 190_000, JSON.stringify({ line: bigLine.line, status: bigLine.answer.status, stderr: bigLine.answer.stderr }));
+  const bigHistory = ob(["history", "--path", "Cli/big.md", "--json"]);
+  check("history through the plugin answers for a 5 MB note", JSON.parse(bigHistory.stdout || "{}").versions?.[0]?.added === 190_000, JSON.stringify({ status: bigHistory.status, stderr: bigHistory.stderr }));
   const stored = await cdp.eval(`const e = ${plugin}.engine;
     const before = (await indexedDB.databases()).map((d) => d.name);
     const index = before.find((n) => n.endsWith("/e2e/index"));
