@@ -1,4 +1,4 @@
-import { newFileId, textAt, weekOf, WEEK, type EditEntry, type Entry, type TreeEntry } from "@provenance/core";
+import { handleOpRequest, newFileId, textAt, weekOf, WEEK, type EditEntry, type Entry, type TreeEntry } from "@provenance/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { startDeafServer, startOldServer } from "../../server/test/old-server";
@@ -277,6 +277,51 @@ describe("confirming a week", () => {
     const [one, two] = await Promise.all([after.engine.week(week), after.engine.week(week)]);
     expect(edits(one.entries)).toHaveLength(1);
     expect(two).toEqual(one);
+  });
+});
+
+describe("reading history on a device", () => {
+  const MINUTE = 60_000;
+
+  it("follows a note through an edit, a rename and a delete, and leaves nothing open", async () => {
+    const week = weekOf(Date.now());
+    vi.useFakeTimers({ toFake: ["Date"], now: week * WEEK + 60 * MINUTE });
+    const a = device("a", null);
+    a.disk.files.set("n.md", "one\n");
+    await a.engine.start();
+    await a.engine.settle();
+    const id = idOf(a.engine, "n.md");
+    vi.setSystemTime(week * WEEK + 70 * MINUTE);
+    await a.disk.write("n.md", "one\ntwo\n");
+    await a.engine.settle();
+    vi.setSystemTime(week * WEEK + 80 * MINUTE);
+    await a.disk.rename("n.md", "m.md");
+    await a.engine.settle();
+    vi.setSystemTime(week * WEEK + 90 * MINUTE);
+    await a.disk.write("m.md", "one\ntwo\nthree\n");
+    await a.engine.settle();
+    vi.setSystemTime(week * WEEK + 100 * MINUTE);
+    await a.disk.trash("m.md");
+    await a.engine.settle();
+
+    const run = (req: unknown) => handleOpRequest(a.engine, req);
+    const res = await run({ op: "history", path: "m.md" });
+    expect(res).toMatchObject({
+      ok: true,
+      result: {
+        versions: [
+          { status: "deleted", path: "m.md", removed: 3 },
+          { status: "modified", path: "m.md", added: 1, removed: 0, preview: "+ three" },
+          { status: "renamed", path: "m.md", from: "n.md", added: 0, removed: 0 },
+          { status: "modified", path: "n.md", added: 1, removed: 0, preview: "+ two" },
+        ],
+      },
+    });
+    expect(await run({ op: "history", path: "n.md" })).toEqual(res);
+    expect(await run({ op: "read", path: "n.md", at: week * WEEK + 60 * MINUTE })).toMatchObject({ ok: true, result: { content: "one\n" } });
+    expect(await run({ op: "read", path: "m.md", at: week * WEEK + 75 * MINUTE })).toMatchObject({ ok: true, result: { content: "one\ntwo\n" } });
+    expect(await run({ op: "read", path: "m.md", at: week * WEEK + 95 * MINUTE })).toMatchObject({ ok: true, result: { content: "one\ntwo\nthree\n" } });
+    expect(a.engine.files.has(id)).toBe(false);
   });
 });
 

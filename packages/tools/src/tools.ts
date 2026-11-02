@@ -60,6 +60,16 @@ export const TOOLS: readonly ToolDef[] = [
     request: ({ path, provenance }) => ({ op: "read", path, provenance: provenance ?? false }),
   }),
   tool({
+    mcpName: "get_file_history",
+    command: "history",
+    op: "history",
+    description: "List a note's past versions, newest first.",
+    examples: ["ob-provenance --vault Notes history --path notes/today.md"],
+    input: { path },
+    annotations: { readOnlyHint: true },
+    request: ({ path }) => ({ op: "history", path }),
+  }),
+  tool({
     mcpName: "edit_file",
     command: "edit",
     op: "edit",

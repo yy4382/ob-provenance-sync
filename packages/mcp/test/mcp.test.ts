@@ -39,7 +39,7 @@ describe("MCP tools", () => {
   it("limited mode only offers the edit and read tools", async () => {
     const names = async (mode: "full" | "limited") =>
       (await (await connect(async () => ({ ok: true, result: { op: "append" } }), mode)).listTools()).tools.map((t) => t.name).sort();
-    expect(await names("limited")).toEqual(["append_to_file", "create_file", "edit_file", "list_files", "read_file"]);
+    expect(await names("limited")).toEqual(["append_to_file", "create_file", "edit_file", "get_file_history", "list_files", "read_file"]);
     expect(await names("full")).toContain("get_backlinks");
   });
 

@@ -1,5 +1,6 @@
 export * from "./agent-config";
 export * from "./attribution";
+export * from "./history";
 export * from "./journal";
 export * from "./ops";
 export * from "./provenance";

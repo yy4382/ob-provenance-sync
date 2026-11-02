@@ -10,6 +10,7 @@
     "lint": "tsc -p ."
   },
   "dependencies": {
+    "diff": "9.0.0",
     "fast-diff": "^1.3.0",
     "yjs": "^13.6.33",
     "zod": "^4.6.7"
