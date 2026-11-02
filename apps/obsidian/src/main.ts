@@ -1,4 +1,4 @@
-import { errorMessage, humanId, reattribute, REATTRIBUTABLE } from "@provenance/core";
+import { errorMessage, humanId, LOCAL_HISTORY_DAYS, reattribute, REATTRIBUTABLE } from "@provenance/core";
 import { MarkdownView, Notice, Platform, Plugin, type Editor } from "obsidian";
 import { installCli, localMcpCommand, registerVault, unregisterVault, type LocalMcpCommand } from "./agent-cli";
 import { registerAgentCli } from "./agent-ops";
@@ -309,7 +309,8 @@ export default class ProvenancePlugin extends Plugin {
       disk: new ObsidianDisk(this.app),
       persist: indexedDbPersistence(this.app),
       stored: indexedDbStored(this.app),
-      localHistoryDays: () => this.settings.localHistoryDays,
+      // A cleared number field isn't a limit of zero.
+      localHistoryDays: () => (Number.isFinite(this.settings.localHistoryDays) ? this.settings.localHistoryDays : LOCAL_HISTORY_DAYS),
       onStatus: (status) => this.setStatus(status),
       onEvent: (event) => this.log.add(event),
       ...(base && token
