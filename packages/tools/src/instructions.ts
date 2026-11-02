@@ -34,6 +34,7 @@ export function instructions(surface: Mode | "cli"): string {
     "Reading",
     `- Use ${name("read_file")} with ${flag("provenance", "true")} before rewriting existing text, or when asked who wrote something.`,
     `- To see how a note changed or what it said before, use ${name("get_file_history")}, then ${name("read_file")} with ${flag("at", "<time>")}.`,
+    `- To see what changed across the vault lately, use ${name("list_recent_changes")} with ${flag("since", "<time>")}.`,
     "",
     "Finding notes",
     `- Don't guess paths. Wikilinks like [[Note]] are not paths. Use ${full ? `${name("search")}, ${name("list_files")}, ${name("get_links")} or ${name("get_backlinks")}` : name("list_files")}.`,
