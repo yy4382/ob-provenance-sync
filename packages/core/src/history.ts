@@ -1,7 +1,7 @@
 import { structuredPatch, type StructuredPatchHunk as Hunk } from "diff";
 import diff from "fast-diff";
 import * as Y from "yjs";
-import { PRE_EVERY, weekOf, type EditEntry, type Entry, type TreeEntry } from "./journal";
+import { PRE_EVERY, type EditEntry, type Entry, type TreeEntry } from "./journal";
 import { OpError, type VaultDocs } from "./ops";
 import { minuteOf, type AuthorId } from "./provenance";
 import { docAt, TEXT_KEY, textAt, type FileId } from "./vault";
@@ -25,6 +25,12 @@ export interface NoteVersion {
 
 /** What cut an answer short: a server that can't be reached, or the time limit. */
 export type Incomplete = "server" | "time";
+/** Why a past text may not be what the note said then. "record" means that time is older than anything recorded for the note. */
+export interface PastGap {
+  incomplete?: Incomplete | "record";
+  /** The note's earliest recorded change, when a record exists to start from. */
+  recordStart?: number;
+}
 
 export interface HistoryResult {
   versions: NoteVersion[];
@@ -111,15 +117,15 @@ interface Scan {
   incomplete?: Incomplete;
 }
 
-/** Reads weeks newest first until `enough`, given the note's entries so far and the next week it would read. */
-async function scan(docs: VaultDocs, path: string, deadline: number, now: () => number, enough: (mine: Entry[], next: number) => boolean): Promise<Scan> {
+/** Reads weeks newest first until `enough`, given the note's entries so far. */
+async function scan(docs: VaultDocs, path: string, deadline: number, now: () => number, enough: (mine: Entry[]) => boolean): Promise<Scan> {
   const index = await docs.index();
   const weeks = index.weeks();
   const entries: Entry[] = [];
   let id = index.idOf(path) ?? null;
   let unreached = false;
   while (weeks.length) {
-    if (id && enough(noteEntries(entries, id), weeks[0]!)) break;
+    if (id && enough(noteEntries(entries, id))) break;
     if (now() >= deadline) return { id, entries, incomplete: "time" };
     const reads = await Promise.all(weeks.splice(0, WEEKS_AT_ONCE).map((n) => docs.week(n)));
     for (const read of reads) {
@@ -352,7 +358,7 @@ export async function history(docs: VaultDocs, req: HistoryRequest, now: () => n
 export interface PastText {
   /** A document of its own, so it outlives the note it was restored from. */
   doc: Y.Doc;
-  incomplete?: Incomplete;
+  gap: PastGap;
 }
 
 const utc = (ms: number) => new Date(ms).toISOString();
@@ -360,11 +366,14 @@ const utc = (ms: number) => new Date(ms).toISOString();
 /**
  * The text at time `at`. Times are printed to the minute, so `at` means the end
  * of its minute, and a version's own time gives the text it left. Exact if the
- * note was quiet, at most PRE_EVERY early if it was being edited.
+ * note was quiet, at most PRE_EVERY early if it was being edited. It takes an
+ * entry from before that time to know that: without one, the earliest text on
+ * record may be later than the time asked about, and the answer says so.
  */
 export async function readAt(docs: VaultDocs, path: string, at: number, now: () => number = Date.now): Promise<PastText> {
   const cut = minuteOf(at) + MINUTE;
-  const found = await scan(docs, path, now() + SCAN_MS, now, (_mine, next) => next < weekOf(cut));
+  const before = (mine: Entry[]) => !!mine[0] && mine[0].at < cut;
+  const found = await scan(docs, path, now() + SCAN_MS, now, before);
   if (!found.id) throw notFound(path, found.incomplete);
   const id = found.id;
   const mine = noteEntries(found.entries, id);
@@ -378,5 +387,7 @@ export async function readAt(docs: VaultDocs, path: string, at: number, now: () 
   const snapshot = bound && bound !== "current" && bound !== "empty" ? snapshotOf(bound.pre) : null;
   const doc = bound !== "current" && !snapshot ? null : await docs.peekText(id, (ytext) => docAt(ytext.doc!, snapshot ?? Y.snapshot(ytext.doc!)));
   if (!doc) throw new OpError("unavailable", "this note's text from that time hasn't reached this device yet. It will once sync reconnects.");
-  return { doc, ...(found.incomplete ? { incomplete: found.incomplete } : {}) };
+  if (found.incomplete) return { doc, gap: { incomplete: found.incomplete } };
+  if (before(mine)) return { doc, gap: {} };
+  return { doc, gap: { incomplete: "record", ...(mine[0] ? { recordStart: mine[0].at } : {}) } };
 }

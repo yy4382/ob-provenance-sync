@@ -92,7 +92,9 @@ export const TOOLS: readonly ToolDef[] = [
       'An author of "unknown" means part of the piece has no recorded author. Example: "[mixed human:alice,agent:claude-code] Half half." ' +
       "This view shows no notes or times, and drops indentation and blank lines, so copy old_string from a plain read. " +
       "Pass at to read the note as it was then, including a deleted note or an old path. A version's time from the note's history gives the text that version left. " +
-      "The text is exact if nobody was editing at that time, otherwise up to 5 minutes early. Past text can be read but not restored.",
+      "The text is exact if nobody was editing at that time, otherwise up to 5 minutes early. " +
+      "It reaches back to the note's first recorded change: history starts when this feature first ran on the vault, and the sync server keeps it for a year unless the vault's owner set another limit. " +
+      "For an earlier time you get the earliest text on record, with a note saying it may have differed. Past text can be read but not restored.",
     examples: ["ob-provenance --vault Notes read --path notes/today.md", "ob-provenance --vault Notes read --path notes/today.md --provenance", "ob-provenance --vault Notes read --path notes/today.md --at 2h", "ob-provenance --vault Notes read --path notes/gone.md --at 2026-11-02T14:05+08:00"],
     input: { path: pastPath, provenance: z.boolean().optional().describe("Show who wrote each piece of text."), at: time.optional() },
     annotations: { readOnlyHint: true },

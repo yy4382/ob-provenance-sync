@@ -1,4 +1,4 @@
-import type { HistoryResult, Incomplete, NoteVersion, OpErrorCode, OpRequest, OpResponse } from "@provenance/core";
+import type { HistoryResult, Incomplete, NoteVersion, OpErrorCode, OpRequest, OpResponse, PastGap } from "@provenance/core";
 import { stamp } from "./time";
 
 export interface Rendered {
@@ -46,6 +46,12 @@ const readNote: Record<Incomplete, string> = {
   time: "note: this search hit its time limit, so this may not be the text at that time.",
 };
 
+function pastNote({ incomplete, recordStart }: PastGap & { incomplete: NonNullable<PastGap["incomplete"]> }): string {
+  if (incomplete !== "record") return readNote[incomplete];
+  if (recordStart === undefined) return "note: nothing is recorded for this note, so this is its current text and it may have differed at that time.";
+  return `note: this note's history starts at ${stamp(recordStart)}, so this is its earliest recorded text and it may have differed at that time.`;
+}
+
 function versionLine(v: ShownVersion): string {
   const file = v.from ? `${v.from} -> ${v.path}` : v.path;
   const mark = v.status === "created" ? " (new)" : v.status === "deleted" ? " (deleted)" : "";
@@ -87,7 +93,7 @@ export function render(res: OpResponse, opts: RenderOptions = {}): Rendered {
       text = r.sentences
         ? r.sentences.map((s) => `[${s.kind}${s.authors.length && s.kind !== "unknown" ? ` ${s.authors.join(",")}` : ""}] ${s.text}`).join("\n")
         : r.content;
-      if (r.incomplete) text = `${text}\n\n${readNote[r.incomplete]}`;
+      if (r.incomplete) text = `${text}\n\n${pastNote({ ...r, incomplete: r.incomplete })}`;
       break;
     case "history":
       return { isError: false, ...renderHistory(r, opts) };

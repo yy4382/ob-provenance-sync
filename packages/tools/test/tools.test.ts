@@ -104,6 +104,12 @@ describe("a note's history", () => {
   it("flags a read that can't be sure", () => {
     expect(render({ ok: true, result: { op: "read", content: "text", incomplete: "server" } }).text).toBe("text\n\nnote: the sync server can't be reached and older history needs it, so this may not be the text at that time.");
   });
+
+  it("says when a read reaches past what's recorded for a note", () => {
+    const at = Date.parse("2026-11-02T06:05:00Z");
+    expect(render({ ok: true, result: { op: "read", content: "text", incomplete: "record", recordStart: at } }).text).toBe(`text\n\nnote: this note's history starts at ${stamp(at)}, so this is its earliest recorded text and it may have differed at that time.`);
+    expect(render({ ok: true, result: { op: "read", content: "text", incomplete: "record" } }).text).toBe("text\n\nnote: nothing is recorded for this note, so this is its current text and it may have differed at that time.");
+  });
 });
 
 describe("capping full diffs", () => {

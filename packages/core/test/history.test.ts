@@ -773,6 +773,74 @@ describe("reading a past time", () => {
     expect(await textIn(v.docs, "a.md", START - WEEK)).toBe("from before\n");
   });
 
+  it("says when a time is older than anything recorded for a note, and when the record starts", async () => {
+    const v = vault();
+    arrives(v, "a.md", "from before\n");
+    pass(WEEK);
+    await v.edit("a.md", "from before\n", "now\n");
+    expect(await v.run({ op: "read", path: "a.md", at: START })).toEqual({ ok: true, result: { op: "read", content: "from before\n", incomplete: "record", recordStart: Date.now() } });
+  });
+
+  it("says nothing is recorded for a note with no entries, rather than passing off today's text", async () => {
+    const v = vault();
+    arrives(v, "a.md", "text today\n");
+    pass(300 * 24 * 60 * MINUTE);
+    expect(await v.run({ op: "read", path: "a.md", at: START })).toEqual({ ok: true, result: { op: "read", content: "text today\n", incomplete: "record" } });
+  });
+
+  it("doesn't pass off later text as older once retention drops the week between", async () => {
+    const v = vault();
+    await v.create("a.md", "one\n");
+    const before = Date.now();
+    const created = weekOf(before);
+    pass(WEEK);
+    await v.edit("a.md", "one\n", "two\n");
+    pass(WEEK);
+    await v.edit("a.md", "two\n", "three\n");
+    expect(await v.run({ op: "read", path: "a.md", at: before })).toEqual({ ok: true, result: { op: "read", content: "one\n" } });
+
+    for (const week of [created, created + 1]) entriesOf(v.weeks.get(week)!).delete(0, entriesOf(v.weeks.get(week)!).length);
+    expect(await v.run({ op: "read", path: "a.md", at: before })).toEqual({ ok: true, result: { op: "read", content: "two\n", incomplete: "record", recordStart: Date.now() } });
+  });
+
+  it("stays exact, with no note, for a note quiet since well before that time", async () => {
+    const v = vault();
+    await v.create("a.md", "one\n");
+    pass(PRE_EVERY);
+    await v.edit("a.md", "one\n", "two\n");
+    pass(8 * WEEK);
+    const at = Date.now();
+    pass(8 * WEEK);
+    v.index.markJournalWeek(weekOf(Date.now()));
+    expect(await v.run({ op: "read", path: "a.md", at })).toEqual({ ok: true, result: { op: "read", content: "two\n" } });
+  });
+
+  it("reads back only as far as the first entry before that time", async () => {
+    const v = vault();
+    await v.create("a.md", "0\n");
+    for (let i = 1; i <= 12; i++) {
+      pass(WEEK);
+      await v.edit("a.md", `${i - 1}\n`, `${i}\n`);
+    }
+    v.weekReads.length = 0;
+    expect(await textIn(v.docs, "a.md", Date.now() - WEEK)).toBe("11\n");
+    expect(v.weekReads.length).toBeLessThanOrEqual(8);
+  });
+
+  it("says a search that ran out of time, not the record, is why it can't be sure", async () => {
+    const v = vault();
+    for (let n = 2900; n < 2940; n++) v.index.markJournalWeek(n);
+    arrives(v, "a.md", "text\n");
+    v.weekReads.length = 0;
+    const week = v.docs.week;
+    let clock = 0;
+    v.docs.week = async (n) => {
+      clock += 1000;
+      return week(n);
+    };
+    expect((await readAt(v.docs, "a.md", START, () => clock)).gap).toEqual({ incomplete: "time" });
+  });
+
   it("restores a deleted note by its path", async () => {
     const v = vault();
     await v.create("a.md", "one\n");
