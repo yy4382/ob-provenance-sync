@@ -114,6 +114,43 @@ describe("ob-provenance arguments", () => {
   });
 });
 
+describe("ob-provenance history", () => {
+  it("turns its flags into the tool's input", async () => {
+    const { call } = await run("history", "--path", "a.md", "--limit", "5", "--offset", "10", "--diff");
+    expect(call?.input).toEqual({ path: "a.md", limit: 5, offset: 10, full_diff: true });
+    expect(call?.t.request(call.input as never, "agent:x")).toEqual({ op: "history", path: "a.md", limit: 5, offset: 10, fullDiff: true });
+  });
+
+  it("asks for nothing it wasn't given", async () => {
+    const { call } = await run("history", "--path", "a.md");
+    expect(call?.t.request(call.input as never, "agent:x")).toEqual({ op: "history", path: "a.md" });
+  });
+
+  it("refuses a limit that isn't a number", async () => {
+    const { call, stderr } = await run("history", "--path", "a.md", "--limit", "many");
+    expect(call).toBeUndefined();
+    expect(stderr).toContain("whole number");
+  });
+
+  it("offers --json only where a tool declares its output", async () => {
+    expect((await run("history", "--path", "a.md", "--json")).call?.target.json).toBe(true);
+    expect((await run("list", "--json")).error?.code).toBe("commander.unknownOption");
+  });
+});
+
+describe("ob-provenance read --at", () => {
+  it("turns a time into the moment it names", async () => {
+    const { call } = await run("read", "--path", "a.md", "--at", "2026-11-02T14:05+08:00");
+    expect(call?.t.request(call.input as never, "agent:x")).toMatchObject({ op: "read", path: "a.md", at: Date.parse("2026-11-02T14:05+08:00") });
+  });
+
+  it("names the forms it takes when given something else", async () => {
+    const { call, stderr } = await run("read", "--path", "a.md", "--at", "yesterday");
+    expect(call).toBeUndefined();
+    expect(stderr).toContain("30m, 2h, 1d, 1w or an ISO 8601 time");
+  });
+});
+
 describe("ob-provenance help", () => {
   it("opens with the commands and ends with how to work in a vault", async () => {
     const { stdout, error } = await run("--help");
@@ -125,7 +162,7 @@ describe("ob-provenance help", () => {
   it("shows each command's fields and examples, by --help or help", async () => {
     for (const t of TOOLS) {
       const { stdout } = await run(t.command, "--help");
-      for (const key of Object.keys(t.input)) expect(stdout).toContain(`--${key}`);
+      for (const key of Object.keys(t.cli?.input ?? t.input)) expect(stdout).toContain(`--${key}`);
       for (const example of t.examples) expect(stdout).toContain(example);
       expect((await run("help", t.command)).stdout).toBe(stdout);
     }

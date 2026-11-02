@@ -6,6 +6,7 @@ import { z } from "zod";
 export interface Target {
   vault?: string;
   agent?: string;
+  json?: boolean;
 }
 
 export interface Actions {
@@ -63,7 +64,8 @@ function stdinOption(fields: string[], trims: boolean): Option {
 }
 
 function addTool(program: Command, t: ToolDef, actions: Actions) {
-  const fields = Object.entries(t.input as Record<string, z.ZodType>);
+  const shape = t.cli?.input ?? t.input;
+  const fields = Object.entries(shape as Record<string, z.ZodType>);
   const cmd = program
     .command(t.command)
     .summary(t.description.split(". ")[0]!.replace(/\.$/, ""))
@@ -74,14 +76,15 @@ function addTool(program: Command, t: ToolDef, actions: Actions) {
   if (recordsAuthor(t)) {
     cmd.addOption(stdinOption(fields.filter(([key, field]) => key !== "path" && field.safeParse("").success).map(([key]) => key), trimsStdin(t)));
   }
+  if (t.output) cmd.addOption(new Option("--json", "Print the result as JSON."));
   cmd.addOption(vaultOption).addOption(agentOption().hideHelp(!recordsAuthor(t)));
   cmd.action(async () => {
     const opts = targetOf<Target & { stdin?: string }>(cmd);
     const given = opts.stdin ? { ...opts, [opts.stdin]: await fromStdin(cmd, opts, opts.stdin, t, actions) } : opts;
     // Required fields are checked here, not by Commander, because --stdin can supply them.
-    const input = z.object(t.input).safeParse(given);
+    const input = z.object(shape).safeParse(given);
     if (!input.success) cmd.error(z.prettifyError(input.error));
-    await actions.tool(t, input.data, opts);
+    await actions.tool(t, t.cli ? t.cli.toInput(input.data as never) : input.data, opts);
   });
 }
 
