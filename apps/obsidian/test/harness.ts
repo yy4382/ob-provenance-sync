@@ -59,9 +59,14 @@ export class MemoryDisk implements Disk {
     await this.write(path, text);
     return true;
   }
-  /** An editor's save, or with `byUser` a click on a task: vault.modify, which the plugin wraps with trackWrite. */
-  save(path: string, text: string, byUser = false) {
-    return this.engine!.trackWrite(path, text, () => this.write(path, text), byUser);
+  /** An editor's save, or with `local` another plugin's or a task click's write, as wrapVaultWrites reports them. */
+  save(path: string, text: string, local = false) {
+    if (local) {
+      const before = this.files.get(path);
+      this.engine?.wroteLocally(path, typeof before === "string" ? before : "", text);
+      return this.write(path, text);
+    }
+    return this.engine!.trackWrite(path, text, () => this.write(path, text));
   }
   async writeBinary(path: string, data: ArrayBuffer) {
     const existed = this.files.has(path);

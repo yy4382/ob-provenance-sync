@@ -15,6 +15,7 @@ import {
   journalDocName,
   journalWeekOf,
   LOCAL_HISTORY_DAYS,
+  markActor,
   markNote,
   newFileId,
   oldestWeek,
@@ -99,6 +100,8 @@ export const FROM_DISK = Symbol("from-disk");
 
 /** How long a start or scan waits for a document still loading before going on without it. */
 const OPEN_WAIT = 3000;
+/** Local writes remembered per path, oldest dropped first. One plugin action's burst of writes fits. */
+const LOCAL_WRITES_KEPT = 16;
 /** How long an agent's call waits for a note's text to arrive: less than ob-provenance's own limit, so it hears why. */
 const AGENT_OPEN_WAIT = 10_000;
 
@@ -141,8 +144,6 @@ export class MarkdownFile {
   /** Tracked writes in flight, and a count bumped as each starts and lands, so a read that overlapped one reads again. */
   private readonly writes = new Set<Promise<unknown>>();
   private writeEvents = 0;
-  /** Texts the user's clicks wrote, whose merge is theirs rather than another program's. */
-  private readonly clicks = new Set<string>();
   private editors = 0;
   private writeTimer: ReturnType<typeof setTimeout> | null = null;
   private provider: HocuspocusProvider | null = null;
@@ -245,8 +246,13 @@ export class MarkdownFile {
       this.engine.log("debug", `Merging a change made on disk into note ${short(this.id)} (${difference(base.text, disk)})`, this.path);
       const fork = Y.createDocFromSnapshot(this.doc, base.snapshot);
       const before = Y.encodeStateVector(fork);
-      setText(fork.getText(TEXT_KEY), disk, this.clicks.delete(disk) ? this.human() : this.unknown());
-      Y.applyUpdate(this.doc, Y.encodeStateAsUpdate(fork, before), FROM_DISK);
+      const by = this.engine.wasWrittenLocally(this.path, base.text, disk) ? this.human() : this.unknown();
+      fork.transact(() => setText(fork.getText(TEXT_KEY), disk, by, "literal"));
+      // Deletions carry no author, so the journal reads them from the transaction's actor.
+      this.doc.transact(() => {
+        markActor(this.doc, by.author);
+        Y.applyUpdate(this.doc, Y.encodeStateAsUpdate(fork, before), FROM_DISK);
+      }, FROM_DISK);
       this.setBase(Y.snapshot(fork), disk);
     }
     if (this.ytext.toJSON() !== disk) this.scheduleWrite();
@@ -278,17 +284,11 @@ export class MarkdownFile {
   }
 
   /**
-   * The host is about to write `text` to this file, usually an editor saving.
-   * If the CRDT held that text, in its current state or one an editor showed,
-   * that state becomes the base once the write lands. A click on a task
-   * (`byUser`) is a new edit even if it puts back an earlier text, so it is
-   * merged from the file like another program's edit, as the user's.
+   * An editor is about to save `text` to this file. If the CRDT held that
+   * text, in its current state or one an editor showed, that state becomes the
+   * base once the write lands.
    */
-  async trackWrite<T>(text: string, write: () => Promise<T>, byUser = false): Promise<T> {
-    if (byUser) {
-      this.clicks.add(text);
-      return write();
-    }
+  async trackWrite<T>(text: string, write: () => Promise<T>): Promise<T> {
     const state =
       text === this.ytext.toJSON() ? { snapshot: Y.snapshot(this.doc), text } : [...this.editorStates].reverse().find((s) => s.text === text);
     if (!state) return write();
@@ -492,6 +492,8 @@ export class SyncEngine implements VaultDocs {
   readonly files = new Map<FileId, MarkdownFile>();
   private readonly onDisk = new DiskMirror();
   private readonly binaryHashes = new Map<FileId, string>();
+  /** Writes through the Vault API by anything but the engine, per path, until a read accounts for them. */
+  private readonly localWrites = new Map<string, Array<{ before: string; after: string }>>();
   private socket: HocuspocusProviderWebsocket | null = null;
   private indexProvider: HocuspocusProvider | null = null;
   private indexPersistence: Persistence | null = null;
@@ -1214,10 +1216,47 @@ export class SyncEngine implements VaultDocs {
     });
   }
 
-  /** The host is about to write `text` to `path`; see MarkdownFile.trackWrite. */
-  trackWrite<T>(path: string, text: string, write: () => Promise<T>, byUser = false): Promise<T> {
+  /** An editor is about to save `text` to `path`; see MarkdownFile.trackWrite. */
+  trackWrite<T>(path: string, text: string, write: () => Promise<T>): Promise<T> {
     const file = this.fileAt(path);
-    return file ? file.trackWrite(text, write, byUser) : write();
+    return file ? file.trackWrite(text, write) : write();
+  }
+
+  /**
+   * Another plugin, or Obsidian itself, is about to write `after` over
+   * `before` at `path` through the Vault API. When the engine next reads the
+   * file, the change is the human's if these writes explain it exactly.
+   */
+  wroteLocally(path: string, before: string, after: string): void {
+    if (before === after) return;
+    let writes = this.localWrites.get(path);
+    if (!writes) this.localWrites.set(path, (writes = []));
+    writes.push({ before, after });
+    if (writes.length > LOCAL_WRITES_KEPT) writes.shift();
+  }
+
+  /**
+   * Whether local writes at `path`, in the order they were made, turn `from`
+   * (the text the engine last saw there) into `to` (the text it reads now).
+   * Any other change, such as another program's edit landing in between,
+   * leaves the merge unknown. Forgets the writes it used.
+   */
+  wasWrittenLocally(path: string | undefined, from: string, to: string): boolean {
+    const writes = path === undefined ? undefined : this.localWrites.get(path);
+    if (!writes) return false;
+    const used = new Set<{ before: string; after: string }>();
+    let text = from;
+    for (const write of writes) {
+      if (write.before !== text) continue;
+      used.add(write);
+      text = write.after;
+      if (text === to) break;
+    }
+    if (text !== to) return false;
+    const rest = writes.filter((write) => !used.has(write));
+    if (rest.length) this.localWrites.set(path!, rest);
+    else this.localWrites.delete(path!);
+    return true;
   }
 
   onDelete(path: string): Promise<void> {

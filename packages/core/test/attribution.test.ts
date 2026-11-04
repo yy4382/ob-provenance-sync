@@ -4,11 +4,13 @@ import {
   adoptText,
   agentProvenance,
   attribute,
+  fromAttrs,
   humanProvenance,
   insertText,
   reattribute,
   REATTRIBUTABLE,
   replaceText,
+  rewriteRange,
   runsOf,
   sentenceRanges,
   setText,
@@ -95,6 +97,96 @@ describe("attribute", () => {
 });
 
 describe("text edits", () => {
+  const chars = (t: Y.Text) => t.toDelta().flatMap((op: { insert: string; attributes?: Record<string, unknown> }) =>
+    op.insert.split("").map((char) => ({ char, attributes: op.attributes })),
+  );
+
+  const literalRewrites = {
+    rewriteRange: (t: Y.Text, next: string) => rewriteRange(t, 0, t.toString(), next, me, "literal"),
+    setText: (t: Y.Text, next: string) => setText(t, next, me, "literal"),
+  };
+
+  it.each(Object.entries(literalRewrites))("%s preserves every attribute on equal characters, including punctuation", (_name, rewrite) => {
+    const t = text(
+      ["cat", { ...bot, at: 60_000 }],
+      [", ", { ...dictated, at: 120_000 }],
+      ["dog", { ...external, at: 180_000 }],
+      ["!", agentProvenance("agent:claude-code", "agent", "original punctuation", "phone", 240_000)],
+    );
+    t.format(3, 2, { review: "approved" });
+    t.format(8, 1, { emphasis: true });
+    const before = chars(t);
+
+    t.doc!.transact(() => rewrite(t, "fox, owl!"));
+
+    expect(t.toString()).toBe("fox, owl!");
+    const after = chars(t);
+    expect(after.slice(3, 5)).toEqual(before.slice(3, 5));
+    expect(after[5]).toEqual(before[6]);
+    expect(after[8]).toEqual(before[8]);
+    for (const index of [0, 1, 2, 6, 7]) {
+      expect(fromAttrs(after[index]!.attributes)).toEqual(me);
+    }
+  });
+
+  it.each(Object.entries(literalRewrites))("%s leaves an identical rewrite unchanged without emitting updates", (_name, rewrite) => {
+    const t = text(["Human. ", me], ["Agent! ", bot], ["Dictated? ", dictated], ["Disk.", external]);
+    t.format(0, t.length, { review: "approved" });
+    const before = t.toDelta();
+    const state = Y.encodeStateAsUpdate(t.doc!);
+    const updates: Uint8Array[] = [];
+    t.doc!.on("update", (update: Uint8Array) => updates.push(update));
+
+    t.doc!.transact(() => rewrite(t, t.toString()));
+
+    expect(t.toDelta()).toEqual(before);
+    expect(Y.encodeStateAsUpdate(t.doc!)).toEqual(state);
+    expect(updates).toEqual([]);
+  });
+
+  it.each([
+    { name: "astral characters", before: "😀x🐈", after: "😀y🐈", changed: [2] },
+    { name: "joined emoji", before: "👩🏽‍💻x👨‍👩‍👦", after: "👩🏽‍💻y👨‍👩‍👦", changed: [7] },
+    { name: "combining marks", before: "e\u0301xÅ", after: "e\u0301yÅ", changed: [2] },
+    { name: "CJK punctuation", before: "猫，x。犬！", after: "猫，y。犬！", changed: [2] },
+    { name: "CRLF", before: "a\r\nx\r\nb", after: "a\r\ny\r\nb", changed: [3] },
+    { name: "surrogate pair replacement", before: "A😀B", after: "A😁B", changed: [1, 2] },
+  ])("a literal rewrite preserves $name and equal attributes through sync", ({ before, after, changed }) => {
+    const t = text([before, bot]);
+    t.format(0, t.length, { review: "approved" });
+    const original = chars(t);
+    t.doc!.transact(() => setText(t, after, me, "literal"));
+    expect(t.toString()).toBe(after);
+    for (const [i, char] of chars(t).entries()) {
+      if (changed.includes(i)) expect(fromAttrs(char.attributes)).toEqual(me);
+      else expect(char).toEqual(original[i]);
+    }
+    const replica = new Y.Doc();
+    Y.applyUpdate(replica, Y.encodeStateAsUpdate(t.doc!));
+    expect(replica.getText("content").toString()).toBe(after);
+    expect(replica.getText("content").toDelta()).toEqual(t.toDelta());
+    replica.destroy();
+    t.doc!.destroy();
+  });
+
+  it("a literal full-note rewrite keeps mixed attribution and attributes an added task to the human", () => {
+    const t = text(["My words ", me], ["and the agent's.\n", bot], ["Dictated.\n", dictated], ["Imported.\n", external]);
+    const before = chars(t);
+    const next = `${t.toString()}- [ ] Added task.`;
+
+    t.doc!.transact(() => setText(t, next, me, "literal"));
+
+    expect(t.toString()).toBe(next);
+    expect(chars(t).slice(0, before.length)).toEqual(before);
+    expect(kinds(t)).toEqual([
+      ["My words and the agent's.", "mixed"],
+      ["Dictated.", "via-agent"],
+      ["Imported.", "unknown"],
+      ["- [ ] Added task.", "human"],
+    ]);
+    for (const char of chars(t).slice(before.length)) expect(fromAttrs(char.attributes)).toEqual(me);
+  });
+
   it("setText applies only the diff so untouched text keeps its author", () => {
     const t = text(["Keep this. ", me], ["And this.", bot]);
     setText(t, "Keep this. And this. New line from disk.", external);

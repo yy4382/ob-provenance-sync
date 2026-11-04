@@ -11,9 +11,9 @@ export type AgentWhy = Exclude<Why, "human-typed">;
 export const NOTE_MAX_LENGTH = 200;
 
 /**
- * Who wrote a run of text and why. Humans can only type, agents choose
- * between their own content and content a human dictated, and text that
- * appeared on disk without passing through us has no reason attached.
+ * Human attribution includes local edits through Obsidian's Editor and Vault
+ * APIs. Agents distinguish their own writing from dictated content. Text
+ * changed outside Obsidian has no reason attached.
  */
 export type Provenance = { at: number; device: string } & (
   | { author: HumanId; why: "human-typed"; note: null }

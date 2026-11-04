@@ -55,7 +55,7 @@ The config has two kinds of tokens:
 
 In [BRAT](https://community.obsidian.md/plugins/obsidian42-brat), choose **Add beta plugin** and enter `yy4382/ob-provenance-sync`. In the plugin's settings:
 
-- **Your name**: Text you type is attributed to `human:<name>`.
+- **Your name**: Text you type and local changes made through Obsidian's Editor and Vault APIs are attributed to `human:<name>`, including changes made by plugins.
 - **Device name**: Recorded with every change.
 - **Server URL**, **Device token**, **Vault ID**: The device token is kept in Obsidian's keychain. The Vault ID must be the same on every device. Leave the server empty to track provenance on one device without syncing.
 - **History kept on this device**: Days of note history this device keeps offline, 30 by default. Older history is still available from the server.
@@ -64,13 +64,15 @@ Sentences are colored by who wrote them:
 
 | Color | Meaning |
 | --- | --- |
-| green | you typed it |
+| green | you typed it, or Obsidian or a plugin changed it locally |
 | teal | your words, inserted by an agent (`human-via-agent`) |
 | purple | an agent's own writing |
 | orange | mixed: you and an agent both changed this sentence |
 | no color | unknown: it came from outside Obsidian (another app, a sync tool, the original files) |
 
 Hover a sentence to see each author, the reason, the agent's note, the time, and the device. On mobile, use the command **Show who wrote the current sentence**.
+
+Human attribution includes plugin actions such as applying a template or migrating tasks through Obsidian's Editor and Vault APIs. When a plugin rewrites a note, unchanged text keeps its original author and metadata. Only the changed text becomes human. Agent writes through the provenance tools and changes synced from other devices keep their explicit attribution. If another program edits a note moments before a plugin rewrites it, the plugin may write over a change the sync engine hasn't read yet. Then neither change can be told apart, and both are recorded as `unknown`.
 
 Two commands change who text is attributed to without changing the text. Both work on the selection, or on the sentence at the cursor when nothing is selected. **Mark selection as written by AI** is for AI output you pasted in: it attributes your text and unknown text to the agent you name, and leaves other agents' text as it is. **Recover provenance of unknown text** changes only unknown text, to you, an agent, or your words inserted by an agent, so nothing an agent wrote can turn into yours.
 

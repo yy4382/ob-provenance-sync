@@ -105,6 +105,8 @@ export async function obsidian({ vault, profile }) {
         ws.addEventListener("message", on);
         ws.send(JSON.stringify({ id: my, method, params }));
       });
+    // Background windows otherwise stop the animation frames that render reading view.
+    await call("Emulation.setFocusEmulationEnabled", { enabled: true });
     return {
       async eval(body) {
         const r = await call("Runtime.evaluate", { expression: `(async () => { ${body} })()`, awaitPromise: true, returnByValue: true });

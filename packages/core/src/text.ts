@@ -11,15 +11,23 @@ export function insertText(ytext: Y.Text, index: number, text: string, by: Prove
 }
 
 /**
- * Rewrites `ytext` from `index` so that `oldText` becomes `newText`, touching
- * only the characters that actually differ. Unchanged characters keep their
- * original author, which is what makes a typo fix produce a mixed sentence
- * instead of stealing the whole sentence.
+ * Literal rewrites preserve every attribute on equal chunks, including
+ * punctuation. Semantic rewrites also attribute adjacent punctuation to
+ * the editor so a reworded sentence does not retain the old author's full stop.
  */
-export function rewriteRange(ytext: Y.Text, index: number, oldText: string, newText: string, by: Provenance): void {
+export function rewriteRange(
+  ytext: Y.Text,
+  index: number,
+  oldText: string,
+  newText: string,
+  by: Provenance,
+  mode: "semantic" | "literal" = "semantic",
+): void {
+  if (oldText === newText) return;
   markActor(ytext.doc!, by.author);
   let pos = index;
-  for (const [op, chunk] of meaningfulDiff(oldText, newText)) {
+  const ops = mode === "literal" ? diff(oldText, newText) : meaningfulDiff(oldText, newText);
+  for (const [op, chunk] of ops) {
     if (op === diff.EQUAL) pos += chunk.length;
     else if (op === diff.DELETE) ytext.delete(pos, chunk.length);
     else {
@@ -47,9 +55,9 @@ function meaningfulDiff(oldText: string, newText: string): diff.Diff[] {
   });
 }
 
-/** Makes `ytext` equal `next` with the smallest edit. Callers wrap this in a transaction. */
-export function setText(ytext: Y.Text, next: string, by: Provenance): void {
-  rewriteRange(ytext, 0, ytext.toString(), next, by);
+/** Makes `ytext` equal `next`. Callers wrap this in a transaction. */
+export function setText(ytext: Y.Text, next: string, by: Provenance, mode: "semantic" | "literal" = "semantic"): void {
+  rewriteRange(ytext, 0, ytext.toString(), next, by, mode);
 }
 
 /**
