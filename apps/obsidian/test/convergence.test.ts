@@ -1,10 +1,12 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { SyncEngine } from "../src/sync/engine";
+import type { FileId } from "@provenance/core";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { MarkdownFile, SyncEngine } from "../src/sync/engine";
 import { eventually, MemoryDisk, MemoryStore, startServer, TOKEN } from "./harness";
 
 const cleanup: Array<() => unknown> = [];
 afterEach(async () => {
   for (const fn of cleanup.splice(0).reverse()) await fn();
+  vi.restoreAllMocks();
 });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -17,8 +19,23 @@ async function setup() {
     cleanup.push(() => engine.destroy());
     return { engine, disk, store, started: engine.start().then(() => engine.settle()) };
   };
-  return { device };
+  /** A device that starts only when the test calls `engine.start()`, so spies can go in first. */
+  const unstarted = (name: string, disk = new MemoryDisk(), store = new MemoryStore()) => {
+    const engine = new SyncEngine({ vault: "v", author: "human:chris", device: name, disk, persist: store.persist, server: { url: server.ws, token: TOKEN, blobs: server.blobs("v") } });
+    disk.engine = engine;
+    cleanup.push(() => engine.destroy());
+    return { engine, disk, store };
+  };
+  return { device, unstarted };
 }
+
+function gate() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => (resolve = done));
+  cleanup.push(resolve);
+  return { promise, resolve };
+}
+const treeOf = (engine: SyncEngine) => engine as unknown as { syncTree(): Promise<void> };
 
 const stop = async (d: { engine: SyncEngine; disk: MemoryDisk }) => {
   await d.engine.settle();
@@ -268,6 +285,73 @@ describe("convergence, from VaultTree.tla (4)", () => {
     await Promise.all([a.engine.settle(), b.engine.settle()]);
     expect(Object.fromEntries(b.disk.files)).toEqual({ "q.md": "Note." });
     expect(Object.fromEntries(diskA.files)).toEqual({ "q.md": "Note." });
+  });
+
+  // V1: B starts while A creates q; B's user renames p to q as B's tree places A's q.
+  it("keeps both paths when a startup placement races a local rename", async () => {
+    let serial = 0;
+    vi.spyOn(crypto, "randomUUID").mockImplementation(() => `${String(++serial).padStart(8, "0")}-0000-4000-8000-000000000000`);
+    const { device, unstarted } = await setup();
+    const diskA = new MemoryDisk();
+    diskA.files.set("p.md", "P");
+    const a = device("A", diskA);
+    await a.started;
+    const b = device("B");
+    await b.started;
+    await eventually(() => expect(b.disk.files.get("p.md")).toBe("P"));
+    await stop(b);
+
+    const b2 = unstarted("B", b.disk, b.store);
+    const startup = gate(), proceed = gate(), firstRead = gate(), firstReadRelease = gate();
+    const secondQ = gate(), finishQ = gate();
+    const nativeTree = treeOf(b2.engine).syncTree.bind(b2.engine);
+    vi.spyOn(treeOf(b2.engine), "syncTree").mockImplementationOnce(async () => {
+      startup.resolve();
+      await proceed.promise;
+      return nativeTree();
+    });
+    const nativeReconcile = MarkdownFile.prototype.reconcileDisk;
+    let pSeen = false, qReads = 0;
+    let qid: FileId;
+    vi.spyOn(MarkdownFile.prototype, "reconcileDisk").mockImplementation(async function (this: MarkdownFile, ...args) {
+      if (b2.engine.files.get(this.id) === this) {
+        if (this.path === "p.md" && !pSeen) {
+          pSeen = true;
+          firstRead.resolve();
+          await firstReadRelease.promise;
+        }
+        if (this.id === qid && ++qReads === 2) {
+          secondQ.resolve();
+          await finishQ.promise;
+        }
+      }
+      return nativeReconcile.apply(this, args);
+    });
+    const started = b2.engine.start();
+    await startup.promise;
+    await diskA.write("q.md", "Q");
+    await a.engine.enqueue(async () => {});
+    qid = a.engine.vaultIndex.idOf("q.md")!;
+    expect(a.engine.vaultIndex.idOf("p.md")! < qid).toBe(true);
+    await eventually(() => expect(b2.engine.vaultIndex.get(qid)?.path).toBe("q.md"));
+    proceed.resolve();
+    await firstRead.promise;
+    await eventually(() => expect(b2.engine.fileAt("q.md")?.loaded).toBe(true));
+    // Let the remote index timer queue its pass behind both initial reconciles.
+    await sleep(80);
+    await b2.disk.rename("p.md", "q.md");
+    firstReadRelease.resolve();
+    await started;
+    await secondQ.promise;
+    await eventually(() => expect(a.engine.vaultIndex.get(qid)?.path).toContain("conflict"));
+    finishQ.resolve();
+    await Promise.all([a.engine.settle(), b2.engine.settle()]);
+    await eventually(() => {
+      for (const disk of [diskA, b2.disk]) {
+        expect(disk.files.get("q.md")).toBe("P");
+        expect([...disk.files.values()].sort()).toEqual(["P", "Q"]);
+      }
+    });
   });
 });
 

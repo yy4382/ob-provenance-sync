@@ -207,11 +207,13 @@ export class MarkdownFile {
    * places it. A fresh device (no local history, content fetched from the
    * server) keeps a differing local file as a conflict copy instead of merging.
    */
-  async reconcileDisk(vacant = false): Promise<void> {
-    const path = this.path;
+  async reconcileDisk(vacant = false, placement = this.engine.placementOf(this.id)): Promise<void> {
+    const path = placement?.path;
     // Deleted elsewhere since it was queued: the tree pass decides what happens to the file.
-    if (path === undefined || this.destroyed || !this.engine.vaultIndex.get(this.id)) return;
+    // Placed again since: that placement's own reconcile does this.
+    if (path === undefined || this.destroyed || !this.engine.vaultIndex.get(this.id) || this.engine.placementOf(this.id) !== placement) return;
     const disk = await this.engine.opts.disk.read(path);
+    if (this.engine.placementOf(this.id) !== placement) return;
     // The path was empty when the note was placed, so this file is the user's, its vault event
     // still queued: step back, let the event sync it (a path collision if need be), and retry.
     if (vacant && disk !== null) return this.engine.unplace(this.id);
@@ -308,10 +310,12 @@ export class MarkdownFile {
    * While any editor is bound, the editor saves the file. `loaded` is the text
    * the host loaded into the first editor; it may hold another program's edit
    * whose modify event is still pending, so it is merged like a disk change
-   * before the editor is made to show the CRDT's text.
+   * before the editor is made to show the CRDT's text. A tracked save may have
+   * landed without becoming the base yet, so it waits for those first.
    */
   bindEditor(loaded: () => string | null = () => null): Promise<() => void> {
     return this.engine.enqueue(async () => {
+      while (this.writes.size) await Promise.allSettled(this.writes);
       const text = this.editors === 0 && this.base ? loaded() : null;
       if (text !== null && text !== this.base!.text) this.applyDisk(text);
       this.editors++;
@@ -391,50 +395,48 @@ export class MarkdownFile {
   }
 }
 
-/** Which id sits at which path on disk, looked up either way. */
+/** Where an id sits on disk. Each placement is a new object, so work queued for an earlier one can tell it is stale. */
+export type Placement = { readonly path: string };
+
+/** Which id sits at which path on disk, looked up either way. A path holds one file, so it has one id. */
 class DiskMirror {
-  private readonly pathOf = new Map<FileId, string>();
-  private readonly idsAt = new Map<string, Set<FileId>>();
+  private readonly placements = new Map<FileId, Placement>();
+  private readonly idAtPath = new Map<string, FileId>();
 
   get(id: FileId): string | undefined {
-    return this.pathOf.get(id);
+    return this.placements.get(id)?.path;
+  }
+
+  placement(id: FileId): Placement | undefined {
+    return this.placements.get(id);
   }
 
   has(id: FileId): boolean {
-    return this.pathOf.has(id);
+    return this.placements.has(id);
   }
 
   idAt(path: string): FileId | undefined {
-    const ids = this.idsAt.get(path);
-    if (!ids || ids.size < 2) return ids?.values().next().value;
-    // Two ids at one path, as when a tree pass places a note where a queued rename event then puts
-    // another: the id mirrored first answers.
-    for (const [id, p] of this.pathOf) if (p === path) return id;
-    return undefined;
+    return this.idAtPath.get(path);
   }
 
+  /** Places `id` at `path`, unplacing whichever id was there before. */
   set(id: FileId, path: string): void {
-    this.unlink(id);
-    this.pathOf.set(id, path);
-    const ids = this.idsAt.get(path);
-    if (ids) ids.add(id);
-    else this.idsAt.set(path, new Set([id]));
+    if (this.get(id) === path) return;
+    const previous = this.idAtPath.get(path);
+    if (previous !== undefined) this.delete(previous);
+    this.delete(id);
+    this.placements.set(id, { path });
+    this.idAtPath.set(path, id);
   }
 
   delete(id: FileId): void {
-    this.unlink(id);
-    this.pathOf.delete(id);
+    const placement = this.placements.get(id);
+    if (placement) this.idAtPath.delete(placement.path);
+    this.placements.delete(id);
   }
 
-  private unlink(id: FileId) {
-    const path = this.pathOf.get(id);
-    const ids = path === undefined ? undefined : this.idsAt.get(path);
-    ids?.delete(id);
-    if (ids?.size === 0) this.idsAt.delete(path!);
-  }
-
-  [Symbol.iterator]() {
-    return this.pathOf.entries();
+  *[Symbol.iterator](): IterableIterator<[FileId, string]> {
+    for (const [id, placement] of this.placements) yield [id, placement.path];
   }
 }
 
@@ -552,6 +554,10 @@ export class SyncEngine implements VaultDocs {
     const provider = new HocuspocusProvider({ websocketProvider: this.socket, name, document, token: this.opts.server!.token, sessionAwareness });
     provider.attach();
     return provider;
+  }
+
+  placementOf(id: FileId): Placement | undefined {
+    return this.onDisk.placement(id);
   }
 
   pathOf(id: FileId): string | undefined {
@@ -753,7 +759,8 @@ export class SyncEngine implements VaultDocs {
       renamed.set(id, path);
       this.onDisk.set(id, path);
       const file = this.files.get(id)!;
-      void file.ready.then(() => this.enqueue(() => file.reconcileDisk()));
+      const placement = this.onDisk.placement(id);
+      void file.ready.then(() => this.enqueue(() => file.reconcileDisk(false, placement)));
     }
     for (const file of opened) if (!renamed.has(file.id)) this.closeFile(file.id);
 
@@ -873,8 +880,9 @@ export class SyncEngine implements VaultDocs {
           if (!this.files.has(id) || current === undefined) {
             const vacant = current === undefined && !(await this.opts.disk.exists(entry.path));
             this.onDisk.set(id, entry.path);
+            const placement = this.onDisk.placement(id);
             const file = this.openFile(id, false);
-            void file.ready.then(() => this.enqueue(() => file.reconcileDisk(vacant)));
+            void file.ready.then(() => this.enqueue(() => file.reconcileDisk(vacant, placement)));
             if (current === undefined) done.added++;
           }
         } else if (await this.syncBinary(id, entry)) done.added++;
