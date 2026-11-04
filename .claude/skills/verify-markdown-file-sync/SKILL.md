@@ -88,7 +88,7 @@ MarkdownFile.tla's first run (at 63a3bcf) found four orderings, each now a regre
 - **F3: writeNow overwrote an outside edit whose event was pending** (NothingLost). Fix: `writeNow` writes through `writeIfUnchanged` and otherwise rereads and merges.
 - **F4: a save and an outside edit read together doubled text** (NoDuplicate, NoRevert). Fix: `quirks.ts` wraps `vault.modify` so `trackWrite` knows the exact saved text; a read overlapping a tracked write reads again.
 
-A model that split an editor's save into separate steps (on the `investigate-daily-note` branch) found one more. MarkdownFile.tla can't see it, because it takes a save and `trackWrite`'s base update to be one step:
+A model that split an editor's save into separate steps, written for an earlier version of #7, found one more. MarkdownFile.tla can't see it, because it takes a save and `trackWrite`'s base update to be one step:
 
 - **F5: reopening a note while its save was landing doubled remote text** (NoDuplicate). The save's text was on disk, but `trackWrite` hadn't made it the base yet. A pane reopened in that window, and `bindEditor` merged the saved text over the old base, as if another program wrote it. Fix: `bindEditor` waits for tracked writes first, as `onDiskModified` does. It is a replay in `disk-races.test.ts`.
 
