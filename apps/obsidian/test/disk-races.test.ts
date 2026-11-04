@@ -1,5 +1,5 @@
 // Orderings of disk events that lost or doubled text, found by model-checking
-// verification/markdown-file/MarkdownFile.tla (findings F1-F4 of the
+// verification/markdown-file/MarkdownFile.tla (findings F1-F5 of the
 // verify-markdown-file-sync skill). disk.files.set is another program's edit
 // whose modify event has not fired yet; engine.onModify is that event.
 import { agentProvenance, humanProvenance, insertText } from "@provenance/core";
@@ -100,4 +100,41 @@ it("keeps text single when a save and an outside edit are read together", async 
   await engine.onModify("a.md", false);
   await engine.settle();
   expect(file.ytext.toJSON()).toBe("Base. Remote. Vim.");
+});
+
+// F5: Obsidian's save has landed on disk but trackWrite hasn't made it the base yet. A pane
+// reopening in that window merged the saved text over the old base, as an outside edit.
+it("keeps remote text single when a pane reopens during a pending save", async () => {
+  const { engine, disk, file } = await offline("Base.");
+  insertText(file.ytext, file.ytext.length, " Remote.", remote);
+  const close = await file.bindEditor(() => "Base.");
+  const text = file.ytext.toJSON();
+  const gate = () => {
+    let open!: () => void;
+    const shut = new Promise<void>((r) => (open = r));
+    cleanup.push(open);
+    return { shut, open };
+  };
+  const busy = gate(), commit = gate(), finish = gate();
+  void engine.enqueue(() => busy.shut);
+  const saving = engine.trackWrite("a.md", text, async () => {
+    await commit.shut;
+    await disk.write("a.md", text);
+    await finish.shut;
+  });
+  insertText(file.ytext, file.ytext.length, " Typed.", humanProvenance("human:chris", "mac"));
+  close();
+  const reopening = file.bindEditor(() => disk.files.get("a.md") as string);
+  commit.open();
+  await sleep(0);
+  busy.open();
+  await sleep(0);
+  finish.open();
+  await saving;
+  const closeAgain = await reopening;
+  expect(file.ytext.toJSON()).toBe("Base. Remote. Typed.");
+  await disk.save("a.md", file.ytext.toJSON());
+  closeAgain();
+  await engine.settle();
+  expect(disk.files.get("a.md")).toBe("Base. Remote. Typed.");
 });

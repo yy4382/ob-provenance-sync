@@ -95,9 +95,7 @@ expect() {
 echo "One user action, restarts:"
 EXTRA="MaxUserOps = 1" expect ""
 echo "Two user actions, restarts:"
-# Open finding V1 (see the skill): a rename onto a name another device just created, while
-# this device is still starting, leaves the renamed note off this disk.
-EXTRA="MaxUserOps = 2" expect "Converged"
+EXTRA="MaxUserOps = 2" expect ""
 
 if [[ $FAILED == 0 ]]; then echo "All results match the expectations."; else echo "Some results differ from the expectations (DIFF above)."; fi
 exit $FAILED

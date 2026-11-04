@@ -45,6 +45,7 @@ VARIABLES
     noteOf,      \* each id's note text, as a set of tokens
     disk,        \* each device's vault folder: path -> tokens, {} meaning no file
     onDisk,      \* SyncEngine.onDisk, per device: id -> path
+    placement,   \* per device, each id's DiskMirror Placement, as a count of how often its path changed
     baseOf,      \* per device, each note's base: the text it last had on disk ({}: none)
     known,       \* per device, ids whose document it holds locally (MarkdownFile.knownLocally)
     phase,       \* "off", "loading" (started, scan not run yet) or "on"
@@ -63,7 +64,7 @@ VARIABLES
     touched,     \* per device, contents its user renamed, maybe unaware of a deletion elsewhere (ghost)
     resurrected  \* scanDisk synced again a file a user had deleted, untouched on this device (ghost)
 
-vars == <<idx, noteOf, disk, onDisk, baseOf, known, phase, mirror, queue, mode, treeIdx, treeSkip,
+vars == <<idx, noteOf, disk, onDisk, placement, baseOf, known, phase, mirror, queue, mode, treeIdx, treeSkip,
           treeDue, incomplete, used, nextTok, userOps, restarts, userDeleted, deletedSets, touched, resurrected>>
 
 NoIds == [i \in Ids |-> NoPath]
@@ -72,6 +73,8 @@ Min(S) == CHOOSE x \in S : \A y \in S : x <= y
 IdOf(m, p) == IF \E i \in Ids : m[i] = p THEN Min({i \in Ids : m[i] = p}) ELSE 0
 \* SyncEngine.idOnDisk on device d, or 0.
 IdAt(d, p) == IF \E i \in Ids : onDisk[d][i] = p THEN CHOOSE i \in Ids : onDisk[d][i] = p ELSE 0
+\* DiskMirror.set: mirrors i at p and unmirrors whichever id held p, since a path holds one file.
+Mirror(m, i, p) == [j \in Ids |-> IF j = i THEN p ELSE IF m[j] = p THEN NoPath ELSE m[j]]
 \* VaultIndex.conflicts: the ids that lose a path collision.
 LosersOf(m) == {i \in Ids : m[i] /= NoPath /\ IdOf(m, m[i]) /= i}
 Files(d) == {p \in Paths : disk[d][p] /= {}}
@@ -80,6 +83,12 @@ Merge(d, i, f) == (noteOf[i] \ (baseOf[d][i] \ f)) \cup (f \ baseOf[d][i])
 Write(c) == IF c = {} THEN {0} ELSE c      \* an empty note is still a file; token 0 is "no text"
 Tasks(kind, S) == LET f == CHOOSE f \in [1..Cardinality(S) -> S] : \A a, b \in DOMAIN f : f[a] = f[b] => a = b
                   IN [k \in DOMAIN f |-> <<kind, f[k]>>]
+\* The Placement that DiskMirror.set(i, p) leaves: the same object when i is already at p.
+PlacedAt(d, i, p) == placement[d][i] + (IF onDisk[d][i] = p THEN 0 ELSE 1)
+\* reconcileDisk(vacant, placement) queued right after placing i at p.
+ReconcileAt(d, i, p, vacant) == <<"reconcile", i, vacant, PlacedAt(d, i, p)>>
+\* Every action ends with this. DiskMirror.set and delete make a new Placement whenever an id's path changes.
+NewPlacements == placement' = [d \in Devices |-> [i \in Ids |-> placement[d][i] + (IF onDisk'[d][i] = onDisk[d][i] THEN 0 ELSE 1)]]
 Running(d) == phase[d] = "on" /\ mode[d] = "idle" /\ queue[d] /= <<>>
 Head1(d) == Head(queue[d])[1]
 Pop(d) == queue' = [queue EXCEPT ![d] = Tail(@)]
@@ -104,6 +113,7 @@ Init ==
     /\ noteOf = [i \in Ids |-> IF i = 1 THEN {1} ELSE {}]
     /\ disk = [d \in Devices |-> [p \in Paths |-> IF p = <<"p", 0>> THEN {1} ELSE {}]]
     /\ onDisk = [d \in Devices |-> idx]
+    /\ placement = [d \in Devices |-> [i \in Ids |-> 0]]
     /\ baseOf = [d \in Devices |-> noteOf]
     /\ known = [d \in Devices |-> {1}]
     /\ phase = [d \in Devices |-> "on"]
@@ -139,6 +149,7 @@ UCreate(d, p) ==
     /\ userOps' = userOps + 1
     /\ Enqueue(d, <<"create", p>>)
     /\ UNCHANGED <<Engine0, userDeleted, deletedSets, touched>>
+    /\ NewPlacements
 
 \* A rename, or the resolver restoring an orphaned copy (applyPlan "orphan" -> renameFile).
 URename(d, from, to) ==
@@ -148,6 +159,7 @@ URename(d, from, to) ==
     /\ touched' = [touched EXCEPT ![d] = @ \cup {disk[d][from]}]
     /\ Enqueue(d, <<"rename", from, to>>)
     /\ UNCHANGED <<Engine0, nextTok, userDeleted, deletedSets>>
+    /\ NewPlacements
 
 \* A deletion, or the resolver trashing a copy (applyPlan -> trashFile).
 UDelete(d, p) ==
@@ -159,6 +171,7 @@ UDelete(d, p) ==
     /\ touched' = [touched EXCEPT ![d] = @ \ {disk[d][p]}]
     /\ Enqueue(d, <<"delete", p>>)
     /\ UNCHANGED <<Engine0, nextTok>>
+    /\ NewPlacements
 
 \* Another program edits a note while sync is off on this device.
 UEdit(d, p) ==
@@ -167,6 +180,7 @@ UEdit(d, p) ==
     /\ nextTok' = nextTok + 1
     /\ userOps' = userOps + 1
     /\ UNCHANGED <<Engine0, queue, userDeleted, deletedSets, touched>>
+    /\ NewPlacements
 
 User == \E d \in Devices :
           \/ \E p \in Paths : UCreate(d, p) \/ UDelete(d, p) \/ UEdit(d, p)
@@ -187,11 +201,13 @@ Stop(d) ==
     /\ incomplete' = [incomplete EXCEPT ![d] = FALSE]
     /\ restarts' = restarts + 1
     /\ UNCHANGED <<Kept, queue, mode, treeIdx, treeSkip, treeDue>>
+    /\ NewPlacements
 
 Start(d) ==
     /\ phase[d] = "off"
     /\ phase' = [phase EXCEPT ![d] = "loading"]
     /\ UNCHANGED <<Kept, onDisk, mirror, queue, mode, treeIdx, treeSkip, treeDue, incomplete, restarts>>
+    /\ NewPlacements
 
 (*************************** scanDisk ***************************)
 
@@ -229,6 +245,7 @@ Scan(d) ==
                                             ELSE IF IsNew(i) THEN NewAt(i)                \* createFromDisk
                                             ELSE idx[i]]
                    newOnDisk == [i \in Ids |-> IF IsNew(i) THEN NewAt(i) ELSE mapped[i]]
+                   reconciles == Tasks("reconcile", {i \in Ids : mapped[i] /= NoPath})
                IN \* pairRenames: same content, one to one, as many as it can
                   /\ \A r \in renamed : disk[d][r[2]] = baseOf[d][r[1]]
                   /\ \A r, q \in renamed : (r[1] = q[1] \/ r[2] = q[2]) => r = q
@@ -243,12 +260,13 @@ Scan(d) ==
                   /\ known' = [known EXCEPT ![d] = @ \cup renamedIds \cup {fresh[p] : p \in added}]
                   \* start() queues syncTree, which opens every placed note and queues its reconcileDisk
                   /\ queue' = [queue EXCEPT ![d] = <<<<"tree">>>> \o
-                                   Tasks("reconcile", {i \in Ids : mapped[i] /= NoPath})]
+                                   [k \in DOMAIN reconciles |-> ReconcileAt(d, reconciles[k][2], newOnDisk[reconciles[k][2]], FALSE)]]
                   /\ resurrected' = (resurrected \/ \E p \in added : disk[d][p] \in deletedSets \ touched[d])
                   /\ userDeleted' = userDeleted \cup UNION {noteOf[i] : i \in deleted}
                   /\ disk' = [disk EXCEPT ![d] = [p \in Paths |-> IF p \in trash THEN {} ELSE @[p]]]
     /\ phase' = [phase EXCEPT ![d] = "on"]
     /\ UNCHANGED <<mirror, mode, treeIdx, treeSkip, incomplete, nextTok, userOps, restarts, deletedSets, touched>>
+    /\ NewPlacements
 
 (*************************** Vault events ***************************)
 
@@ -263,9 +281,10 @@ OnCreate(d) ==
        THEN UNCHANGED <<idx, noteOf, onDisk, baseOf, known, used>> /\ Notify(d, idx)
        ELSE \E n \in Ids :
               /\ Create(d, n, p)
-              /\ onDisk' = [onDisk EXCEPT ![d][n] = p]
+              /\ onDisk' = [onDisk EXCEPT ![d] = Mirror(onDisk[d], n, p)]
               /\ Notify(d, idx')
     /\ UNCHANGED <<EventKept, userDeleted>>
+    /\ NewPlacements
 
 OnRename(d) ==
     /\ Running(d) /\ Head1(d) = "rename"
@@ -276,7 +295,7 @@ OnRename(d) ==
        IN IF i /= 0 /\ disk[d][to] = {} /\ disk[d][from] /= {} /\ disk[d][from] = baseOf[d][i]
           THEN UNCHANGED <<idx, noteOf, onDisk, baseOf, known, used, disk>> /\ Notify(d, idx)    \* stale
           ELSE IF i /= 0
-          THEN /\ onDisk' = [onDisk EXCEPT ![d][i] = to]
+          THEN /\ onDisk' = [onDisk EXCEPT ![d] = Mirror(onDisk[d], i, to)]
                /\ idx' = IF idx[i] /= NoPath THEN [idx EXCEPT ![i] = to] ELSE idx
                /\ Notify(d, idx')
                \* onDiskModified then merges the file against its base, unless the note is gone
@@ -290,11 +309,12 @@ OnRename(d) ==
           THEN UNCHANGED <<idx, noteOf, onDisk, baseOf, known, used, disk>> /\ Notify(d, idx)
           ELSE \E n \in Ids :                                                         \* not synced at from: add it
                  /\ Create(d, n, to)
-                 /\ onDisk' = [onDisk EXCEPT ![d][n] = to]
+                 /\ onDisk' = [onDisk EXCEPT ![d] = Mirror(onDisk[d], n, to)]
                  /\ Notify(d, idx')
                  /\ UNCHANGED disk
     /\ UNCHANGED <<phase, mirror, mode, treeIdx, treeSkip, incomplete, nextTok, userOps, restarts,
                    deletedSets, touched, resurrected, userDeleted>>
+    /\ NewPlacements
 
 OnDelete(d) ==
     /\ Running(d) /\ Head1(d) = "delete"
@@ -310,6 +330,7 @@ OnDelete(d) ==
                \* the policy: a deletion takes the note as it is now, edits merged from elsewhere included
                /\ userDeleted' = userDeleted \cup noteOf[i]
     /\ UNCHANGED <<EventKept, noteOf, baseOf, known, used>>
+    /\ NewPlacements
 
 (*************************** syncTree ***************************)
 
@@ -319,6 +340,7 @@ TreeTimer(d) ==
     /\ treeDue' = [treeDue EXCEPT ![d] = FALSE]
     /\ queue' = [queue EXCEPT ![d] = Append(@, <<"tree">>)]
     /\ UNCHANGED <<Kept, onDisk, phase, mirror, mode, treeIdx, treeSkip, incomplete, restarts>>
+    /\ NewPlacements
 
 \* The pass snapshots the index and starts settleCollision for each loser.
 TreeStart(d) ==
@@ -329,6 +351,7 @@ TreeStart(d) ==
     /\ incomplete' = [incomplete EXCEPT ![d] = FALSE]
     /\ queue' = [queue EXCEPT ![d] = Tail(@) \o Tasks("settle", LosersOf(idx))]
     /\ UNCHANGED <<Kept, onDisk, phase, mirror, treeDue, restarts>>
+    /\ NewPlacements
 
 T(d) == treeIdx[d]
 \* idx[i] = NoPath leaves out ids the pass itself created: they aren't in its copy of onDisk
@@ -354,11 +377,12 @@ TTrash(d) ==
                  /\ UNCHANGED <<idx, noteOf, baseOf, known, used, treeDue>>
             ELSE \E n \in Ids :
                    /\ Create(d, n, path)
-                   /\ onDisk' = [onDisk EXCEPT ![d][i] = NoPath, ![d][n] = path]
+                   /\ onDisk' = [onDisk EXCEPT ![d] = Mirror([onDisk[d] EXCEPT ![i] = NoPath], n, path)]
                    /\ Notify(d, idx')
                    /\ UNCHANGED disk
     /\ UNCHANGED <<phase, mirror, nextTok, userOps, restarts, userDeleted, deletedSets, touched, resurrected,
                    queue, mode, treeIdx, treeSkip, incomplete>>
+    /\ NewPlacements
 
 \* Move a placed file to its index path, or place one this disk lacks: map it and queue its
 \* reconcileDisk. A file missing or changed here, or a file not synced yet at the new path, is
@@ -370,17 +394,18 @@ TPlace(d) ==
              to == T(d)[i]
          IN /\ Free(d, i)
             /\ IF cur = NoPath
-               THEN /\ onDisk' = [onDisk EXCEPT ![d][i] = to]
-                    /\ queue' = [queue EXCEPT ![d] = Append(@, <<"reconcile", i, disk[d][to] = {}>>)]  \* vacant
+               THEN /\ onDisk' = [onDisk EXCEPT ![d] = Mirror(onDisk[d], i, to)]
+                    /\ queue' = [queue EXCEPT ![d] = Append(@, ReconcileAt(d, i, to, disk[d][to] = {}))]
                     /\ UNCHANGED <<disk, treeSkip, incomplete>>
                ELSE IF disk[d][cur] = {} \/ disk[d][cur] /= baseOf[d][i] \/ disk[d][to] /= {}
                THEN /\ treeSkip' = [treeSkip EXCEPT ![d] = @ \cup {i}]
                     /\ incomplete' = [incomplete EXCEPT ![d] = TRUE]
                     /\ UNCHANGED <<disk, onDisk, queue>>
                ELSE /\ disk' = [disk EXCEPT ![d][to] = disk[d][cur], ![d][cur] = {}]
-                    /\ onDisk' = [onDisk EXCEPT ![d][i] = to]
+                    /\ onDisk' = [onDisk EXCEPT ![d] = Mirror(onDisk[d], i, to)]
                     /\ UNCHANGED <<queue, treeSkip, incomplete>>
     /\ UNCHANGED <<TreeKept, idx, noteOf, baseOf, known, used, mode, treeIdx>>
+    /\ NewPlacements
 
 \* Nothing can go ahead, but a path is held by a file that wants to move: park it.
 TPark(d) ==
@@ -395,9 +420,10 @@ TPark(d) ==
                     /\ incomplete' = [incomplete EXCEPT ![d] = TRUE]
                     /\ UNCHANGED <<disk, onDisk>>
                ELSE /\ disk' = [disk EXCEPT ![d][tmp] = disk[d][onDisk[d][h]], ![d][onDisk[d][h]] = {}]
-                    /\ onDisk' = [onDisk EXCEPT ![d][h] = tmp]
+                    /\ onDisk' = [onDisk EXCEPT ![d] = Mirror(onDisk[d], h, tmp)]
                     /\ UNCHANGED <<mode, incomplete>>
     /\ UNCHANGED <<TreeKept, idx, noteOf, baseOf, known, used, queue, treeIdx, treeSkip>>
+    /\ NewPlacements
 
 TEnd(d) ==
     /\ mode[d] = "tree"
@@ -406,6 +432,7 @@ TEnd(d) ==
     /\ mode' = [mode EXCEPT ![d] = "idle"]
     /\ incomplete' = [incomplete EXCEPT ![d] = @ \/ \E i \in Ids : Blocked(d, i)]
     /\ UNCHANGED <<TreeKept, idx, noteOf, disk, onDisk, baseOf, known, used, queue, treeIdx, treeSkip>>
+    /\ NewPlacements
 
 (*************************** reconcileDisk ***************************)
 
@@ -413,10 +440,13 @@ Reconcile(d) ==
     /\ Running(d) /\ Head1(d) = "reconcile"
     /\ Pop(d)
     /\ LET i == Head(queue[d])[2]
-           vacant == Len(Head(queue[d])) = 3 /\ Head(queue[d])[3]
+           vacant == Head(queue[d])[3]
            path == onDisk[d][i]
            copy == ConflictPath(path, i)
-       IN /\ known' = [known EXCEPT ![d] = @ \cup {i}]
+       IN IF Head(queue[d])[4] /= placement[d][i]
+          THEN UNCHANGED <<idx, noteOf, disk, onDisk, baseOf, known, used, treeDue, incomplete>>  \* placed again since
+          ELSE
+          /\ known' = [known EXCEPT ![d] = @ \cup {i}]
           /\ IF vacant /\ path /= NoPath /\ idx[i] /= NoPath /\ disk[d][path] /= {}
              THEN \* placed at an empty path that now holds the user's file: unplace, retry later
                   /\ onDisk' = [onDisk EXCEPT ![d][i] = NoPath]
@@ -439,7 +469,7 @@ Reconcile(d) ==
                             /\ idx' = [idx EXCEPT ![n] = copy]
                             /\ Notify(d, idx')
                             /\ noteOf' = [noteOf EXCEPT ![n] = disk[d][path]]
-                            /\ onDisk' = [onDisk EXCEPT ![d][n] = copy]
+                            /\ onDisk' = [onDisk EXCEPT ![d] = Mirror(onDisk[d], n, copy)]
                             /\ disk' = [disk EXCEPT ![d][copy] = disk[d][path], ![d][path] = Write(noteOf[i])]
                             /\ baseOf' = [baseOf EXCEPT ![d][i] = Write(noteOf[i]), ![d][n] = disk[d][path]]
                      ELSE IF disk[d][path] = baseOf[d][i]
@@ -455,6 +485,7 @@ Reconcile(d) ==
                           /\ UNCHANGED <<idx, onDisk, used>>
     /\ UNCHANGED <<phase, mirror, mode, treeIdx, treeSkip, nextTok, userOps, restarts,
                    userDeleted, deletedSets, touched, resurrected>>
+    /\ NewPlacements
 
 (*************************** settleCollision ***************************)
 
@@ -474,7 +505,7 @@ Settle(d) ==
                /\ IF noteOf[l] = noteOf[w]
                   THEN \* dropDuplicate: the winner takes over the loser's file if it has none
                        /\ IF path /= NoPath /\ onDisk[d][w] = NoPath
-                          THEN /\ onDisk' = [onDisk EXCEPT ![d][l] = NoPath, ![d][w] = path]
+                          THEN /\ onDisk' = [onDisk EXCEPT ![d] = Mirror([onDisk[d] EXCEPT ![l] = NoPath], w, path)]
                                /\ IF disk[d][path] = {}
                                   THEN /\ disk' = [disk EXCEPT ![d][path] = Write(noteOf[w])]
                                        /\ baseOf' = [baseOf EXCEPT ![d][w] = Write(noteOf[w])]
@@ -491,6 +522,7 @@ Settle(d) ==
                        /\ UNCHANGED <<noteOf, disk, onDisk, baseOf>>
     /\ UNCHANGED <<phase, mirror, mode, treeIdx, treeSkip, incomplete, used, nextTok, userOps, restarts,
                    userDeleted, deletedSets, touched, resurrected>>
+    /\ NewPlacements
 
 (*************************** Spec ***************************)
 
@@ -530,5 +562,6 @@ NothingLost == Quiescent =>
 TypeOK ==
     /\ idx \in [Ids -> PathOrNone]
     /\ \A d \in Devices : onDisk[d] \in [Ids -> PathOrNone]
+    /\ placement \in [Devices -> [Ids -> Nat]]
     /\ \A d \in Devices : phase[d] \in {"off", "loading", "on"} /\ mode[d] \in {"idle", "tree"}
 =============================================================================
