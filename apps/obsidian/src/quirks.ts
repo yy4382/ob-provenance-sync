@@ -1,7 +1,7 @@
 import { Transaction } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import { around } from "monkey-around";
-import { editorInfoField, moment, normalizePath, TextFileView, type App, type MarkdownView, type TFile } from "obsidian";
+import { editorInfoField, MarkdownView, moment, normalizePath, requireApiVersion, TextFileView, type App, type DataWriteOptions, type TFile } from "obsidian";
 
 /**
  * What this plugin relies on that Obsidian doesn't promise. Each `quirk:` line
@@ -20,14 +20,13 @@ import { editorInfoField, moment, normalizePath, TextFileView, type App, type Ma
  * quirk: note-names-obsidian-cannot-use
  */
 
-export type EditKind = "human" | "task" | "unknown" | "copy";
+export type EditKind = "local" | "copy";
 
 /**
- * Typing, pasting, undo and Obsidian's own editing commands carry a CodeMirror
- * user event and are the human's. Other plugins editing through the Editor API
- * carry none, so their changes are unknown, and neither does a click on a task,
- * which only `clickingTask` tells apart. Obsidian copying an edit into the
- * file's other panes, or reloading a file another program changed, is "set".
+ * Obsidian copying an edit into the file's other panes, or reloading a file
+ * another program changed, is "set". Every other edit is local: typing,
+ * Obsidian's commands, a click on a task, and other plugins through the
+ * Editor API, which carry no user event.
  *
  * quirk: typing-has-user-event
  * quirk: commands-have-user-event
@@ -37,25 +36,7 @@ export type EditKind = "human" | "task" | "unknown" | "copy";
  * quirk: outside-reload-is-set
  */
 export function editKind(tr: Transaction): EditKind {
-  const event = tr.annotation(Transaction.userEvent);
-  if (event === "set") return "copy";
-  if (event !== undefined) return "human";
-  return clickingTask() ? "task" : "unknown";
-}
-
-/**
- * Whether a click on a task's checkbox is being handled right now. Obsidian edits
- * the note from inside that event: as a CodeMirror transaction in Live Preview,
- * through vault.modify in reading view. The event is on `window` for a popout's
- * clicks too, since the main window's code handles them. A script clicking the
- * box can't be told apart: the browser's input event after it is trusted.
- *
- * quirk: live-preview-task-click-edits-in-its-event
- * quirk: reading-view-task-click-saves-in-its-event
- */
-export function clickingTask(): boolean {
-  const { event } = window as unknown as { event?: { target: Partial<Element> | null } };
-  return !!event?.target?.classList?.contains("task-list-item-checkbox");
+  return tr.annotation(Transaction.userEvent) === "set" ? "copy" : "local";
 }
 
 /**
@@ -90,18 +71,116 @@ export function codeMirrorOf(view: MarkdownView): EditorView | null {
 }
 
 /**
- * Calls `track` around every vault.modify, which is how an editor saves, with
- * the exact text it writes. Resolves like the write; returns the undo.
+ * Reports every note write through the Vault API except the engine's own
+ * (`syncWriteOptions`). An editor's save goes to `save` with the exact text it
+ * writes, which the engine needs to tell the save from other programs' edits.
+ * Any other write, from another plugin or a click on a task in reading view
+ * (`clickingTask`), goes to `local` with the text it replaces and the text it
+ * writes, before it lands. Returns the undo.
  *
  * quirk: editor-saves-through-vault-modify
  * quirk: leaving-unsaved-note-saves-through-vault-modify
+ * quirk: editor-save-identifies-written-text
+ * quirk: editor-save-marker-is-consumed-once
+ * quirk: vault-text-writes-do-not-nest
  */
-export function wrapEditorSaves(app: App, track: (file: TFile, data: string, write: () => Promise<void>) => Promise<void>): () => void {
+export function wrapVaultWrites(
+  app: App,
+  track: {
+    save: (file: TFile, data: string, write: () => Promise<void>) => Promise<void>;
+    local: (path: string, before: string, after: string) => void;
+  },
+): () => void {
   const vault = app.vault;
-  return around(vault, {
-    modify: (next) => (file, data, options) => track(file, data, () => next.call(vault, file, data, options)),
+  const saves = new Map<TFile, Set<{ text: string }>>();
+  const saving = (view: TextFileView, file: TFile | null, text: string, write: () => Promise<void>) => {
+    if (view.app !== app || !file || !(view instanceof MarkdownView) || clickingTask()) return write();
+    const save = { text };
+    let pending = saves.get(file);
+    if (!pending) saves.set(file, (pending = new Set()));
+    pending.add(save);
+    return write().finally(() => {
+      pending.delete(save);
+      if (!pending.size && saves.get(file) === pending) saves.delete(file);
+    });
+  };
+  // 1.15 reads the view after waiting for a previous save, at writeData entry.
+  const unwatchSaves = requireApiVersion("1.15.0")
+    ? around(TextFileView.prototype as TextFileWriter, {
+        writeData: (next) =>
+          function (this: TextFileWriter, file, data, previous) {
+            return saving(this, file, data, () => next.call(this, file, data, previous));
+          },
+      })
+    : around(TextFileView.prototype, {
+        save: (next) =>
+          function (this: TextFileView, clear) {
+            if (!this.file) return next.call(this, clear);
+            return saving(this, this.file, this.getViewData(), () => next.call(this, clear));
+          },
+      });
+  const untracked = (path: string, options?: DataWriteOptions) => !path.endsWith(".md") || (options !== undefined && SYNC_WRITE in options);
+  const before = (file: TFile) => vault.read(file).catch(() => "");
+  const unwatchWrites = around(vault, {
+    create: (next) => (path, data, options) => {
+      if (!untracked(path, options)) track.local(normalizePath(path), "", data);
+      return next.call(vault, path, data, options);
+    },
+    modify: (next) => async (file, data, options) => {
+      const write = () => next.call(vault, file, data, options);
+      if (untracked(file.path, options)) return write();
+      const pending = saves.get(file);
+      const save = [...(pending ?? [])].find((s) => s.text === data);
+      if (save) {
+        pending!.delete(save);
+        return track.save(file, data, write);
+      }
+      track.local(file.path, await before(file), data);
+      return write();
+    },
+    process: (next) => (file, fn, options) => {
+      if (untracked(file.path, options)) return next.call(vault, file, fn, options);
+      return next.call(vault, file, (data) => {
+        const result = fn(data);
+        track.local(file.path, data, result);
+        return result;
+      }, options);
+    },
+    append: (next) => async (file, data, options) => {
+      if (!untracked(file.path, options)) {
+        const text = await before(file);
+        track.local(file.path, text, text + data);
+      }
+      return next.call(vault, file, data, options);
+    },
   });
+  return () => {
+    unwatchWrites();
+    unwatchSaves();
+  };
 }
+
+/**
+ * Whether a click on a task's checkbox is being handled right now. In reading
+ * view, Obsidian saves the clicked text through the view's save from inside that
+ * event. That save is the click's edit, not text the editor showed, even when it
+ * puts back an earlier text. The event is on `window` for a popout's clicks too,
+ * since the main window's code handles them.
+ *
+ * quirk: reading-view-task-click-saves-in-its-event
+ */
+function clickingTask(): boolean {
+  const { event } = window as unknown as { event?: { target: Partial<Element> | null } };
+  return !!event?.target?.classList?.contains("task-list-item-checkbox");
+}
+
+interface TextFileWriter extends TextFileView {
+  writeData(file: TFile, data: string, previous: string): Promise<void>;
+}
+
+const SYNC_WRITE = Symbol("provenance-sync-write");
+/** Options that mark a vault write as the engine's own, so `wrapVaultWrites` leaves it alone. */
+export const syncWriteOptions = (): DataWriteOptions => ({ [SYNC_WRITE]: true }) as DataWriteOptions;
 
 /**
  * Writes `text` only if the file still holds `expected`, as one step of
@@ -111,7 +190,7 @@ export function wrapEditorSaves(app: App, track: (file: TFile, data: string, wri
  */
 export async function replaceIfHolds(app: App, file: TFile, expected: string, text: string): Promise<boolean> {
   let wrote = false;
-  await app.vault.process(file, (data) => (data === expected ? ((wrote = true), text) : data));
+  await app.vault.process(file, (data) => (data === expected ? ((wrote = true), text) : data), syncWriteOptions());
   return wrote;
 }
 

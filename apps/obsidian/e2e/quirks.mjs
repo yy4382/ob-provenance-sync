@@ -95,38 +95,15 @@ const QUIRKS = [
     id: "editor-api-has-no-user-event",
     async probe() {
       await openNote();
-      await cdp.eval(`app.workspace.activeEditor.editor.replaceRange("x", { line: 0, ch: 0 }); return true`);
-      const edits = await logOf(["edit"]);
-      expect(edits.length === 1 && edits[0].event === null, "an edit through the Editor API carries no user event", edits);
-    },
-  },
-  {
-    id: "live-preview-task-click-edits-in-its-event",
-    async probe() {
-      await openNote("Intro.\n\n- [ ] Plain task\n\n> [!note] Heading\n> - [ ] Callout task\n\nEnd.");
-      for (const index of [0, 1]) {
-        await cdp.click(".markdown-source-view .task-list-item-checkbox", index);
-        await sleep(500);
+      for (const edit of [
+        'replaceRange("x", { line: 0, ch: 0 })',
+        'setValue("Replacement text.\\n")',
+      ]) {
+        await clearLog();
+        await cdp.eval(`app.workspace.activeEditor.editor.${edit}; return true`);
+        const edits = await logOf(["edit"]);
+        expect(edits.length === 1 && edits[0].event === null, `Editor.${edit} carries no user event`, edits);
       }
-      const edits = await logOf(["edit"]);
-      expect(edits.length === 2 && edits.every((e) => e.event === null && e.clickingTask), "a click on a task, plain or in a callout, is an edit with no user event made inside the checkbox's event", edits);
-      expect(edits[1].doc.includes("> - [x] Callout task"), "the click ticks the task", edits);
-    },
-  },
-  {
-    id: "reading-view-task-click-saves-in-its-event",
-    async probe() {
-      const path = await openNote("- [ ] Task\n");
-      const setMode = (mode) =>
-        cdp.eval(`const l = app.workspace.activeLeaf; await l.setViewState({ type: "markdown", state: { file: ${JSON.stringify(path)}, mode: ${JSON.stringify(mode)}, source: false } });
-          await new Promise((r) => setTimeout(r, 500)); return true`);
-      await setMode("preview");
-      await clearLog();
-      await cdp.click(".markdown-reading-view .task-list-item-checkbox");
-      await sleep(500);
-      const saves = await logOf(["vault.modify"]);
-      await setMode("source");
-      expect(saves.length === 1 && saves[0].data === "- [x] Task\n" && saves[0].clickingTask, "a click on a task in reading view calls app.vault.modify inside the click's event", saves);
     },
   },
   {
@@ -226,6 +203,143 @@ const QUIRKS = [
       await sleep(500);
       const saves = (await logOf(["vault.modify"])).filter((e) => e.file === path);
       expect(saves.some((e) => e.data === "Line.\nUnsaved "), "the save made on leaving a note also goes through app.vault.modify", saves);
+    },
+  },
+  {
+    id: "reading-view-task-click-saves-in-its-event",
+    async probe() {
+      const path = await openNote("- [ ] Task\n");
+      const setMode = (mode) =>
+        cdp.eval(`const l = app.workspace.activeLeaf; await l.setViewState({ type: "markdown", state: { file: ${JSON.stringify(path)}, mode: ${JSON.stringify(mode)}, source: false } });
+          await new Promise((r) => setTimeout(r, 500)); return true`);
+      await setMode("preview");
+      await clearLog();
+      await cdp.click(".markdown-reading-view .task-list-item-checkbox");
+      await sleep(500);
+      const seen = await logOf(["save:start", "vault.modify"]);
+      await setMode("source");
+      const starts = seen.filter((e) => e.kind === "save:start");
+      expect(starts.length === 1 && starts[0].data === "- [x] Task\n" && starts[0].clickingTask &&
+        seen.some((e) => e.kind === "vault.modify" && e.data === "- [x] Task\n"),
+      "a click on a task in reading view saves the view, with the clicked text, from inside the click's event", seen);
+    },
+  },
+  {
+    id: "editor-save-identifies-written-text",
+    async probe() {
+      for (const switching of [false, true]) {
+        const path = await openNote("Line.\n");
+        const other = `n${++notes}.md`;
+        if (switching) await cdp.eval(`await app.vault.create(${JSON.stringify(other)}, "Other.\\n"); return true`);
+        await clearLog();
+        await cdp.type(switching ? "Unsaved before switching " : "Autosaved text ");
+        const text = await cdp.eval(`return app.workspace.activeEditor.editor.getValue()`);
+        if (switching) {
+          const before = await cdp.eval(`return app.vault.adapter.read(${JSON.stringify(path)})`);
+          expect(before !== text, "the switched-away note still has unsaved edits", { before, text });
+          await openExisting(other);
+        }
+        await settled();
+        const seen = await logOf(["save:start", "vault.modify", "save:settled"]);
+        const writes = seen.filter((e) => e.kind === "vault.modify" && e.file === path);
+        expect(writes.some((write) => write.data === text) && writes.every((write) => write.saves.some((id) => {
+          const start = seen.findIndex((e) => e.kind === "save:start" && e.id === id && e.file === path && e.data === write.data);
+          const end = seen.findIndex((e) => e.kind === "save:settled" && e.id === id && e.status === "fulfilled");
+          return start >= 0 && start < seen.indexOf(write) && seen.indexOf(write) < end;
+        })), "the save boundary identifies the exact file and text passed to vault.modify, including on switching notes", { switching, path, text, seen });
+        const persisted = await cdp.eval(`return app.vault.adapter.read(${JSON.stringify(path)})`);
+        expect(persisted === text, "the identified editor save persists its captured text", { switching, text, persisted });
+      }
+      const path = await openNote("Queued.\n");
+      await cdp.eval(`const view = app.workspace.activeLeaf.view, adapter = app.vault.adapter;
+        const previous = adapter.promise;
+        let release;
+        adapter.promise = new Promise((resolve) => { release = resolve; });
+        try {
+          view.editor.setValue("Queued. First.\\n");
+          const first = view.save();
+          view.editor.setValue("Queued. Second.\\n");
+          const second = view.save();
+          view.editor.setValue("Queued. Third.\\n");
+          adapter.promise = previous;
+          release();
+          await Promise.all([first, second]);
+          await view.save();
+        } finally { adapter.promise = previous; release(); }
+        return true`);
+      const seen = await logOf(["save:start", "vault.modify", "save:settled"]);
+      const writes = seen.filter((e) => e.kind === "vault.modify" && e.file === path);
+      const method = since("1.15.0") ? "writeData" : "save";
+      const consumed = new Set();
+      expect(writes.length >= 2 && writes.every((write) => {
+        const id = write.saves.find((id) => !consumed.has(id) &&
+          seen.some((e) => e.kind === "save:start" && e.id === id && e.method === method && e.file === path && e.data === write.data));
+        if (id === undefined) return false;
+        consumed.add(id);
+        return true;
+      }),
+      "queued saves identify their actual written text even when the editor changes while a save is pending", { method, seen });
+      expect(await cdp.eval(`return app.vault.adapter.read(${JSON.stringify(path)})`) === "Queued. Third.\n",
+        "queued saves persist the final editor contents", seen);
+    },
+  },
+  {
+    id: "editor-save-marker-is-consumed-once",
+    async probe() {
+      const path = await openNote("");
+      const seen = await cdp.eval(`const view = app.workspace.activeLeaf.view, file = view.file;
+        const modify = app.vault.modify;
+        let release, committed, hold = true;
+        const gate = new Promise((resolve) => { release = resolve; });
+        const reached = new Promise((resolve) => { committed = resolve; });
+        app.vault.modify = async function (...args) {
+          const result = await modify.apply(this, args);
+          if (hold) { hold = false; committed(); await gate; }
+          return result;
+        };
+        try {
+          view.editor.setValue("A");
+          const saving = view.save();
+          await reached;
+          await app.vault.process(file, () => "B");
+          await app.vault.modify(file, "A");
+          const pending = window.quirkLog.slice();
+          release();
+          await saving;
+          return { pending, settled: window.quirkLog.slice(), text: await app.vault.adapter.read(file.path) };
+        } finally { release(); app.vault.modify = modify; }`);
+      const writes = seen.settled.filter((e) => e.kind === "vault.modify" && e.file === path);
+      const starts = seen.settled.filter((e) => e.kind === "save:start" && e.file === path && e.data === "A");
+      expect(starts.length === 1 && writes.length === 2 && writes.every((e) => e.data === "A") &&
+        writes.every((e) => e.saves.includes(starts[0].id)) &&
+        !seen.pending.some((e) => e.kind === "save:settled" && e.id === starts[0].id) &&
+        seen.text === "A",
+      "one save issues one modify, but a later local revert can match its still-pending text marker", seen);
+    },
+  },
+  {
+    id: "vault-text-writes-do-not-nest",
+    async probe() {
+      await settled();
+      for (const tagged of [false, true]) {
+        const path = `n${++notes}.md`;
+        await clearLog();
+        await cdp.eval(`const options = ${tagged} ? { [Symbol("probe-own-write")]: true } : undefined;
+          const file = await app.vault.create(${JSON.stringify(path)}, "Created.\\n", options);
+          await app.vault.modify(file, "Modified.\\n", options);
+          await app.vault.process(file, (before) => before + "Processed.\\n", options);
+          await app.vault.append(file, "Appended.\\n", options);
+          return true`);
+        const seen = await logOf(["vault.create", "vault.modify", "vault.process", "vault.append", "vault:settled"]);
+        const writes = seen.filter((e) => e.file === path);
+        expect(JSON.stringify(writes.map((e) => e.kind)) === JSON.stringify(["vault.create", "vault.modify", "vault.process", "vault.append"]),
+          "each native text write enters exactly its own method, with or without a private options token", { tagged, seen });
+        const ids = new Set(writes.map((e) => e.id));
+        const nested = seen.filter((e) => e.parents?.some((id) => ids.has(id)));
+        expect(nested.length === 0, "native text writes never reenter a text-write method synchronously or while their promise is pending", { tagged, nested });
+        expect(writes.every((write) => seen.some((e) => e.kind === "vault:settled" && e.id === write.id && e.status === "fulfilled")),
+          "all observed native writes finish successfully", { tagged, seen });
+      }
     },
   },
   {

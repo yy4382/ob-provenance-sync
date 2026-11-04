@@ -1,7 +1,7 @@
 import { normalizePath, requestUrl, TFile, type App, type Plugin, type TAbstractFile } from "obsidian";
 import { IndexeddbPersistence } from "y-indexeddb";
 import type * as Y from "yjs";
-import { clickingTask, communityPluginOn, corePluginOn, deviceVaultId, replaceIfHolds, wrapEditorSaves } from "../quirks";
+import { communityPluginOn, corePluginOn, deviceVaultId, replaceIfHolds, syncWriteOptions, wrapVaultWrites } from "../quirks";
 import type { Blobs, Disk, Persistence, SyncEngine } from "./engine";
 
 const isBinary = (file: TFile) => file.extension !== "md";
@@ -41,13 +41,15 @@ export function watchVault(plugin: Plugin, engine: () => SyncEngine | null) {
       if (running && file instanceof TFile && isSyncedPath(app, oldPath)) void running.onRename(oldPath, file.path);
     }),
   );
-  // An editor saves through vault.modify with the exact text it writes;
-  // the engine needs that text to tell the save from other programs' edits.
-  // A click on a task in reading view comes through here too.
   plugin.register(
-    wrapEditorSaves(app, (file, data, write) => {
-      const running = engine();
-      return running && isSyncedPath(app, file.path) && !isBinary(file) ? running.trackWrite(file.path, data, write, clickingTask()) : write();
+    wrapVaultWrites(app, {
+      save: (file, data, write) => {
+        const running = engine();
+        return running && isSyncedPath(app, file.path) ? running.trackWrite(file.path, data, write) : write();
+      },
+      local: (path, before, after) => {
+        if (isSyncedPath(app, path)) engine()?.wroteLocally(path, before, after);
+      },
     }),
   );
 }
@@ -92,10 +94,10 @@ export class ObsidianDisk implements Disk {
 
   async write(path: string, text: string) {
     const f = this.file(path);
-    if (f) await this.app.vault.modify(f, text);
+    if (f) await this.app.vault.modify(f, text, syncWriteOptions());
     else {
       await this.ensureParent(path);
-      await this.app.vault.create(path, text);
+      await this.app.vault.create(path, text, syncWriteOptions());
     }
   }
 

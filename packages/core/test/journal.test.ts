@@ -16,6 +16,7 @@ import {
   Recorder,
   REATTRIBUTABLE,
   replaceText,
+  rewriteRange,
   setText,
   TEXT_KEY,
   textAt,
@@ -139,6 +140,53 @@ describe("Recorder on a note", () => {
       ["human:a", true],
       ["unknown", true],
     ]);
+  });
+
+  const noOpRewrites = (["literal", "semantic"] as const).flatMap((mode) => [
+    { name: `rewriteRange ${mode}`, run: (text: Y.Text) => rewriteRange(text, 0, text.toString(), text.toString(), human(0), mode) },
+    { name: `setText ${mode}`, run: (text: Y.Text) => setText(text, text.toString(), human(0), mode) },
+  ]);
+
+  it.each(noOpRewrites)("a no-op $name keeps the actor of an earlier insertion in the transaction", ({ run }) => {
+    const j = journal();
+    const { doc, text } = note();
+    j.recorder().watchNote(ID, doc);
+    const agent = agentProvenance("agent:cli", "agent", "original note", "server", 0);
+    doc.transact(() => {
+      insertText(text, 0, "Agent wrote this.", agent);
+      run(text);
+    });
+    expect(text.toString()).toBe("Agent wrote this.");
+    expect(text.toDelta()).toEqual([{ insert: "Agent wrote this.", attributes: toAttrs(agent) }]);
+    expect(j.edits().map((e) => [e.by, e.removes])).toEqual([["agent:cli", false]]);
+  });
+
+  it.each(noOpRewrites)("a no-op $name keeps the actor of an earlier deletion in the transaction", ({ run }) => {
+    const j = journal();
+    const { doc, text } = note();
+    const agent = agentProvenance("agent:cli", "agent", "original note", "server", 0);
+    insertText(text, 0, "Keep. Remove.", agent);
+    j.recorder().watchNote(ID, doc);
+    doc.transact(() => {
+      rewriteRange(text, 5, " Remove.", "", agent, "literal");
+      run(text);
+    });
+    expect(text.toString()).toBe("Keep.");
+    expect(text.toDelta()).toEqual([{ insert: "Keep.", attributes: toAttrs(agent) }]);
+    expect(j.edits().map((e) => [e.by, e.removes])).toEqual([["agent:cli", true]]);
+  });
+
+  it("records a human literal deletion while retaining every attribute of the remaining agent text", () => {
+    const j = journal();
+    const { doc, text } = note();
+    const agent = agentProvenance("agent:cli", "agent", "original note", "server", 0);
+    insertText(text, 0, "Agent. Remove. Keep!", agent);
+    text.format(0, text.length, { review: "approved" });
+    j.recorder().watchNote(ID, doc);
+    doc.transact(() => setText(text, "Agent. Keep!", human(0), "literal"));
+    expect(text.toString()).toBe("Agent. Keep!");
+    expect(text.toDelta()).toEqual([{ insert: "Agent. Keep!", attributes: { ...toAttrs(agent), review: "approved" } }]);
+    expect(j.edits().map((e) => [e.by, e.removes])).toEqual([["human:a", true]]);
   });
 
   it("takes the author from the inserted text when nothing marked the transaction", () => {

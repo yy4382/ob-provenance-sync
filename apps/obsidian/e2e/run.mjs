@@ -9,6 +9,7 @@ import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSyn
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { eventually, freePort, obsidian, sleep } from "./harness.mjs";
@@ -90,6 +91,17 @@ const authorsOf = (cdp, path, marker) =>
     for (const d of t.toDelta()) { const end = pos + d.insert.length; if (end > from && pos < to) out.add(d.attributes?.pa ?? "none"); pos = end; }
     return [...out]`);
 
+const snapshotOf = (cdp, path) =>
+  cdp.eval(`const t = ${engineFile(path)}.ytext;
+    return { text: t.toJSON(), attrs: t.toDelta().flatMap(d => Array(d.insert.length).fill(d.attributes ?? {})) }`);
+
+const attributesOf = (snapshot, marker) => {
+  const from = snapshot.text.indexOf(marker);
+  return from < 0 ? [] : snapshot.attrs.slice(from, from + marker.length);
+};
+
+const isHuman = (attrs) => attrs.length > 0 && attrs.every((a) => a.pa === "human:tester" && a.pw === "human-typed" && (a.pn ?? null) === null && a.pd === "e2e-mac" && typeof a.pt === "number" && a.pt > 0);
+
 async function focusPane(cdp, index, line = 0) {
   await cdp.eval(`const l = app.workspace.getLeavesOfType("markdown")[${index}]; app.workspace.setActiveLeaf(l, { focus: true });
     l.view.editor.setCursor({ line: ${line}, ch: 0 }); l.view.editor.cm.focus();`);
@@ -125,14 +137,19 @@ async function reattributeVia(cdp, command, marker, { why, agent }) {
 
 /** Shows `path` in a pane in Live Preview ("source") or reading view ("preview"), with the cursor off its tasks. */
 async function openInMode(cdp, leaf, path, mode) {
+  if (!(await eventually(() => cdp.eval(`return !!app.vault.getFileByPath(${JSON.stringify(path)})`)))) throw new Error(`Obsidian has not indexed ${path}`);
   await cdp.eval(`const l = ${leaf};
     await l.setViewState({ type: "markdown", state: { file: ${JSON.stringify(path)}, mode: ${JSON.stringify(mode)}, source: false } });
     await new Promise((r) => setTimeout(r, 700)); app.workspace.setActiveLeaf(l, { focus: true });
-    l.view.editor.setCursor({ line: 0, ch: 0 }); return true`);
+    if (${JSON.stringify(mode)} === "source") l.view.editor.setCursor({ line: 0, ch: 0 }); return true`);
   await sleep(300);
 }
 
 async function clickTask(cdp, view, index = 0) {
+  if (!(await eventually(() => cdp.eval(`return app.workspace.activeLeaf.view.contentEl.querySelectorAll(${JSON.stringify(`${view} .task-list-item-checkbox`)}).length > ${index}`)))) {
+    const state = await cdp.eval(`const v = app.workspace.activeLeaf.view; return { state: v.getState(), text: v.getViewData(), html: v.contentEl.querySelector(${JSON.stringify(view)})?.innerHTML.slice(-3000) }`);
+    throw new Error(`Task checkbox did not render: ${JSON.stringify(state)}`);
+  }
   await cdp.click(`${view} .task-list-item-checkbox`, index);
   await sleep(1000);
 }
@@ -320,8 +337,251 @@ try {
   await openInMode(cdp, "app.workspace.activeLeaf", "Tasks.md", "source");
   await cdp.eval(`app.workspace.activeEditor.editor.replaceRange("y", { line: 0, ch: 0 }); return true`);
   await sleep(500);
-  check("another plugin's edit stays unknown", (await authorsOf(cdp, "Tasks.md", "y")).join() === "unknown", JSON.stringify(await authorsOf(cdp, "Tasks.md", "y")));
+  check("another plugin's Editor.replaceRange edit is the human's", (await authorsOf(cdp, "Tasks.md", "y")).join() === "human:tester", JSON.stringify(await authorsOf(cdp, "Tasks.md", "y")));
   await cdp.eval(`app.workspace.activeLeaf.detach(); return true`);
+
+  // Obsidian's save waits two seconds, so it runs after the switch, from reading view. Taken for
+  // another plugin's write, it would be merged from disk and double the edit.
+  await openInMode(cdp, `app.workspace.getLeaf("tab")`, "Tasks.md", "source");
+  await cdp.eval(`app.workspace.activeEditor.editor.replaceRange("Before reading. ", { line: 0, ch: 0 }); return true`);
+  await openInMode(cdp, "app.workspace.activeLeaf", "Tasks.md", "preview");
+  await sleep(2500);
+  check("an edit saved after switching to reading view is saved once", !!(await agrees("Tasks.md")) &&
+    readFileSync(join(vault, "Tasks.md"), "utf8").split("Before reading.").length === 2, readFileSync(join(vault, "Tasks.md"), "utf8"));
+  await cdp.eval(`app.workspace.activeLeaf.detach(); return true`);
+
+  const localApiSaved = new Map();
+  const rewritePath = "LocalApi-rewrite.md";
+  const completedTask = "- [x] Pack the spare cable.\n";
+  const rewriteBase = `# Workshop\n\n- [ ] Inspect the telescope.\n${completedTask}\nReference remains.\n`;
+  const handwritten = "\nReviewed by hand.\n";
+  const migratedTask = "\n## Migrated tasks\n- [ ] Water the fern.\n";
+  const seeded = await mcpCall("create_file", { path: rewritePath, content: rewriteBase, why: "agent", note: "Synthetic task migration fixture" });
+  check("the task migration fixture is created by the agent", !seeded.isError, JSON.stringify(seeded.content));
+  await eventually(async () => existsSync(join(vault, rewritePath)));
+  await openInMode(cdp, `app.workspace.getLeaf("tab")`, rewritePath, "source");
+  const agentSeed = await snapshotOf(cdp, rewritePath);
+  check("Vault creation inside an explicit agent write keeps its identity and note", agentSeed.text === rewriteBase && agentSeed.attrs.every((a) => a.pa === "agent:e2e-client" && a.pw === "agent" && a.pn === "Synthetic task migration fixture"), JSON.stringify(agentSeed));
+  await cdp.eval(`const e = app.workspace.activeEditor.editor; e.replaceRange(${JSON.stringify(handwritten)}, e.offsetToPos(e.getValue().length)); return true`);
+  check("the mixed rewrite fixture is saved before migration", !!(await agrees(rewritePath)));
+  const beforeRewrite = await snapshotOf(cdp, rewritePath);
+  check("the rewrite fixture includes human text", isHuman(attributesOf(beforeRewrite, handwritten)), JSON.stringify(beforeRewrite));
+  const rewritten = rewriteBase.replace(completedTask, "") + handwritten + migratedTask;
+  await cdp.eval(`app.workspace.activeEditor.editor.setValue(${JSON.stringify(rewritten)}); return true`);
+  check("Editor.setValue saves the migrated tasks", !!(await eventually(async () => readFileSync(join(vault, rewritePath), "utf8") === rewritten && (await snapshotOf(cdp, rewritePath)).text === rewritten)));
+  const afterRewrite = await snapshotOf(cdp, rewritePath);
+  for (const retained of [rewriteBase.slice(0, rewriteBase.indexOf(completedTask)), "\nReference remains.\n" + handwritten]) {
+    const attrs = attributesOf(afterRewrite, retained);
+    check("Editor.setValue keeps every attribute on unchanged text", attrs.length === retained.length && isDeepStrictEqual(attrs, attributesOf(beforeRewrite, retained)), JSON.stringify({ retained, attrs }));
+  }
+  check("Editor.setValue attributes inserted tasks to the human", isHuman(attributesOf(afterRewrite, migratedTask)), JSON.stringify(attributesOf(afterRewrite, migratedTask)));
+  const rewriteUpdates = await cdp.eval(`const t = ${engineFile(rewritePath)}.ytext; let updates = 0;
+    const record = () => updates++; t.doc.on("update", record);
+    try {
+      const e = app.workspace.activeEditor.editor; e.setValue(e.getValue());
+      await new Promise(r => setTimeout(r, 1000)); return updates;
+    } finally { t.doc.off("update", record); }`);
+  check("an identical Editor.setValue produces no provenance mutation", rewriteUpdates === 0 && isDeepStrictEqual(await snapshotOf(cdp, rewritePath), afterRewrite), `${rewriteUpdates} updates`);
+  const queuedSave = await cdp.eval(`const view = app.workspace.activeLeaf.view, adapter = app.vault.adapter;
+    const file = ${engineFile(rewritePath)};
+    const previous = adapter.promise;
+    let release;
+    adapter.promise = new Promise((resolve) => { release = resolve; });
+    try {
+      view.editor.setValue(view.editor.getValue() + "First queued edit.\\n");
+      const first = view.save();
+      file.doc.transact(() => file.ytext.insert(file.ytext.length, "Queued agent edit.\\n", ${JSON.stringify(agentSeed.attrs[0])}));
+      const second = view.save();
+      view.editor.setValue(view.editor.getValue() + "Last queued edit.\\n");
+      const expected = file.ytext.toDelta();
+      adapter.promise = previous;
+      release();
+      await Promise.all([first, second]);
+      await view.save();
+      return expected;
+    } finally { adapter.promise = previous; release(); }`);
+  check("queued editor saves converge after intervening human and agent edits", !!(await agrees(rewritePath)));
+  const afterQueuedSave = await snapshotOf(cdp, rewritePath);
+  check("queued saves preserve the exact text and attributes without replaying edits",
+    isDeepStrictEqual(await cdp.eval(`return ${engineFile(rewritePath)}.ytext.toDelta()`), queuedSave), JSON.stringify(afterQueuedSave));
+  localApiSaved.set(rewritePath, afterQueuedSave);
+  await cdp.eval(`app.workspace.activeLeaf.detach(); return true`);
+
+  for (const { name, edit, identical } of [
+    { name: "setValue", edit: "e.setValue(next)" },
+    { name: "replaceRange", edit: "e.replaceRange(next, { line: 0, ch: 0 }, e.offsetToPos(e.getValue().length))" },
+    { name: "replaceRange-custom-origin", edit: 'e.replaceRange(next, { line: 0, ch: 0 }, e.offsetToPos(e.getValue().length), "plugin.task-migration")' },
+    { name: "transaction", edit: "e.transaction({ changes: [{ from: { line: 0, ch: 0 }, to: e.offsetToPos(e.getValue().length), text: next }] })" },
+    { name: "transaction-custom-origin", edit: 'e.transaction({ changes: [{ from: { line: 0, ch: 0 }, to: e.offsetToPos(e.getValue().length), text: next }] }, "plugin.task-migration")' },
+    { name: "identical-setValue", edit: "e.setValue(e.getValue())", identical: true },
+  ]) {
+    const path = `LocalApi-editor-${name}.md`;
+    const base = "Agent reference.\n- [ ] Inspect the sundial.\n";
+    const next = identical ? base : base.replace("[ ]", "[x]");
+    const changedAt = identical ? -1 : base.indexOf("[ ]") + 1;
+    const fixture = await mcpCall("create_file", { path, content: base, why: "agent", note: "Retain every unchanged attribute" });
+    check(`Editor ${name} fixture is created`, !fixture.isError, JSON.stringify(fixture.content));
+    await eventually(async () => existsSync(join(vault, path)) && (await snapshotOf(cdp, path)).text === base);
+    await openInMode(cdp, `app.workspace.getLeaf("tab")`, path, "source");
+    await cdp.eval(`const t = ${engineFile(path)}.ytext; t.doc.transact(() => t.format(0, t.length, { customReview: "approved" })); return true`);
+    const before = await snapshotOf(cdp, path);
+    const history = () => cdp.eval(`const engine = ${plugin}.engine, file = ${engineFile(path)};
+      const { entries } = await engine.week(Math.floor(Date.now() / 604800000));
+      return entries.filter(e => e.t === "edit" && e.id === file.id).map(e => ({ by: e.by, removes: e.removes }))`);
+    const beforeHistory = identical ? await history() : null;
+    for (const [step, action, expected] of [
+      ["replace", edit, next],
+      ["undo", "e.undo()", base],
+      ["redo", "e.redo()", next],
+    ]) {
+      await cdp.eval(`const e = app.workspace.activeEditor.editor, next = ${JSON.stringify(next)}; ${action};
+        await app.workspace.activeLeaf.view.save(); return true`);
+      check(`Editor ${name} ${step} reaches the editor, CRDT and disk`, !!(await eventually(async () =>
+        readFileSync(join(vault, path), "utf8") === expected &&
+        (await snapshotOf(cdp, path)).text === expected &&
+        await cdp.eval(`return app.workspace.activeEditor.editor.getValue() === ${JSON.stringify(expected)}`))));
+      const after = await snapshotOf(cdp, path);
+      check(`Editor ${name} ${step} preserves every unchanged attribute`,
+        isDeepStrictEqual(after.attrs.filter((_, i) => i !== changedAt), before.attrs.filter((_, i) => i !== changedAt)), JSON.stringify(after));
+      if (!identical) {
+        check(`Editor ${name} ${step} attributes the changed checkbox to the human`,
+          isHuman(after.attrs.slice(changedAt, changedAt + 1)), JSON.stringify(after.attrs[changedAt]));
+      } else {
+        check(`Editor ${name} ${step} adds no journal edit`, isDeepStrictEqual(await history(), beforeHistory));
+      }
+    }
+    localApiSaved.set(path, await snapshotOf(cdp, path));
+    await cdp.eval(`app.workspace.activeLeaf.detach(); return true`);
+  }
+
+  const deletionPath = "LocalApi-editor-deletion.md";
+  const deletionBase = "Agent reference.\nRemove this line.\nKeep this line.\n";
+  const deletionNext = deletionBase.replace("Remove this line.\n", "");
+  const deletionFixture = await mcpCall("create_file", { path: deletionPath, content: deletionBase, why: "agent", note: "Retain the surviving text" });
+  check("the Editor deletion fixture is created", !deletionFixture.isError, JSON.stringify(deletionFixture.content));
+  await eventually(async () => existsSync(join(vault, deletionPath)) && (await snapshotOf(cdp, deletionPath)).text === deletionBase);
+  await openInMode(cdp, `app.workspace.getLeaf("tab")`, deletionPath, "source");
+  const beforeDeletion = await snapshotOf(cdp, deletionPath);
+  await cdp.eval(`const e = app.workspace.activeEditor.editor;
+    e.replaceRange(${JSON.stringify(deletionNext)}, { line: 0, ch: 0 }, e.offsetToPos(e.getValue().length), "plugin.remove-line");
+    await app.workspace.activeLeaf.view.save(); return true`);
+  check("a custom-origin Editor deletion reaches disk and CRDT", !!(await eventually(async () =>
+    readFileSync(join(vault, deletionPath), "utf8") === deletionNext && (await snapshotOf(cdp, deletionPath)).text === deletionNext)));
+  const afterDeletion = await snapshotOf(cdp, deletionPath);
+  for (const retained of ["Agent reference.\n", "Keep this line.\n"]) {
+    check("a custom-origin Editor deletion keeps all surviving attributes",
+      isDeepStrictEqual(attributesOf(afterDeletion, retained), attributesOf(beforeDeletion, retained)), JSON.stringify(afterDeletion));
+  }
+  const deletionHistory = await cdp.eval(`const engine = ${plugin}.engine, file = ${engineFile(deletionPath)};
+    const { entries } = await engine.week(Math.floor(Date.now() / 604800000));
+    return entries.filter(e => e.t === "edit" && e.id === file.id).map(e => ({ by: e.by, removes: e.removes }))`);
+  check("a custom-origin Editor deletion records the human actor",
+    deletionHistory.some(e => e.by === "human:tester" && e.removes), JSON.stringify(deletionHistory));
+  localApiSaved.set(deletionPath, afterDeletion);
+  await cdp.eval(`app.workspace.activeLeaf.detach(); return true`);
+
+  const localCreatePath = "LocalApi-created.md";
+  const localCreatedText = "A plugin created this note.\n";
+  await cdp.eval(`await app.vault.create(${JSON.stringify(localCreatePath)}, ${JSON.stringify(localCreatedText)}); return true`);
+  const localCreated = await eventually(async () => {
+    const snapshot = await snapshotOf(cdp, localCreatePath);
+    return snapshot.text === localCreatedText ? snapshot : undefined;
+  });
+  check("Vault.create attributes a plugin's new note to the human", !!localCreated && isHuman(localCreated.attrs), JSON.stringify(localCreated));
+  if (localCreated) localApiSaved.set(localCreatePath, localCreated);
+
+  const normalizedCreatePath = "Folder/note.md";
+  const normalizedCreatedText = "A plugin created this note through a noncanonical path.\n";
+  const createdPath = await cdp.eval(`await app.vault.createFolder("Folder");
+    const f = await app.vault.create("Folder//note.md", ${JSON.stringify(normalizedCreatedText)}); return f.path`);
+  check("Vault.create returns the canonical path", createdPath === normalizedCreatePath, createdPath);
+  const normalizedCreated = await eventually(async () => {
+    const snapshot = await snapshotOf(cdp, normalizedCreatePath);
+    return existsSync(join(vault, normalizedCreatePath)) && readFileSync(join(vault, normalizedCreatePath), "utf8") === normalizedCreatedText && snapshot.text === normalizedCreatedText ? snapshot : undefined;
+  });
+  check("Vault.create with a noncanonical path attributes the canonical note to the human", !!normalizedCreated && isHuman(normalizedCreated.attrs), JSON.stringify(normalizedCreated));
+  if (normalizedCreated) localApiSaved.set(normalizedCreatePath, normalizedCreated);
+
+  for (const mode of ["open", "closed"]) {
+    for (const method of ["process", "modify", "append"]) {
+      const path = `LocalApi-${mode}-${method}.md`;
+      const base = "Agent reference.\n\n- [ ] Inspect the sundial.\n";
+      const added = `\nPlugin ${method} addition.\n`;
+      const content = (method === "append" ? base : base.replace("[ ]", "[x]")) + added;
+      const fixture = await mcpCall("create_file", { path, content: base, why: "agent", note: "Retain the original provenance" });
+      check(`${mode} Vault.${method} fixture is created`, !fixture.isError, JSON.stringify(fixture.content));
+      await eventually(async () => existsSync(join(vault, path)) && (await snapshotOf(cdp, path)).text === base);
+      if (mode === "open") await openInMode(cdp, `app.workspace.getLeaf("tab")`, path, "source");
+      const before = await snapshotOf(cdp, path);
+      const changedAt = method === "append" ? -1 : base.indexOf("[ ]") + 1;
+      const operation = {
+        process: `await app.vault.process(f, text => text.replace("[ ]", "[x]") + ${JSON.stringify(added)})`,
+        modify: `await app.vault.modify(f, ${JSON.stringify(content)})`,
+        append: `await app.vault.append(f, ${JSON.stringify(added)})`,
+      }[method];
+      await cdp.eval(`const f = app.vault.getFileByPath(${JSON.stringify(path)}); ${operation}; return true`);
+      check(`Vault.${method} saves the ${mode} note`, !!(await eventually(async () => readFileSync(join(vault, path), "utf8") === content && (await snapshotOf(cdp, path)).text === content)));
+      if (mode === "open") {
+        check(`Vault.${method} reaches the open editor`, !!(await eventually(() => cdp.eval(`return app.workspace.activeEditor.editor.getValue() === ${JSON.stringify(content)}`))));
+      }
+      const after = await snapshotOf(cdp, path);
+      check(`Vault.${method} keeps unchanged attributes in the ${mode} note`, isDeepStrictEqual(after.attrs.slice(0, base.length).filter((_, i) => i !== changedAt), before.attrs.filter((_, i) => i !== changedAt)), JSON.stringify(after));
+      const inserted = attributesOf(after, added).concat(changedAt < 0 ? [] : after.attrs.slice(changedAt, changedAt + 1));
+      check(`Vault.${method} attributes changes in the ${mode} note to the human`, inserted.length === added.length + (changedAt < 0 ? 0 : 1) && isHuman(inserted), JSON.stringify(inserted));
+      if (method === "modify" || method === "append") {
+        const noOp = {
+          modify: `await app.vault.modify(f, ${JSON.stringify(content)})`,
+          append: `await app.vault.append(f, "")`,
+        }[method];
+        await cdp.eval(`const f = app.vault.getFileByPath(${JSON.stringify(path)}); ${noOp}; return true`);
+        await sleep(1000);
+        const afterNoOp = await snapshotOf(cdp, path);
+        check(`no-op Vault.${method} preserves text and every attribute in the ${mode} note`, readFileSync(join(vault, path), "utf8") === content && isDeepStrictEqual(afterNoOp, after), JSON.stringify(afterNoOp));
+      }
+      localApiSaved.set(path, after);
+      if (mode === "open") await cdp.eval(`app.workspace.activeLeaf.detach(); return true`);
+    }
+  }
+
+  const concurrentPath = "LocalApi-closed-modify.md";
+  const beforeConcurrent = await snapshotOf(cdp, concurrentPath);
+  await cdp.eval(`const file = app.vault.getFileByPath(${JSON.stringify(concurrentPath)});
+    await Promise.all([
+      app.vault.modify(file, ${JSON.stringify(beforeConcurrent.text)}),
+      app.vault.modify(file, ${JSON.stringify(beforeConcurrent.text + "Concurrent addition.\n")})
+    ]); return true`);
+  check("a no-op Vault.modify does not undo a queued change", !!(await agrees(concurrentPath)));
+  const afterNoOpOverlap = await snapshotOf(cdp, concurrentPath);
+  check("a queued change after no-op Vault.modify keeps human attribution",
+    isHuman(attributesOf(afterNoOpOverlap, "Concurrent addition.\n")) &&
+    isDeepStrictEqual(afterNoOpOverlap.attrs.slice(0, beforeConcurrent.text.length), beforeConcurrent.attrs), JSON.stringify(afterNoOpOverlap));
+  await cdp.eval(`await app.vault.modify(app.vault.getFileByPath(${JSON.stringify(concurrentPath)}), ${JSON.stringify(beforeConcurrent.text)}); return true`);
+  await cdp.eval(`const file = app.vault.getFileByPath(${JSON.stringify(concurrentPath)});
+    await Promise.all([
+      app.vault.modify(file, ${JSON.stringify(beforeConcurrent.text + "Reverted addition.\n")}),
+      app.vault.modify(file, ${JSON.stringify(beforeConcurrent.text)})
+    ]); return true`);
+  check("overlapping Vault.modify calls keep a deliberate revert",
+    !!(await agrees(concurrentPath)) && isDeepStrictEqual(await snapshotOf(cdp, concurrentPath), beforeConcurrent));
+  await cdp.eval(`const file = app.vault.getFileByPath(${JSON.stringify(concurrentPath)});
+    const engine = app.plugins.plugins["provenance-sync"].engine;
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    const queued = engine.enqueue(() => held);
+    try {
+      await app.vault.adapter.write(file.path, ${JSON.stringify(beforeConcurrent.text + "External addition.\n")});
+      await app.vault.modify(file, ${JSON.stringify(beforeConcurrent.text + "External addition.\nLocal addition.\n")});
+    } finally { release(); await queued; }
+    return true`);
+  check("Vault.modify reconciles an external edit before its watcher finishes", !!(await agrees(concurrentPath)));
+  const afterConcurrent = await snapshotOf(cdp, concurrentPath);
+  // The plugin's write doesn't start from the text the engine last saw, so the engine can't
+  // tell its change from the outside edit's: both keep their text and stay unknown.
+  check("Vault.modify over an unseen outside edit keeps both additions, as unknown",
+    ["External addition.\n", "Local addition.\n"].every((added) =>
+      attributesOf(afterConcurrent, added).length === added.length && attributesOf(afterConcurrent, added).every((a) => a.pa === "unknown")) &&
+    isDeepStrictEqual(afterConcurrent.attrs.slice(0, beforeConcurrent.text.length), beforeConcurrent.attrs), JSON.stringify(afterConcurrent));
+  localApiSaved.set(concurrentPath, afterConcurrent);
 
   const setDaily = (options) => cdp.eval(`app.internalPlugins.getEnabledPluginById("daily-notes").options = ${JSON.stringify(options)}; return true`);
   const daily = await mcpCall("get_daily_note", {});
@@ -337,7 +597,7 @@ try {
   const dailyWrite = await mcpCall("append_to_file", { path: dailyPath, text: "AgentDaily line.\n", why: "agent" });
   check("create_daily_note returns a note the agent can write at once", !created.isError && created.content[0].text === dailyPath && !dailyWrite.isError, JSON.stringify([created.content, dailyWrite.content]));
   const dailyAuthors = await mcpCall("read_file", { path: dailyPath, provenance: true });
-  check("the daily template is unknown and the agent's text is the agent's", /^\[unknown\] Template line\.\n\[agent agent:.*\] AgentDaily line\./.test(dailyAuthors.content[0].text), dailyAuthors.content[0].text);
+  check("the daily template is human and the agent's text is the agent's", /^\[human human:tester\] Template line\.\n\[agent agent:e2e-client\] AgentDaily line\./.test(dailyAuthors.content[0].text), dailyAuthors.content[0].text);
   await mcpCall("create_daily_note", {});
   const dailyAgain = await mcpCall("read_file", { path: dailyPath });
   check("create_daily_note leaves an existing note alone", dailyAgain.content[0].text === "Template line.\nAgentDaily line.\n", dailyAgain.content[0].text);
@@ -592,6 +852,7 @@ try {
   const leftText = readFileSync(join(vault, "Left.md"), "utf8");
   check("leaving a note before its save loses nothing", leftText === "Hand dictated.\nOutsideWrite line.\n", JSON.stringify(leftText));
   check("the typed text stays the human's", JSON.stringify(await authorsOf(cdp, "Left.md", "Hand")) === '["human:tester"]', JSON.stringify(await authorsOf(cdp, "Left.md", "Hand")));
+  check("another program's edit to a closed file stays unknown", JSON.stringify(await authorsOf(cdp, "Left.md", "OutsideWrite line.")) === '["unknown"]', JSON.stringify(await authorsOf(cdp, "Left.md", "OutsideWrite line.")));
 
   // Between files the pane names the new note while the editor still holds the old one, for as
   // long as the read takes. Any update then bound the new note to the old note's text, and the
@@ -665,10 +926,15 @@ try {
     // Welcome.md is gone, so the readiness probe above can't use it.
     return eventually(() => instance.page(), 30000);
   });
+  for (const [path, saved] of localApiSaved) {
+    check(`local API provenance survives saving and restarting (${path})`, !!(await eventually(async () => isDeepStrictEqual(await snapshotOf(cdp, path), saved))), JSON.stringify(await snapshotOf(cdp, path)));
+  }
   const files = await eventually(async () => {
     const r = await opsCall({ op: "list" });
     const notes = r.result.files.filter(
-      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Linker.md", "DailyTemplate.md", "Tasks.md"].includes(f),
+      (f) => !localApiSaved.has(f),
+    ).filter(
+      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !f.startsWith("LocalApi-") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Linker.md", "DailyTemplate.md", "Tasks.md"].includes(f),
     );
     return notes.join(",") === "Projects/Renamed.md" ? notes : undefined;
   }, 15000);

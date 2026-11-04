@@ -2,7 +2,7 @@
 // verification/markdown-file/MarkdownFile.tla (findings F1-F5 of the
 // verify-markdown-file-sync skill). disk.files.set is another program's edit
 // whose modify event has not fired yet; engine.onModify is that event.
-import { agentProvenance, humanProvenance, insertText } from "@provenance/core";
+import { agentProvenance, humanProvenance, insertText, runsOf } from "@provenance/core";
 import { afterEach, expect, it } from "vitest";
 import { SyncEngine } from "../src/sync/engine";
 import { MemoryDisk, MemoryStore } from "./harness";
@@ -137,4 +137,64 @@ it("keeps remote text single when a pane reopens during a pending save", async (
   closeAgain();
   await engine.settle();
   expect(disk.files.get("a.md")).toBe("Base. Remote. Typed.");
+});
+
+/** Each run of text with its author, in order. */
+const authors = (file: { ytext: { toJSON(): string } & Parameters<typeof runsOf>[0] }) =>
+  runsOf(file.ytext).map((run) => [file.ytext.toJSON().slice(run.from, run.to), run.provenance.author]);
+
+// Another plugin writes through the Vault API. wrapVaultWrites reports each such write with the
+// text it replaced; disk.save(path, text, true) is that report followed by the write.
+it("attributes only the changed text of a plugin's whole-file rewrite to the human", async () => {
+  const { engine, disk, file } = await offline("");
+  insertText(file.ytext, 0, "- [ ] Agent task\n", remote);
+  await file.flush();
+  await disk.save("a.md", "- [ ] Agent task\n- [ ] Moved task\n", true);
+  await engine.settle();
+  expect(authors(file)).toEqual([["- [ ] Agent task\n", "agent:x"], ["- [ ] Moved task\n", "human:chris"]]);
+});
+
+it("leaves a plugin's write unknown when another program's edit landed before it", async () => {
+  const { engine, disk, file } = await offline("Base.");
+  disk.files.set("a.md", "Base. External."); // its modify event is still pending
+  await disk.save("a.md", "Base. External. Local.", true);
+  await engine.onModify("a.md", false);
+  await engine.settle();
+  expect(file.ytext.toJSON()).toBe("Base. External. Local.");
+  expect(authors(file)).toEqual([["Base. External. Local.", "unknown"]]);
+});
+
+it("attributes a burst of plugin writes read back together to the human", async () => {
+  const { engine, disk, file } = await offline("Base.");
+  engine.wroteLocally("a.md", "Base.", "Base. One.");
+  disk.files.set("a.md", "Base. One.");
+  engine.wroteLocally("a.md", "Base. One.", "Base. One. Two.");
+  await disk.write("a.md", "Base. One. Two.");
+  await engine.settle();
+  expect(authors(file).slice(1)).toEqual([[" One. Two.", "human:chris"]]);
+});
+
+// The ordering that broke a design applying each plugin write's captured text when the write
+// finished: the plugin's write puts the file back to the base text, so the sync write's
+// compare-and-swap succeeds over it. Here the plugin's report is only a label for the next read.
+it("keeps remote text when a sync write lands between a plugin's write and its read", async () => {
+  const { engine, disk, file } = await offline("Base.");
+  insertText(file.ytext, file.ytext.length, " Remote.", remote);
+  disk.files.set("a.md", "Base. External."); // its modify event is still pending
+  engine.wroteLocally("a.md", "Base. External.", "Base.");
+  disk.files.set("a.md", "Base."); // the plugin's write; its event is pending too
+  await engine.enqueue(() => file.writeNow());
+  await engine.onModify("a.md", false);
+  await engine.onModify("a.md", false);
+  await engine.settle();
+  expect(file.ytext.toJSON()).toBe("Base. Remote.");
+  expect(disk.files.get("a.md")).toBe("Base. Remote.");
+});
+
+it("attributes a note a plugin creates to the human", async () => {
+  const { engine, disk } = await offline("Base.");
+  engine.wroteLocally("b.md", "", "Template line.\n");
+  await disk.write("b.md", "Template line.\n");
+  await engine.settle();
+  expect(authors(engine.fileAt("b.md")!)).toEqual([["Template line.\n", "human:chris"]]);
 });
