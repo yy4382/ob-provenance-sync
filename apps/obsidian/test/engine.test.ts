@@ -142,6 +142,59 @@ describe("SyncEngine", () => {
     expect(b.engine.vaultIndex.entries()).toHaveLength(1);
   });
 
+  it("replaces a fresh device's blank local file with the synced note", async () => {
+    const { device } = await setup();
+    const diskA = new MemoryDisk();
+    diskA.files.set("daily.md", "\n");
+    await device("mac", diskA);
+    const diskB = new MemoryDisk();
+    diskB.files.set("daily.md", "");
+    const b = await device("phone", diskB);
+    await eventually(() => expect([...b.disk.files]).toEqual([["daily.md", "\n"]]));
+  });
+
+  // The other device's note has the largest or smallest id, so the blank note created here loses or wins the path.
+  for (const [order, theirs] of [
+    ["loses", "ffffffff-ffff-4fff-bfff-ffffffffffff"],
+    ["wins", "00000000-0000-4000-8000-000000000000"],
+  ] as const) {
+    it(`drops a blank note that ${order === "loses" ? "wins" : "loses"} the path to a note synced after it was created`, async () => {
+      const { device } = await setup();
+      const a = await device("mac");
+      const b = await device("phone");
+      b.engine.destroy();
+      const id = theirs as FileId;
+      await a.engine.updateText(id, (t) => insertText(t, 0, "Synced text.", humanProvenance("human:chris", "mac")));
+      await a.engine.updateIndex((index) => index.set(id, { type: "markdown", path: "daily.md" }));
+      b.disk.files.set("daily.md", "");
+      const b2 = await device("phone", b.disk, b.store);
+      for (const { engine, disk } of [a, b2]) {
+        await eventually(() => expect([...disk.files]).toEqual([["daily.md", "Synced text."]]));
+        await eventually(() => expect(engine.vaultIndex.entries()).toEqual([[id, { type: "markdown", path: "daily.md" }]]));
+      }
+    });
+  }
+
+  it("keeps a note cleared on a device while it was offline, with Obsidian closed or open", async () => {
+    const { device } = await setup();
+    const diskA = new MemoryDisk();
+    diskA.files.set("closed.md", "Text.\n");
+    diskA.files.set("open.md", "Text.\n");
+    const a = await device("mac", diskA);
+    const b = await device("phone");
+    await eventually(() => expect(b.disk.files.get("open.md")).toBe("Text.\n"));
+    b.engine.destroy();
+    b.disk.files.set("closed.md", "");
+    const offline = await device("phone", b.disk, b.store, false);
+    await offline.disk.write("open.md", "");
+    await offline.engine.settle();
+    offline.engine.destroy();
+    const back = await device("phone", b.disk, b.store);
+    for (const disk of [a.disk, back.disk]) {
+      await eventually(() => expect([...disk.files].sort()).toEqual([["closed.md", ""], ["open.md", ""]]));
+    }
+  });
+
   it("keeps the authors of an identical copy it drops after two devices created one note", async () => {
     const { device } = await setup();
     const diskA = new MemoryDisk();

@@ -28,7 +28,7 @@ VaultTree.tla:
 
 ## Does my change touch this?
 
-Both models were last confirmed to describe the code at **67250b6** (sync commit).
+Both models were last confirmed to describe the code at **b6ec373** (sync commit).
 
 | Code | MarkdownFile.tla |
 | --- | --- |
@@ -36,7 +36,7 @@ Both models were last confirmed to describe the code at **67250b6** (sync commit
 | `applyDisk` (three-way merge on a fork at `base`) | `ApplyDisk`, `NewItems`, `DelItems`, `MergedBase` |
 | `onDiskModified` (reads again when a tracked write overlapped) | `ReadStarts`, `ReadRetries`, `ReadMerges` |
 | `trackWrite`, `recordEditorState`, `editorStates`; `quirks.ts` `wrapVaultWrites`, which sends only an identified editor save to `trackWrite` | `EditorSave`, `savedInRead` |
-| `bindEditor` (queued; waits for tracked saves, then merges the loaded text) and its release | `OpenPane`, `BindTask`, `Bind`, `ClosePane` |
+| `bindEditor` (queued; waits for tracked saves, then merges the loaded text unless it is the text `writeNow` last replaced and the file still holds the base) and its release | `OpenPane`, `BindTask`, `Bind`, `ClosePane` |
 | `scheduleWrite`, `writeNow`, `flush`; `obsidian.ts` `writeIfUnchanged`, `quirks.ts` `replaceIfHolds` | `ScheduleWrite`, `WriteTimerFires`, `WriteRuns` |
 | `SyncEngine.enqueue`, `onModify`, `trackWrite` | `queue`, `pc` |
 | `SyncEngine.check` (rereads a note through `onDiskModified`) | `CheckFires` |
@@ -49,9 +49,9 @@ Both models were last confirmed to describe the code at **67250b6** (sync commit
 | `settle`, `writeMirror` on close; `main.ts` `stopSync`, also when another sync tool is enabled | `Stop` |
 | `onCreate`, `onRename`, `onDelete` (with their stale-event checks), `retryTree` | `OnCreate`, `OnRename`, `OnDelete`, `Notify` |
 | `scheduleTree`, `syncTree` (trash, move, place, park, `treeIncomplete`), `changedHere` | `TreeTimer`, `TreeStart`, `TTrash`, `TPlace`, `TPark`, `TEnd` |
-| `MarkdownFile.reconcileDisk` (vacant placement, fresh-device conflict copy, `applyDisk`, a stale `Placement` does nothing) | `Reconcile`, `Merge` |
+| `MarkdownFile.reconcileDisk` (vacant placement, fresh-device conflict copy unless the file is blank, `applyDisk`, a stale `Placement` does nothing) | `Reconcile`, `Merge` |
 | `DiskMirror` (one id per path: `set` unplaces the id there before; each new path is a new `Placement`) | `Mirror`, `placement`, `PlacedAt`, `ReconcileAt`, `NewPlacements` |
-| `settleCollision`, `sameContent`, `dropDuplicate` (its `adoptText` with `keepText` changes who wrote text, never the text) | `Settle` |
+| `settleCollision`, `redundant` (the same text, or a blank note, winner or not), `dropDuplicate` (its `adoptText` with `keepText` changes who wrote text, never the text; a dropped note still on disk elsewhere stays mirrored, so the next pass trashes its file) | `Settle` |
 | `createFromDisk`; `VaultIndex.idOf`, `conflicts`; core `conflictPath` (`repairedConflictPath` never applies: model paths carry one suffix) | `Create`, `IdOf`, `LosersOf`, `ConflictPath` |
 | `conflict-plan.ts` `applyPlan` (trash a copy, including `dropSame`, which only teaches the original who wrote its text; rename it back; never a blank copy onto a missing original) | `UDelete`, `URename` |
 
@@ -99,6 +99,10 @@ Live probes in a real Obsidian found three more, in `binding.ts`, each now a che
 - **L3: a rename with a keystroke in progress doubled unsaved text** (NoDuplicate). The new path caused a rebind, which merged the pane's text over the base. Fix: a pane stays bound across renames.
 - **L4: unticking a task in reading view never reached the CRDT** (NothingLost). A click writes the file through `vault.modify` with the pane bound. Unticking put back a text in `editorStates`, so `trackWrite` took it for a late save, and the next save brought the tick back. Fix: `quirks.ts` `wrapVaultWrites` sends `trackWrite` only the writes it identifies as an editor's save. A click in reading view saves the view from inside the click's event, so `clickingTask` reports that save as local instead. Every local write is merged from the file like another program's edit; `wroteLocally` and `wasWrittenLocally` only decide that the merge is the human's. It is a replay in `disk-races.test.ts` and a check in `run.mjs`; MarkdownFile.tla assumes no such write while a pane is open.
 
+Issue #9 found one more in a real Obsidian. MarkdownFile.tla can't see it either: the pane's text was read from the file, but before the engine's own write.
+
+- **L5: a pane that showed a note before the engine wrote it undid that write** (NoRevert). At startup a pane was open on a note, often a blank daily note, and the engine wrote the synced text before Obsidian reloaded the pane. The pane then bound with the old text, which was merged as a deletion, and the reload merged the synced text back as unknown. Fix: `bindEditor` doesn't merge the text `writeNow` last replaced while the file still holds the base. An outside revert still merges, because the file then differs from the base. It is a replay in `disk-races.test.ts` and a check in `run.mjs`.
+
 VaultTree.tla's first runs found these, each a regression test in `convergence.test.ts`. Most are a vault event racing the same file's change from another device, as resolving conflict copies on one device does:
 
 - **T1: a note deleted elsewhere while this device was off came back** (NoResurrect). Fix: `scanDisk` trashes a file whose mirrored id the index dropped, unless edited here since (`untouchedSince`).
@@ -115,6 +119,10 @@ VaultTree.tla's first runs found these, each a regression test in `convergence.t
 - **T12: a file the user put where a note had just been placed became a duplicate conflict copy** (Converged). Fix: `reconcileDisk(vacant)` steps back and lets the vault event and the collision logic handle it.
 - **V1: a rename onto a name another device just created, while this device starts, left the renamed note off this disk** (Converged, two user actions). Device B is starting while device A creates `q`; B's user renames a note to `q` just as B's tree places A's `q`. The mirror held both ids at `q`, so the collision settled with B's disk missing `q` until the periodic check or a restart. Shortest path: `UCreate -> Stop -> Start -> Scan -> OnCreate -> TreeStart -> TPlace -> TreeTimer -> URename -> ...`. Fix: a path mirrors one id, so `DiskMirror.set` unplaces the id that was there. That alone left a reconcile queued for the unplaced note's old placement. It ran after the tree placed the note at its conflict path, wrote it there, and that placement's own reconcile then found the file and stepped back, so B's mirror lost the note. So each placement is a new `Placement`, and a reconcile queued for an older one does nothing. Each fix alone breaks Converged in a scratch copy of the model. Without the `Placement` check the path is `UCreate -> Stop -> Start -> Scan -> URename -> OnCreate -> TreeTimer -> TreeStart -> TPlace -> TEnd -> Reconcile -> OnRename -> ... -> Reconcile`. Replay: "keeps both paths when a startup placement races a local rename" in `convergence.test.ts`.
 
+Issue #9 found one more that the model couldn't see, because every create added text:
+
+- **B1: a blank daily note created before the synced note arrived became an empty conflict copy.** Fix: `reconcileDisk` writes the note over a blank file, and `settleCollision` drops a blank note, winner or not. Creates can now be blank. That made `Settle`'s drop branch reachable for the first time, and it broke Converged (`UCreate -> URename -> OnCreate -> OnRename -> ... -> Settle -> ...`) because the model unmirrored a dropped note that `dropDuplicate` keeps mirrored for the next pass to trash. The model was wrong there, not the code. Replays: the blank-note tests in `engine.test.ts`, and a check in `run.mjs`.
+
 ## Updating the models
 
 - **The code changed on purpose**: edit the matching actions so each one is still one run of code between awaits, keep the `engine.ts:NNN` comments in MarkdownFile.tla current, and keep the rules unchanged. Rerun both `check.sh` and both test files.
@@ -125,8 +133,8 @@ VaultTree.tla's first runs found these, each a regression test in `convergence.t
 
 ## Scope
 
-MarkdownFile.tla: every interleaving for one note, words `a` (initial), one remote edit, one typed word, one outside insert, one outside deletion, up to two pane openings, one sync-check reread (about 3.9M distinct states). Assumptions: Yjs merges a fork correctly; text is a set of unique words; other programs edit the file only while no pane has it open or unsaved; one pane at a time; base persistence never fails; an editor's save and `trackWrite`'s base update are one step; Obsidian saves a text the pane showed; `bindEditor`'s `loaded` is text Obsidian read from the file, which `binding.ts` has to ensure (L1-L3 below; `apps/obsidian/e2e/run.mjs` checks it).
+MarkdownFile.tla: every interleaving for one note, words `a` (initial), one remote edit, one typed word, one outside insert, one outside deletion, up to two pane openings, one sync-check reread (about 3.9M distinct states). Assumptions: Yjs merges a fork correctly; text is a set of unique words; other programs edit the file only while no pane has it open or unsaved; one pane at a time; base persistence never fails; an editor's save and `trackWrite`'s base update are one step; Obsidian saves a text the pane showed; `bindEditor`'s `loaded` is text Obsidian read from the file, which `binding.ts` has to ensure, and the file as it is after the engine's last write, which `bindEditor` ensures (L1-L3 and L5 below; `apps/obsidian/e2e/run.mjs` checks it).
 
-VaultTree.tla: two devices, three ids, two note names and their conflict copies, up to two user actions (create, rename, delete, or an outside edit while a device is off) and two clean closes (663,743 distinct states; fewer than before V1's fix, since no state has two ids mirrored at one path). Assumptions: the server relays index changes at once; a starting device sees the server's index before its scan; users act only between steps of a tree pass, not during its awaits; `settleCollision`'s content check and its change are one step; text is a set of tokens and `applyDisk` is a three-way merge on sets; files are markdown.
+VaultTree.tla: two devices, three ids, two note names and their conflict copies, up to two user actions (create, with text or blank, rename, delete, or an outside edit while a device is off) and two clean closes (663,743 distinct states; fewer than before V1's fix, since no state has two ids mirrored at one path). Assumptions: the server relays index changes at once; a starting device sees the server's index before its scan; users act only between steps of a tree pass, not during its awaits; `settleCollision`'s content check and its change are one step; text is a set of tokens and `applyDisk` is a three-way merge on sets; files are markdown.
 
 Not covered: notes whose content never reached the server (no document state; `writeNow` refuses to place them and `onCreate` adopts a file put at their path; every model note has state, so these branches never fire), tested in `engine.test.ts` instead; crashes (a stale mirror; `scanDisk`'s `movedAway` handles one case), offline starts (the scan reads a stale index), binaries, remote text edits racing tree moves, `SyncEngine.check`'s repairs, several panes on one note, a Vault API write by another plugin or a click on a task while a pane is open (merged like another program's edit; who wrote it is a label the rules don't read), the server and network, agent calls (`readText`, `updateText`, `updateIndex`, `arrived`), `main.ts` waiting for those calls before `Stop`, the conflict resolver's `replace` (`adoptCopy` with new text), and paths a disk or Obsidian can't hold: names differing only in case, a file also used as a folder, a colon, a dot name (model paths are plain and distinct; core refuses these only on an agent's `create`, through `pathClash` and `newNotePath`, not on a rename or on anything the engine reads from disk).

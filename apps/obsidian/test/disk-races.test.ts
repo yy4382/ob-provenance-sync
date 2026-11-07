@@ -198,3 +198,20 @@ it("attributes a note a plugin creates to the human", async () => {
   await engine.settle();
   expect(authors(engine.fileAt("b.md")!)).toEqual([["Template line.\n", "human:chris"]]);
 });
+
+// A pane opened the note before the engine wrote a remote edit to the file, and binds
+// before Obsidian reloads it. Its text is then the one that write replaced, so merging
+// it would undo the remote edit, and the reload would bring the text back as unknown.
+it("keeps a remote edit written while a pane still showed the old text", async () => {
+  const { engine, disk, file } = await offline("Base.");
+  insertText(file.ytext, 5, " Remote.", remote);
+  await file.flush();
+  expect(disk.files.get("a.md")).toBe("Base. Remote.");
+  await file.bindEditor(() => "Base.");
+  await engine.settle();
+  expect(file.ytext.toJSON()).toBe("Base. Remote.");
+  expect(authors(file)).toEqual([
+    ["Base.", "unknown"],
+    [" Remote.", "agent:x"],
+  ]);
+});
