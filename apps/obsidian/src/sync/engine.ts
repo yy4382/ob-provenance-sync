@@ -206,7 +206,8 @@ export class MarkdownFile {
   /**
    * Brings the file on disk and the CRDT together when the engine first
    * places it. A fresh device (no local history, content fetched from the
-   * server) keeps a differing local file as a conflict copy instead of merging.
+   * server) keeps a differing local file as a conflict copy instead of merging,
+   * unless it is blank.
    */
   async reconcileDisk(vacant = false, placement = this.engine.placementOf(this.id)): Promise<void> {
     const path = placement?.path;
@@ -226,6 +227,8 @@ export class MarkdownFile {
       return this.engine.retryTree();
     }
     if (!this.knownLocally && !this.createdHere && this.ytext.length > 0 && disk !== this.ytext.toJSON()) {
+      // A blank file holds nothing to keep: most likely a daily note created before its note synced.
+      if (blank(disk)) return this.writeNow(disk);
       const copy = conflictPath(path, this.id);
       this.engine.log("warn", `Kept this device's copy as ${copy}: it differs from the synced version (${difference(disk, this.ytext.toJSON())})`, path);
       await this.engine.createFromDisk(copy, disk, true);
@@ -441,6 +444,8 @@ class DiskMirror {
 }
 
 const short = (id: FileId) => id.slice(0, 8);
+
+const blank = (text: string) => text.trim() === "";
 
 const echoKey = (op: "rename" | "delete", ...paths: string[]) => [op, ...paths].join("\0");
 
@@ -930,7 +935,9 @@ export class SyncEngine implements VaultDocs {
   /**
    * Two devices created a file at the same path, and the smallest id keeps
    * it. If both hold the same content, the loser is dropped and the winner
-   * takes over its file on disk; otherwise the loser moves to a conflict copy.
+   * takes over its file on disk. A blank note is dropped the same way, winner
+   * or not, so the other note keeps the path. Otherwise the loser moves to a
+   * conflict copy.
    */
   private async settleCollision(loser: FileId): Promise<void> {
     if (this.settling.has(loser)) return;
@@ -944,11 +951,11 @@ export class SyncEngine implements VaultDocs {
       const winner = winnerOf();
       // No longer a loser (the winner moved or went): the pass that skipped it places it now.
       if (!winner) return this.scheduleTree();
-      const same = await this.sameContent(loser, winner);
+      const redundant = await this.redundant(loser, winner);
       await this.enqueue(async () => {
         const entry = this.vaultIndex.get(loser);
         if (!entry || winnerOf() !== winner) return;
-        if (same) await this.dropDuplicate(loser, winner);
+        if (redundant) await this.dropDuplicate(redundant, redundant === loser ? winner : loser);
         else {
           const copy = conflictPath(entry.path, loser);
           this.log("warn", `Two devices created ${entry.path} with different content; moved one to ${copy}`, entry.path);
@@ -961,40 +968,47 @@ export class SyncEngine implements VaultDocs {
     }
   }
 
-  private async sameContent(a: FileId, b: FileId): Promise<boolean> {
-    const ea = this.vaultIndex.get(a);
-    const eb = this.vaultIndex.get(b);
-    if (ea?.type !== "markdown" || eb?.type !== "markdown") return ea?.type === "binary" && eb?.type === "binary" && ea.hash === eb.hash;
-    const [fa, fb] = [this.openFile(a, false), this.openFile(b, false)];
-    await Promise.all([fa.ready, fb.ready]);
-    return fa.ytext.toJSON() === fb.ytext.toJSON();
+  /** Which of two colliding files can go without losing anything: the loser if both hold the same content, else a blank note. */
+  private async redundant(loser: FileId, winner: FileId): Promise<FileId | undefined> {
+    const el = this.vaultIndex.get(loser);
+    const ew = this.vaultIndex.get(winner);
+    if (el?.type !== "markdown" || ew?.type !== "markdown") return el?.type === "binary" && ew?.type === "binary" && el.hash === ew.hash ? loser : undefined;
+    const [fl, fw] = [this.openFile(loser, false), this.openFile(winner, false)];
+    await Promise.all([fl.ready, fw.ready]);
+    const [tl, tw] = [fl.ytext.toJSON(), fw.ytext.toJSON()];
+    // A blank note is most likely a daily note created before the other device's note synced.
+    if (tl === tw || blank(tl)) return loser;
+    return blank(tw) ? winner : undefined;
   }
 
-  private async dropDuplicate(loser: FileId, winner: FileId): Promise<void> {
-    const path = this.onDisk.get(loser);
-    const dropped = this.files.get(loser);
-    // Same text, but the loser may know who wrote parts the winner has as unknown, e.g. one device's copy was imported from disk.
-    if (dropped && this.vaultIndex.get(winner)?.type === "markdown") {
-      const kept = this.openFile(winner, false);
-      kept.doc.transact(() => adoptText(kept.ytext, dropped.ytext, true));
+  private async dropDuplicate(dropped: FileId, kept: FileId): Promise<void> {
+    const path = this.onDisk.get(dropped);
+    const file = this.files.get(dropped);
+    const droppedText = file?.ytext.toJSON();
+    // Same text, but the dropped copy may know who wrote parts the kept one has as unknown, e.g. one device's copy was imported from disk.
+    if (file && this.vaultIndex.get(kept)?.type === "markdown") {
+      const keptFile = this.openFile(kept, false);
+      keptFile.doc.transact(() => adoptText(keptFile.ytext, file.ytext, true));
     }
-    this.closeFile(loser);
-    // If the winner isn't on disk yet, it takes over the loser's file; otherwise the next pass trashes that file.
-    if (path !== undefined && !this.onDisk.has(winner)) {
-      this.onDisk.delete(loser);
-      this.onDisk.set(winner, path);
-      const entry = this.vaultIndex.get(winner)!;
-      if (entry.type === "binary") this.binaryHashes.set(winner, entry.hash);
+    this.closeFile(dropped);
+    // If the kept copy isn't on disk yet, it takes over the dropped copy's file; otherwise the next pass trashes that file.
+    if (path !== undefined && !this.onDisk.has(kept)) {
+      this.onDisk.delete(dropped);
+      this.onDisk.set(kept, path);
+      const entry = this.vaultIndex.get(kept)!;
+      if (entry.type === "binary") this.binaryHashes.set(kept, entry.hash);
       else {
-        const file = this.openFile(winner, false);
+        const keptFile = this.openFile(kept, false);
         const text = await this.opts.disk.read(path);
-        if (text === null) await file.writeNow(null);
-        else file.applyDisk(text);
+        if (text === null) await keptFile.writeNow(null);
+        // Still the dropped copy's text (a blank note's, if the copies differ): the kept text replaces it.
+        else if (text === droppedText) await keptFile.writeNow(text);
+        else keptFile.applyDisk(text);
       }
     }
-    this.binaryHashes.delete(loser);
-    this.vaultIndex.doc.transact(() => this.vaultIndex.delete(loser), FROM_DISK);
-    this.log("info", `Merged two identical copies of ${this.vaultIndex.get(winner)!.path} created on different devices`);
+    this.binaryHashes.delete(dropped);
+    this.vaultIndex.doc.transact(() => this.vaultIndex.delete(dropped), FROM_DISK);
+    this.log("info", `Dropped a redundant copy of ${this.vaultIndex.get(kept)!.path} created on another device`);
   }
 
   private openFile(id: FileId, createdHere: boolean): MarkdownFile {
