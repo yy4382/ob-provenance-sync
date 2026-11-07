@@ -775,13 +775,23 @@ try {
   await cdp.eval(`${plugin}.agentCalls.clear(); return true`);
   await eventually(async () => ob(["status"]).stdout.includes("Obsidian: reachable"));
 
-  // As Daily notes does when Obsidian opens before another device's daily note has synced.
+  // As Daily notes does when Obsidian opens before another device's daily note has synced: it creates the note and opens it.
   await cdp.eval(`await ${plugin}.stopSync(); return true`);
-  await opsCall({ op: "create", path: "Blank daily.md", content: "Written elsewhere.\n", by: { agent: "agent:andy", why: "agent" } });
-  await cdp.eval(`await app.vault.create("Blank daily.md", ""); return true`);
+  for (const path of ["Blank daily.md", "Blank open.md"]) {
+    await opsCall({ op: "create", path, content: "Written elsewhere.\n", by: { agent: "agent:andy", why: "agent" } });
+    await cdp.eval(`await app.vault.create(${JSON.stringify(path)}, ""); return true`);
+  }
+  await cdp.eval(`await app.workspace.getLeaf(true).openFile(app.vault.getAbstractFileByPath("Blank open.md")); return true`);
   await restarted();
-  const blankDaily = await eventually(async () => (readFileSync(join(vault, "Blank daily.md"), "utf8") === "Written elsewhere.\n" ? readdirSync(vault) : undefined));
-  check("a blank note created before sync gives way to the synced note, with no conflict copy", !!blankDaily && !blankDaily.some((f) => f.startsWith("Blank daily (conflict")), JSON.stringify(blankDaily ?? readdirSync(vault)));
+  for (const path of ["Blank daily.md", "Blank open.md"]) {
+    const done = await eventually(async () => (readFileSync(join(vault, path), "utf8") === "Written elsewhere.\n" ? readdirSync(vault) : undefined));
+    check(`a blank note created before sync gives way to the synced note, with no conflict copy (${path})`, !!done && !done.some((f) => f.startsWith(path.slice(0, -3) + " (conflict")), JSON.stringify(done ?? readdirSync(vault)));
+    await sleep(3000);
+    const kinds = (await opsCall({ op: "read", path, provenance: true })).result?.sentences?.map((s) => s.kind);
+    const log = await cdp.eval(`return ${plugin}.log.entries.filter((e) => e.path === ${JSON.stringify(path)}).map((e) => e.level + " " + e.message)`);
+    check(`the synced note keeps its author (${path})`, isDeepStrictEqual(kinds, ["agent"]), JSON.stringify({ kinds, log }));
+  }
+  await cdp.eval(`app.workspace.getLeavesOfType("markdown").filter((l) => l.view.file?.path === "Blank open.md").forEach((l) => l.detach()); return true`);
 
   const notesBefore = ob(["list"]).stdout;
   const unnamed = ob(["append", "--path", "Cli/shell.md", "--text", "lost", "--why", "agent", "--agent", "shell-agent"], { env: instance.env });
@@ -942,7 +952,7 @@ try {
     const notes = r.result.files.filter(
       (f) => !localApiSaved.has(f),
     ).filter(
-      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !f.startsWith("LocalApi-") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Linker.md", "DailyTemplate.md", "Tasks.md", "Blank daily.md"].includes(f),
+      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !f.startsWith("LocalApi-") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Linker.md", "DailyTemplate.md", "Tasks.md", "Blank daily.md", "Blank open.md"].includes(f),
     );
     return notes.join(",") === "Projects/Renamed.md" ? notes : undefined;
   }, 15000);

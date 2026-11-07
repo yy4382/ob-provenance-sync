@@ -175,6 +175,26 @@ describe("SyncEngine", () => {
     });
   }
 
+  it("keeps a note cleared on a device while it was offline, with Obsidian closed or open", async () => {
+    const { device } = await setup();
+    const diskA = new MemoryDisk();
+    diskA.files.set("closed.md", "Text.\n");
+    diskA.files.set("open.md", "Text.\n");
+    const a = await device("mac", diskA);
+    const b = await device("phone");
+    await eventually(() => expect(b.disk.files.get("open.md")).toBe("Text.\n"));
+    b.engine.destroy();
+    b.disk.files.set("closed.md", "");
+    const offline = await device("phone", b.disk, b.store, false);
+    await offline.disk.write("open.md", "");
+    await offline.engine.settle();
+    offline.engine.destroy();
+    const back = await device("phone", b.disk, b.store);
+    for (const disk of [a.disk, back.disk]) {
+      await eventually(() => expect([...disk.files].sort()).toEqual([["closed.md", ""], ["open.md", ""]]));
+    }
+  });
+
   it("keeps the authors of an identical copy it drops after two devices created one note", async () => {
     const { device } = await setup();
     const diskA = new MemoryDisk();
