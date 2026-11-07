@@ -5,7 +5,7 @@
 //   pnpm e2e                      (from the repo root; builds everything first)
 //   OBSIDIAN_BIN=/path/to/Obsidian KEEP=1 node apps/obsidian/e2e/run.mjs
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -775,6 +775,14 @@ try {
   await cdp.eval(`${plugin}.agentCalls.clear(); return true`);
   await eventually(async () => ob(["status"]).stdout.includes("Obsidian: reachable"));
 
+  // As Daily notes does when Obsidian opens before another device's daily note has synced.
+  await cdp.eval(`await ${plugin}.stopSync(); return true`);
+  await opsCall({ op: "create", path: "Blank daily.md", content: "Written elsewhere.\n", by: { agent: "agent:andy", why: "agent" } });
+  await cdp.eval(`await app.vault.create("Blank daily.md", ""); return true`);
+  await restarted();
+  const blankDaily = await eventually(async () => (readFileSync(join(vault, "Blank daily.md"), "utf8") === "Written elsewhere.\n" ? readdirSync(vault) : undefined));
+  check("a blank note created before sync gives way to the synced note, with no conflict copy", !!blankDaily && !blankDaily.some((f) => f.startsWith("Blank daily (conflict")), JSON.stringify(blankDaily ?? readdirSync(vault)));
+
   const notesBefore = ob(["list"]).stdout;
   const unnamed = ob(["append", "--path", "Cli/shell.md", "--text", "lost", "--why", "agent", "--agent", "shell-agent"], { env: instance.env });
   check("a call that names no vault refuses and lists them, even with one vault", unnamed.status === 2 && /--vault <name> or OB_PROVENANCE_VAULT.*vault \(id e2evault/.test(unnamed.stderr), JSON.stringify(unnamed));
@@ -934,7 +942,7 @@ try {
     const notes = r.result.files.filter(
       (f) => !localApiSaved.has(f),
     ).filter(
-      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !f.startsWith("LocalApi-") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Linker.md", "DailyTemplate.md", "Tasks.md"].includes(f),
+      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !f.startsWith("LocalApi-") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Linker.md", "DailyTemplate.md", "Tasks.md", "Blank daily.md"].includes(f),
     );
     return notes.join(",") === "Projects/Renamed.md" ? notes : undefined;
   }, 15000);
