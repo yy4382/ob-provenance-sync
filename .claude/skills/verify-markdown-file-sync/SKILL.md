@@ -36,7 +36,7 @@ Both models were last confirmed to describe the code at **0fd2b90** (sync commit
 | `applyDisk` (three-way merge on a fork at `base`) | `ApplyDisk`, `NewItems`, `DelItems`, `MergedBase` |
 | `onDiskModified` (reads again when a tracked write overlapped) | `ReadStarts`, `ReadRetries`, `ReadMerges` |
 | `trackWrite`, `recordEditorState`, `editorStates`; `quirks.ts` `wrapVaultWrites`, which sends only an identified editor save to `trackWrite` | `EditorSave`, `savedInRead` |
-| `bindEditor` (queued; waits for tracked saves, then merges the loaded text) and its release | `OpenPane`, `BindTask`, `Bind`, `ClosePane` |
+| `bindEditor` (queued; waits for tracked saves, then merges the loaded text unless it is the text `writeNow` last replaced and the file still holds the base) and its release | `OpenPane`, `BindTask`, `Bind`, `ClosePane` |
 | `scheduleWrite`, `writeNow`, `flush`; `obsidian.ts` `writeIfUnchanged`, `quirks.ts` `replaceIfHolds` | `ScheduleWrite`, `WriteTimerFires`, `WriteRuns` |
 | `SyncEngine.enqueue`, `onModify`, `trackWrite` | `queue`, `pc` |
 | `SyncEngine.check` (rereads a note through `onDiskModified`) | `CheckFires` |
@@ -99,6 +99,10 @@ Live probes in a real Obsidian found three more, in `binding.ts`, each now a che
 - **L3: a rename with a keystroke in progress doubled unsaved text** (NoDuplicate). The new path caused a rebind, which merged the pane's text over the base. Fix: a pane stays bound across renames.
 - **L4: unticking a task in reading view never reached the CRDT** (NothingLost). A click writes the file through `vault.modify` with the pane bound. Unticking put back a text in `editorStates`, so `trackWrite` took it for a late save, and the next save brought the tick back. Fix: `quirks.ts` `wrapVaultWrites` sends `trackWrite` only the writes it identifies as an editor's save. A click in reading view saves the view from inside the click's event, so `clickingTask` reports that save as local instead. Every local write is merged from the file like another program's edit; `wroteLocally` and `wasWrittenLocally` only decide that the merge is the human's. It is a replay in `disk-races.test.ts` and a check in `run.mjs`; MarkdownFile.tla assumes no such write while a pane is open.
 
+Issue #9 found one more in a real Obsidian. MarkdownFile.tla can't see it either: the pane's text was read from the file, but before the engine's own write.
+
+- **L5: a pane that showed a note before the engine wrote it undid that write** (NoRevert). At startup a pane was open on a note, often a blank daily note, and the engine wrote the synced text before Obsidian reloaded the pane. The pane then bound with the old text, which was merged as a deletion, and the reload merged the synced text back as unknown. Fix: `bindEditor` doesn't merge the text `writeNow` last replaced while the file still holds the base. An outside revert still merges, because the file then differs from the base. It is a replay in `disk-races.test.ts` and a check in `run.mjs`.
+
 VaultTree.tla's first runs found these, each a regression test in `convergence.test.ts`. Most are a vault event racing the same file's change from another device, as resolving conflict copies on one device does:
 
 - **T1: a note deleted elsewhere while this device was off came back** (NoResurrect). Fix: `scanDisk` trashes a file whose mirrored id the index dropped, unless edited here since (`untouchedSince`).
@@ -129,7 +133,7 @@ Issue #9 found one more that the model couldn't see, because every create added 
 
 ## Scope
 
-MarkdownFile.tla: every interleaving for one note, words `a` (initial), one remote edit, one typed word, one outside insert, one outside deletion, up to two pane openings, one sync-check reread (about 3.9M distinct states). Assumptions: Yjs merges a fork correctly; text is a set of unique words; other programs edit the file only while no pane has it open or unsaved; one pane at a time; base persistence never fails; an editor's save and `trackWrite`'s base update are one step; Obsidian saves a text the pane showed; `bindEditor`'s `loaded` is text Obsidian read from the file, which `binding.ts` has to ensure (L1-L3 below; `apps/obsidian/e2e/run.mjs` checks it).
+MarkdownFile.tla: every interleaving for one note, words `a` (initial), one remote edit, one typed word, one outside insert, one outside deletion, up to two pane openings, one sync-check reread (about 3.9M distinct states). Assumptions: Yjs merges a fork correctly; text is a set of unique words; other programs edit the file only while no pane has it open or unsaved; one pane at a time; base persistence never fails; an editor's save and `trackWrite`'s base update are one step; Obsidian saves a text the pane showed; `bindEditor`'s `loaded` is text Obsidian read from the file, which `binding.ts` has to ensure, and the file as it is after the engine's last write, which `bindEditor` ensures (L1-L3 and L5 below; `apps/obsidian/e2e/run.mjs` checks it).
 
 VaultTree.tla: two devices, three ids, two note names and their conflict copies, up to two user actions (create, with text or blank, rename, delete, or an outside edit while a device is off) and two clean closes (663,743 distinct states; fewer than before V1's fix, since no state has two ids mirrored at one path). Assumptions: the server relays index changes at once; a starting device sees the server's index before its scan; users act only between steps of a tree pass, not during its awaits; `settleCollision`'s content check and its change are one step; text is a set of tokens and `applyDisk` is a three-way merge on sets; files are markdown.
 

@@ -141,6 +141,8 @@ export class MarkdownFile {
   readonly ready: Promise<void>;
   private base: { snapshot: Y.Snapshot; text: string } | null = null;
   private readonly editorStates: Array<{ snapshot: Y.Snapshot; text: string }> = [];
+  /** The text writeNow last replaced on disk. */
+  private replaced: string | null = null;
   /** Tracked writes in flight, and a count bumped as each starts and lands, so a read that overlapped one reads again. */
   private readonly writes = new Set<Promise<unknown>>();
   private writeEvents = 0;
@@ -227,7 +229,7 @@ export class MarkdownFile {
       return this.engine.retryTree();
     }
     if (!this.knownLocally && !this.createdHere && this.ytext.length > 0 && disk !== this.ytext.toJSON()) {
-      // A blank file holds nothing to keep: most likely a daily note created before its note synced.
+      // A blank file holds nothing to keep, e.g. a daily note created before the note synced.
       if (blank(disk)) return this.writeNow(disk);
       const copy = conflictPath(path, this.id);
       this.engine.log("warn", `Kept this device's copy as ${copy}: it differs from the synced version (${difference(disk, this.ytext.toJSON())})`, path);
@@ -313,14 +315,17 @@ export class MarkdownFile {
    * While any editor is bound, the editor saves the file. `loaded` is the text
    * the host loaded into the first editor; it may hold another program's edit
    * whose modify event is still pending, so it is merged like a disk change
-   * before the editor is made to show the CRDT's text. A tracked save may have
-   * landed without becoming the base yet, so it waits for those first.
+   * before the editor is made to show the CRDT's text. A pane that read the
+   * file before writeNow's last write and hasn't reloaded it still holds the
+   * replaced text, which is not merged. A tracked save may have landed without
+   * becoming the base yet, so it waits for those first.
    */
   bindEditor(loaded: () => string | null = () => null): Promise<() => void> {
     return this.engine.enqueue(async () => {
       while (this.writes.size) await Promise.allSettled(this.writes);
       const text = this.editors === 0 && this.base ? loaded() : null;
-      if (text !== null && text !== this.base!.text) this.applyDisk(text);
+      const stale = async () => text === this.replaced && this.path !== undefined && (await this.engine.opts.disk.read(this.path)) === this.base!.text;
+      if (text !== null && text !== this.base!.text && !(await stale())) this.applyDisk(text);
       this.editors++;
       this.recordEditorState();
       let released = false;
@@ -373,6 +378,7 @@ export class MarkdownFile {
       void this.engine.enqueue(() => this.onDiskModified());
       return;
     }
+    this.replaced = expected;
     this.setBase(snapshot, text);
   }
 
@@ -976,7 +982,7 @@ export class SyncEngine implements VaultDocs {
     const [fl, fw] = [this.openFile(loser, false), this.openFile(winner, false)];
     await Promise.all([fl.ready, fw.ready]);
     const [tl, tw] = [fl.ytext.toJSON(), fw.ytext.toJSON()];
-    // A blank note is most likely a daily note created before the other device's note synced.
+    // A blank note holds nothing to keep, e.g. a daily note created before the other device's note synced.
     if (tl === tw || blank(tl)) return loser;
     return blank(tw) ? winner : undefined;
   }
