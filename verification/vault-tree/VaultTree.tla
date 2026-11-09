@@ -81,6 +81,7 @@ Files(d) == {p \in Paths : disk[d][p] /= {}}
 \* applyDisk's three-way merge of file text f into note i against device d's base.
 Merge(d, i, f) == (noteOf[i] \ (baseOf[d][i] \ f)) \cup (f \ baseOf[d][i])
 Write(c) == IF c = {} THEN {0} ELSE c      \* an empty note is still a file; token 0 is "no text"
+Blank(c) == c \subseteq {0}                \* engine.ts blank: a note or file with no text
 Tasks(kind, S) == LET f == CHOOSE f \in [1..Cardinality(S) -> S] : \A a, b \in DOMAIN f : f[a] = f[b] => a = b
                   IN [k \in DOMAIN f |-> <<kind, f[k]>>]
 \* The Placement that DiskMirror.set(i, p) leaves: the same object when i is already at p.
@@ -142,10 +143,13 @@ Engine0 == <<idx, noteOf, onDisk, baseOf, known, phase, mirror, mode, treeIdx, t
 \* handler (or it finds !started), and the startup scan sees the change instead.
 Enqueue(d, ev) == queue' = [queue EXCEPT ![d] = IF phase[d] = "on" THEN Append(@, ev) ELSE @]
 
+\* A create, with text or blank (a daily note without a template).
 UCreate(d, p) ==
     /\ userOps < MaxUserOps /\ p \in Originals /\ disk[d][p] = {}
-    /\ disk' = [disk EXCEPT ![d][p] = {nextTok}]
-    /\ nextTok' = nextTok + 1
+    /\ \/ /\ disk' = [disk EXCEPT ![d][p] = {nextTok}]
+          /\ nextTok' = nextTok + 1
+       \/ /\ disk' = [disk EXCEPT ![d][p] = {0}]
+          /\ UNCHANGED nextTok
     /\ userOps' = userOps + 1
     /\ Enqueue(d, <<"create", p>>)
     /\ UNCHANGED <<Engine0, userDeleted, deletedSets, touched>>
@@ -460,6 +464,11 @@ Reconcile(d) ==
                           /\ baseOf' = [baseOf EXCEPT ![d][i] = Write(noteOf[i])]
                           /\ Notify(d, idx)                                                     \* retryTree
                           /\ UNCHANGED <<idx, noteOf, onDisk, used>>
+                     ELSE IF i \notin known[d] /\ noteOf[i] /= {} /\ disk[d][path] /= noteOf[i] /\ Blank(disk[d][path])
+                     THEN \* a fresh device's blank file holds nothing to keep: writeNow(disk) writes the note
+                          /\ disk' = [disk EXCEPT ![d][path] = Write(noteOf[i])]
+                          /\ baseOf' = [baseOf EXCEPT ![d][i] = Write(noteOf[i])]
+                          /\ UNCHANGED <<idx, noteOf, onDisk, used, treeDue>>
                      ELSE IF i \notin known[d] /\ noteOf[i] /= {} /\ disk[d][path] /= noteOf[i]
                      THEN \* a fresh device keeps its differing file as a conflict copy (createFromDisk with
                           \* alsoWrite, which overwrites a file already there) and writes the note
@@ -499,23 +508,29 @@ Settle(d) ==
                /\ Pop(d)
                /\ treeDue' = [treeDue EXCEPT ![d] = TRUE]
                /\ UNCHANGED <<idx, noteOf, disk, onDisk, baseOf, known>>
-          ELSE /\ known' = [known EXCEPT ![d] = @ \cup {l, w}]                         \* sameContent opens both
+          ELSE LET \* redundant: the loser if both hold the same text or it is blank, else a blank winner
+                   x == IF noteOf[l] = noteOf[w] \/ Blank(noteOf[l]) THEN l ELSE IF Blank(noteOf[w]) THEN w ELSE 0
+                   k == IF x = l THEN w ELSE l
+                   at == onDisk[d][x]
+               IN
+               /\ known' = [known EXCEPT ![d] = @ \cup {l, w}]                         \* redundant opens both
                \* then runs syncTree itself
                /\ queue' = [queue EXCEPT ![d] = <<<<"tree">>>> \o Tail(@)]
-               /\ IF noteOf[l] = noteOf[w]
-                  THEN \* dropDuplicate: the winner takes over the loser's file if it has none
-                       /\ IF path /= NoPath /\ onDisk[d][w] = NoPath
-                          THEN /\ onDisk' = [onDisk EXCEPT ![d] = Mirror([onDisk[d] EXCEPT ![l] = NoPath], w, path)]
-                               /\ IF disk[d][path] = {}
-                                  THEN /\ disk' = [disk EXCEPT ![d][path] = Write(noteOf[w])]
-                                       /\ baseOf' = [baseOf EXCEPT ![d][w] = Write(noteOf[w])]
+               /\ IF x /= 0
+                  THEN \* dropDuplicate(x, k): the kept note takes over the dropped one's file if it has none
+                       /\ IF at /= NoPath /\ onDisk[d][k] = NoPath
+                          THEN /\ onDisk' = [onDisk EXCEPT ![d] = Mirror([onDisk[d] EXCEPT ![x] = NoPath], k, at)]
+                               /\ IF disk[d][at] = {} \/ disk[d][at] = Write(noteOf[x])
+                                  THEN \* writeNow: missing, or still the dropped note's text
+                                       /\ disk' = [disk EXCEPT ![d][at] = Write(noteOf[k])]
+                                       /\ baseOf' = [baseOf EXCEPT ![d][k] = Write(noteOf[k])]
                                        /\ UNCHANGED noteOf
-                                  ELSE /\ noteOf' = [noteOf EXCEPT ![w] = Merge(d, w, disk[d][path])]
-                                       /\ baseOf' = [baseOf EXCEPT ![d][w] = Write(noteOf'[w])]
-                                       /\ disk' = [disk EXCEPT ![d][path] = Write(noteOf'[w])]
-                          ELSE /\ onDisk' = [onDisk EXCEPT ![d][l] = NoPath]
-                               /\ UNCHANGED <<disk, noteOf, baseOf>>
-                       /\ idx' = [idx EXCEPT ![l] = NoPath]
+                                  ELSE /\ noteOf' = [noteOf EXCEPT ![k] = Merge(d, k, disk[d][at])]
+                                       /\ baseOf' = [baseOf EXCEPT ![d][k] = Write(noteOf'[k])]
+                                       /\ disk' = [disk EXCEPT ![d][at] = Write(noteOf'[k])]
+                          ELSE \* still mirrored, so the next pass trashes the dropped note's file
+                               UNCHANGED <<disk, onDisk, noteOf, baseOf>>
+                       /\ idx' = [idx EXCEPT ![x] = NoPath]
                        /\ Notify(d, idx')
                   ELSE /\ idx' = [idx EXCEPT ![l] = ConflictPath(idx[l], l)]
                        /\ Notify(d, idx')
