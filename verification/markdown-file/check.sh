@@ -66,25 +66,36 @@ tlc() {
 }
 
 # expect BROKEN: checks every rule; BROKEN lists the rules that must break.
+# All rules share one run, so the state space is explored once when they hold.
+# TLC stops at the first broken rule, so the rest get another run without it.
 expect() {
-  local broken="$1" rule got
-  for rule in $RULES; do
-    local want=holds
-    if [[ " $broken " == *" $rule "* ]]; then want=broken; fi
-    tlc "$rule" "$rule"
-    if grep -q "Invariant $rule is violated" "$WORK/$rule.out"; then got=broken
-    elif grep -q "No error has been found" "$WORK/$rule.out"; then got=holds
-    else echo "   $rule: TLC did not finish:"; tail -20 "$WORK/$rule.out"; FAILED=1; continue; fi
-    local mark="ok  "
-    if [[ "$got" != "$want" ]]; then mark="DIFF"; FAILED=1; fi
-    printf '   %s %-12s %-7s (expected %s)\n' "$mark" "$rule" "$got" "$want"
-    if [[ "$got" == broken ]]; then
-      echo "        shortest path: $(grep -E '^State [0-9]+: <' "$WORK/$rule.out" | sed -E 's/^State [0-9]+: <([A-Za-z]+).*/\1/' | grep -v Initial | paste -sd' ' - | sed 's/ / -> /g')"
-      if [[ $TRACE == 1 ]]; then sed -n '/is violated/,/^[0-9]* states generated/p' "$WORK/$rule.out"; fi
-    else
-      echo "        $(grep -E 'distinct states found' "$WORK/$rule.out" | tail -1)"
-    fi
+  local broken="$1" left="$RULES" run=0 rule out
+  while [[ -n "$left" ]]; do
+    run=$((run + 1)); out="$WORK/run$run.out"
+    tlc "run$run" $left
+    rule="$(grep -oE 'Invariant [A-Za-z]+ is violated' "$out" | head -1 | cut -d' ' -f2 || true)"
+    if [[ -n "$rule" && " $left " == *" $rule "* ]]; then
+      report "$rule" broken "$out"
+      left="$(echo " $left " | sed "s/ $rule / /" | xargs)"
+    elif [[ -z "$rule" ]] && grep -q "No error has been found" "$out"; then
+      for rule in $left; do report "$rule" holds "$out"; done
+      left=""
+    else echo "   TLC did not finish:"; tail -20 "$out"; FAILED=1; return; fi
   done
+}
+
+# report RULE GOT OUT: compares one rule's result with the expectation in $broken.
+report() {
+  local rule="$1" got="$2" out="$3" want=holds mark="ok  "
+  if [[ " $broken " == *" $rule "* ]]; then want=broken; fi
+  if [[ "$got" != "$want" ]]; then mark="DIFF"; FAILED=1; fi
+  printf '   %s %-12s %-7s (expected %s)\n' "$mark" "$rule" "$got" "$want"
+  if [[ "$got" == broken ]]; then
+    echo "        shortest path: $(grep -E '^State [0-9]+: <' "$out" | sed -E 's/^State [0-9]+: <([A-Za-z]+).*/\1/' | grep -v Initial | paste -sd' ' - | sed 's/ / -> /g')"
+    if [[ $TRACE == 1 ]]; then sed -n '/is violated/,/^[0-9]* states generated/p' "$out"; fi
+  else
+    echo "        $(grep -E 'distinct states found' "$out" | tail -1)"
+  fi
 }
 
 expect ""

@@ -3,7 +3,7 @@
 # SyncEngine in apps/obsidian/src/sync/engine.ts keeps it). Exit 0: every rule
 # behaves as recorded below.
 #
-# Usage: verification/markdown-file/check.sh [--trace]
+# Usage: verification/vault-tree/check.sh [--trace]
 #   --trace  print the full TLC counterexample of every broken rule
 #
 # Tools: TLC 1.7.4 and a Temurin 21 JRE, downloaded once with checksums into
@@ -56,46 +56,50 @@ cp "$HERE/VaultTree.tla" "$WORK/"
 RULES="Converged NoResurrect NothingLost"
 FAILED=0
 
-# tlc NAME RULE...: one TLC run over the model, checking these rules, with
-# extra CONSTANTS lines in $EXTRA (e.g. "MaxUserOps = 1").
+# tlc NAME RULE...: one TLC run over the model, checking these rules.
 # One worker finds the same shortest counterexample on every run.
 tlc() {
   local name="$1"; shift
   grep -v '^INVARIANT' "$HERE/VaultTree.cfg" > "$WORK/$name.cfg"
-  for line in ${EXTRA:+"$EXTRA"}; do
-    sed -i.bak "s/^    ${line%% =*} = .*/    $line/" "$WORK/$name.cfg"
-  done
   for rule in TypeOK "$@"; do echo "INVARIANT $rule" >> "$WORK/$name.cfg"; done
   (cd "$WORK" && "$JAVA" -XX:+UseParallelGC -cp "$CACHE/tla2tools.jar" tlc2.TLC -deadlock -workers 1 \
     -metadir "$WORK/states-$name" -config "$name.cfg" VaultTree.tla > "$name.out" 2>&1) || true
 }
 
 # expect BROKEN: checks every rule; BROKEN lists the rules that must break.
+# All rules share one run, so the state space is explored once when they hold.
+# TLC stops at the first broken rule, so the rest get another run without it.
 expect() {
-  local broken="$1" rule got
-  for rule in $RULES; do
-    local want=holds
-    if [[ " $broken " == *" $rule "* ]]; then want=broken; fi
-    tlc "$rule" "$rule"
-    if grep -q "Invariant $rule is violated" "$WORK/$rule.out"; then got=broken
-    elif grep -q "No error has been found" "$WORK/$rule.out"; then got=holds
-    else echo "   $rule: TLC did not finish:"; tail -20 "$WORK/$rule.out"; FAILED=1; continue; fi
-    local mark="ok  "
-    if [[ "$got" != "$want" ]]; then mark="DIFF"; FAILED=1; fi
-    printf '   %s %-12s %-7s (expected %s)\n' "$mark" "$rule" "$got" "$want"
-    if [[ "$got" == broken ]]; then
-      echo "        shortest path: $(grep -E '^State [0-9]+: <' "$WORK/$rule.out" | sed -E 's/^State [0-9]+: <([A-Za-z]+).*/\1/' | grep -v Initial | paste -sd' ' - | sed 's/ / -> /g')"
-      if [[ $TRACE == 1 ]]; then sed -n '/is violated/,/^[0-9]* states generated/p' "$WORK/$rule.out"; fi
-    else
-      echo "        $(grep -E 'distinct states found' "$WORK/$rule.out" | tail -1)"
-    fi
+  local broken="$1" left="$RULES" run=0 rule out
+  while [[ -n "$left" ]]; do
+    run=$((run + 1)); out="$WORK/run$run.out"
+    tlc "run$run" $left
+    rule="$(grep -oE 'Invariant [A-Za-z]+ is violated' "$out" | head -1 | cut -d' ' -f2 || true)"
+    if [[ -n "$rule" && " $left " == *" $rule "* ]]; then
+      report "$rule" broken "$out"
+      left="$(echo " $left " | sed "s/ $rule / /" | xargs)"
+    elif [[ -z "$rule" ]] && grep -q "No error has been found" "$out"; then
+      for rule in $left; do report "$rule" holds "$out"; done
+      left=""
+    else echo "   TLC did not finish:"; tail -20 "$out"; FAILED=1; return; fi
   done
 }
 
-echo "One user action, restarts:"
-EXTRA="MaxUserOps = 1" expect ""
-echo "Two user actions, restarts:"
-EXTRA="MaxUserOps = 2" expect ""
+# report RULE GOT OUT: compares one rule's result with the expectation in $broken.
+report() {
+  local rule="$1" got="$2" out="$3" want=holds mark="ok  "
+  if [[ " $broken " == *" $rule "* ]]; then want=broken; fi
+  if [[ "$got" != "$want" ]]; then mark="DIFF"; FAILED=1; fi
+  printf '   %s %-12s %-7s (expected %s)\n' "$mark" "$rule" "$got" "$want"
+  if [[ "$got" == broken ]]; then
+    echo "        shortest path: $(grep -E '^State [0-9]+: <' "$out" | sed -E 's/^State [0-9]+: <([A-Za-z]+).*/\1/' | grep -v Initial | paste -sd' ' - | sed 's/ / -> /g')"
+    if [[ $TRACE == 1 ]]; then sed -n '/is violated/,/^[0-9]* states generated/p' "$out"; fi
+  else
+    echo "        $(grep -E 'distinct states found' "$out" | tail -1)"
+  fi
+}
+
+expect ""
 
 if [[ $FAILED == 0 ]]; then echo "All results match the expectations."; else echo "Some results differ from the expectations (DIFF above)."; fi
 exit $FAILED

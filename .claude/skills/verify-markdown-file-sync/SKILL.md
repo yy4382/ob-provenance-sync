@@ -28,7 +28,7 @@ VaultTree.tla:
 
 ## Does my change touch this?
 
-Both models were last confirmed to describe the code at **b6ec373** (sync commit).
+Both models were last confirmed to describe the code at **b870bb8** (sync commit).
 
 | Code | MarkdownFile.tla |
 | --- | --- |
@@ -60,11 +60,11 @@ Run `git diff <sync commit> -- apps/obsidian/src/sync apps/obsidian/src/editor/b
 ## Run it
 
 ```sh
-verification/markdown-file/check.sh   # about 1 min; --trace prints full counterexamples
-verification/vault-tree/check.sh      # about 2 min
+verification/markdown-file/check.sh   # about 40 s; --trace prints full counterexamples
+verification/vault-tree/check.sh      # about 80 s
 ```
 
-The first run downloads TLC 1.7.4 and a Temurin 21 JRE (checksummed) into `~/.cache/ob-provenance-sync/tla`; set `JAVA=/path/to/java` to use your own. Each script checks every rule in its own run and compares the result with its expectation.
+The first run downloads TLC 1.7.4 and a Temurin 21 JRE (checksummed) into `~/.cache/ob-provenance-sync/tla`; set `JAVA=/path/to/java` to use your own. Each script checks every rule in one run of TLC, and runs again without a rule only when that rule breaks, then compares each result with its expectation.
 
 Exit 0 and "All results match the expectations." means the models, as written, behave as recorded. A `DIFF` line means something changed, with the shortest path that breaks the rule.
 
@@ -135,6 +135,6 @@ Issue #9 found one more that the model couldn't see, because every create added 
 
 MarkdownFile.tla: every interleaving for one note, words `a` (initial), one remote edit, one typed word, one outside insert, one outside deletion, up to two pane openings, one sync-check reread (about 3.9M distinct states). Assumptions: Yjs merges a fork correctly; text is a set of unique words; other programs edit the file only while no pane has it open or unsaved; one pane at a time; base persistence never fails; an editor's save and `trackWrite`'s base update are one step; Obsidian saves a text the pane showed; `bindEditor`'s `loaded` is text Obsidian read from the file, which `binding.ts` has to ensure, and the file as it is after the engine's last write, which `bindEditor` ensures (L1-L3 and L5 below; `apps/obsidian/e2e/run.mjs` checks it).
 
-VaultTree.tla: two devices, three ids, two note names and their conflict copies, up to two user actions (create, with text or blank, rename, delete, or an outside edit while a device is off) and two clean closes (663,743 distinct states; fewer than before V1's fix, since no state has two ids mirrored at one path). Assumptions: the server relays index changes at once; a starting device sees the server's index before its scan; users act only between steps of a tree pass, not during its awaits; `settleCollision`'s content check and its change are one step; text is a set of tokens and `applyDisk` is a three-way merge on sets; files are markdown.
+VaultTree.tla: two devices, three ids, two note names and their conflict copies, up to two user actions (create, with text or blank, rename, delete, or an outside edit while a device is off) and two clean closes (1,219,445 distinct states; blank creates, added for B1, made the space about twice as large). Assumptions: the server relays index changes at once; a starting device sees the server's index before its scan; users act only between steps of a tree pass, not during its awaits; `settleCollision`'s content check and its change are one step; text is a set of tokens and `applyDisk` is a three-way merge on sets; files are markdown.
 
 Not covered: notes whose content never reached the server (no document state; `writeNow` refuses to place them and `onCreate` adopts a file put at their path; every model note has state, so these branches never fire), tested in `engine.test.ts` instead; crashes (a stale mirror; `scanDisk`'s `movedAway` handles one case), offline starts (the scan reads a stale index), binaries, remote text edits racing tree moves, `SyncEngine.check`'s repairs, several panes on one note, a Vault API write by another plugin or a click on a task while a pane is open (merged like another program's edit; who wrote it is a label the rules don't read), the server and network, agent calls (`readText`, `updateText`, `updateIndex`, `arrived`), `main.ts` waiting for those calls before `Stop`, the conflict resolver's `replace` (`adoptCopy` with new text), and paths a disk or Obsidian can't hold: names differing only in case, a file also used as a folder, a colon, a dot name (model paths are plain and distinct; core refuses these only on an agent's `create`, through `pathClash` and `newNotePath`, not on a rename or on anything the engine reads from disk).
