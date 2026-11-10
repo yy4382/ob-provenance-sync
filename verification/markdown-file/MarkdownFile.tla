@@ -41,6 +41,8 @@ VARIABLES
     dirty,          \* the pane has changes Obsidian has not saved yet
     loaded,         \* what an opening pane shows: the file as Obsidian read it, plus typing
     loadedDirty,    \* the opening pane has typing Obsidian has not saved yet
+    reopen,         \* MarkdownFile.reopening: what a pane showed when it unbound with the note open
+    reopening,      \* reopen is set
     timer,          \* MarkdownFile.writeTimer is pending
     queue,          \* SyncEngine.queue: waiting tasks, "write", "modify" or "open"
     pc,             \* the running queued task: "idle" or "reading"
@@ -55,7 +57,7 @@ VARIABLES
 doc == <<items, dels>>
 pane == <<editors, opening, binds, editorStates, editorText, dirty, loaded, loadedDirty>>
 world == <<disk, pendingExt, created, intentDel, extDeletes, checks>>
-vars == <<doc, pane, world, base, timer, queue, pc, held, savedInRead>>
+vars == <<doc, pane, world, base, reopen, reopening, timer, queue, pc, held, savedInRead>>
 
 TextOf(s) == {i[1] : i \in s.items \ s.dels}
 Text == TextOf([items |-> items, dels |-> dels])
@@ -75,6 +77,8 @@ Init ==
     /\ dirty = FALSE
     /\ loaded = Initial
     /\ loadedDirty = FALSE
+    /\ reopen = base
+    /\ reopening = FALSE
     /\ timer = FALSE
     /\ queue = <<>>
     /\ pc = "idle"
@@ -108,6 +112,19 @@ MergedItems(d) == items \cup NewItems(d)                                        
 MergedDels(d) == dels \cup DelItems(d)
 MergedBase(d) == [items |-> base.items \cup NewItems(d), dels |-> base.dels \cup DelItems(d), text |-> d]  \* engine.ts:256
 
+\* mergeOver(b, d) for any ancestor b.
+OverItems(b, d, its) == its \cup {<<w, Cardinality({i \in its : i[1] = w}) + 1>> : w \in d \ b.text}
+OverDels(b, d, ds) == ds \cup {i \in b.items \ b.dels : i[1] \in b.text \ d}
+OverBase(b, d, its) ==
+    [items |-> b.items \cup {<<w, Cardinality({i \in its : i[1] = w}) + 1>> : w \in d \ b.text},
+     dels |-> b.dels \cup {i \in b.items \ b.dels : i[1] \in b.text \ d}, text |-> d]
+
+\* contains(a, b): state a holds every item and deletion of state b.
+Contains(a, b) == b.items \subseteq a.items /\ b.dels \subseteq a.dels
+
+\* MarkdownFile.ancestor: reopen while the base doesn't hold it, else the base.
+Ancestor == IF reopening /\ ~Contains(base, reopen) THEN reopen ELSE base
+
 (* applyDisk(d), engine.ts:240-258, as one synchronous step. *)
 ApplyDisk(d) ==
     IF d = Text                                                                        \* engine.ts:243
@@ -116,11 +133,11 @@ ApplyDisk(d) ==
     ELSE IF d = base.text                                                              \* engine.ts:245
     THEN /\ ScheduleWrite                                                              \* engine.ts:258
          /\ UNCHANGED <<items, dels, base, editorStates, editorText, dirty>>
-    ELSE LET is == MergedItems(d)
-             ds == MergedDels(d)
+    ELSE LET is == OverItems(Ancestor, d, items)
+             ds == OverDels(Ancestor, d, dels)
          IN /\ items' = is                                                             \* engine.ts:254
             /\ dels' = ds
-            /\ base' = MergedBase(d)                                                   \* engine.ts:256
+            /\ base' = OverBase(Ancestor, d, items)                                    \* engine.ts:256
             /\ IF is /= items \/ ds /= dels
                THEN ObservePane(is, ds)
                ELSE UNCHANGED <<editorStates, editorText, dirty>>
@@ -137,7 +154,8 @@ Reload(new) == IF opening THEN (loaded \cup (new \ disk)) \ (disk \ new) ELSE lo
 
 \* A remote update from Hocuspocus lands in the doc (provider origin, not FROM_DISK).
 RemoteInsert ==
-    \E w \in RemoteWords \ created :
+    /\ UNCHANGED <<reopen, reopening>>
+    /\ \E w \in RemoteWords \ created :
         /\ items' = items \cup {<<w, 1>>}
         /\ created' = created \cup {w}
         /\ Observe(items', dels)
@@ -146,7 +164,8 @@ RemoteInsert ==
 
 \* binding.ts push(): typing in the bound pane goes straight into the doc.
 Type ==
-    \E w \in TypedWords \ created :
+    /\ UNCHANGED <<reopen, reopening>>
+    /\ \E w \in TypedWords \ created :
         /\ editors > 0
         /\ items' = items \cup {<<w, 1>>}
         /\ created' = created \cup {w}
@@ -173,13 +192,32 @@ OpenPane ==
     /\ loaded' = disk
     /\ loadedDirty' = FALSE
     /\ queue' = Append(queue, "open")
-    /\ UNCHANGED <<doc, editors, editorStates, editorText, dirty, base, world, timer, pc, held, savedInRead>>
+    /\ UNCHANGED <<doc, editors, editorStates, editorText, dirty, base, reopen, reopening, world, timer, pc, held, savedInRead>>
+
+\* An editor stops syncing while its note stays open and binds again at once: binding.ts
+\* update() catching an error, or sync stopping. It passes release() what it shows, and
+\* keeps its text and unsaved typing; release() schedules a write.
+Unbind ==
+    /\ editors = 1
+    /\ binds < MaxBinds
+    /\ binds' = binds + 1
+    /\ editors' = 0
+    /\ opening' = TRUE
+    /\ loaded' = editorText
+    /\ loadedDirty' = dirty
+    /\ dirty' = FALSE
+    /\ reopen' = State
+    /\ reopening' = TRUE
+    /\ timer' = TRUE
+    /\ queue' = Append(queue, "open")
+    /\ UNCHANGED <<doc, editorStates, editorText, base, world, pc, held, savedInRead>>
 
 \* Typing in a pane whose bind is still queued: binding.ts push() needs `release`, so the
 \* CRDT gets none of it until bindEditor reads the pane's text. Obsidian loads a note only
 \* after the leaving note's save, so no earlier pane still has a save to make.
 TypeOpening ==
-    \E w \in TypedWords \ created :
+    /\ UNCHANGED <<reopen, reopening>>
+    /\ \E w \in TypedWords \ created :
         /\ opening /\ ~dirty
         /\ loaded' = loaded \cup {w}
         /\ loadedDirty' = TRUE
@@ -189,6 +227,7 @@ TypeOpening ==
 
 \* binding.ts detach() -> release(), engine.ts:324-329. editorStates is kept.
 ClosePane ==
+    /\ UNCHANGED <<reopen, reopening>>
     /\ editors = 1
     /\ editors' = 0
     /\ timer' = TRUE                                                                   \* engine.ts:328
@@ -201,6 +240,7 @@ ClosePane ==
 \* saved text becomes the base as the save lands, and a read it overlapped reads again.
 \* The save fires "modify" (obsidian.ts:36 -> SyncEngine.onModify, engine.ts:1184).
 EditorSave ==
+    /\ UNCHANGED <<reopen, reopening>>
     /\ dirty
     /\ disk' = editorText
     /\ loaded' = Reload(disk')
@@ -215,6 +255,7 @@ EditorSave ==
 \* base. The save was in flight from when Obsidian picked its text (quirks.ts started ->
 \* saveStarted), so reads wait for it, and it lands as one step.
 LoadedSave ==
+    /\ UNCHANGED <<reopen, reopening>>
     /\ loadedDirty
     /\ disk' = loaded
     /\ loadedDirty' = FALSE
@@ -223,11 +264,12 @@ LoadedSave ==
     /\ UNCHANGED <<doc, editors, opening, binds, editorStates, editorText, dirty, loaded, base, timer, pc, held,
                    pendingExt, created, intentDel, extDeletes, checks>>
 
-\* Assumption: other programs edit the note only while no pane has it open or unsaved;
-\* otherwise Obsidian's own editor can overwrite them, with or without this plugin.
+\* Assumption: other programs edit the note only while no pane has it open or unsaved,
+\* bound or not; otherwise Obsidian's own editor can overwrite them, with or without this plugin.
 ExternalAdd ==
-    \E w \in ExternalWords \ created :
-        /\ editors = 0 /\ ~dirty
+    /\ UNCHANGED <<reopen, reopening>>
+    /\ \E w \in ExternalWords \ created :
+        /\ editors = 0 /\ ~opening /\ ~dirty
         /\ disk' = disk \cup {w}
         /\ loaded' = Reload(disk')
         /\ created' = created \cup {w}
@@ -236,8 +278,9 @@ ExternalAdd ==
                        queue, pc, held, savedInRead, intentDel, extDeletes, checks>>
 
 ExternalDelete ==
-    \E w \in disk :
-        /\ editors = 0 /\ ~dirty
+    /\ UNCHANGED <<reopen, reopening>>
+    /\ \E w \in disk :
+        /\ editors = 0 /\ ~opening /\ ~dirty
         /\ extDeletes < MaxExternalDeletes
         /\ disk' = disk \ {w}
         /\ loaded' = Reload(disk')
@@ -249,6 +292,7 @@ ExternalDelete ==
 
 \* Obsidian's file watcher notices another program's edit and fires "modify".
 WatcherFires ==
+    /\ UNCHANGED <<reopen, reopening>>
     /\ pendingExt > 0
     /\ pendingExt' = pendingExt - 1
     /\ queue' = Append(queue, "modify")
@@ -257,6 +301,7 @@ WatcherFires ==
 \* SyncEngine.check (engine.ts:1098) finds the file differing from the CRDT, at any time,
 \* and calls onDiskModified in its queued task (engine.ts:1134), like a "modify" event.
 CheckFires ==
+    /\ UNCHANGED <<reopen, reopening>>
     /\ checks < MaxChecks
     /\ checks' = checks + 1
     /\ queue' = Append(queue, "modify")
@@ -268,6 +313,7 @@ Next1(kind) == pc = "idle" /\ queue /= <<>> /\ Head(queue) = kind
 
 \* The 200 ms debounce elapses: engine.ts:348-351.
 WriteTimerFires ==
+    /\ UNCHANGED <<reopen, reopening>>
     /\ timer
     /\ timer' = FALSE
     /\ queue' = Append(queue, "write")
@@ -278,6 +324,7 @@ WriteTimerFires ==
 (* program changed it: nothing is written, and the file is read and merged (engine.ts:370), *)
 (* which schedules the write again.                                                         *)
 WriteRuns ==
+    /\ UNCHANGED <<reopen, reopening>>
     /\ Next1("write")
     /\ IF editors > 0 \/ base.text = Text                                              \* engine.ts:361, 361
        THEN /\ queue' = Tail(queue)
@@ -294,6 +341,7 @@ WriteRuns ==
 
 \* onModify -> onDiskModified up to the read's await: engine.ts:1184-1192, 265-271.
 ReadStarts ==
+    /\ UNCHANGED <<reopen, reopening>>
     /\ Next1("modify")
     /\ queue' = Tail(queue)
     /\ pc' = "reading"
@@ -303,6 +351,7 @@ ReadStarts ==
 
 \* A save landed while the read awaited: read again, engine.ts:281-282.
 ReadRetries ==
+    /\ UNCHANGED <<reopen, reopening>>
     /\ pc = "reading"
     /\ savedInRead
     /\ held' = disk
@@ -311,6 +360,7 @@ ReadRetries ==
 
 \* Otherwise the read text is merged against the base: engine.ts:282.
 ReadMerges ==
+    /\ UNCHANGED <<reopen, reopening>>
     /\ pc = "reading"
     /\ ~savedInRead
     /\ ApplyDisk(held)
@@ -318,31 +368,33 @@ ReadMerges ==
     /\ UNCHANGED <<editors, opening, binds, loaded, loadedDirty, world, queue, held, savedInRead>>
 
 (* bindEditor's queued task. It merges the file through onDiskModified (as one step: its   *)
-(* read retries while a save is in flight), then the pane's text as an edit of the file's  *)
-(* with mergeOver, which leaves the base at the file's text. OpenPane needs editors = 0, so *)
+(* read retries while a save is in flight), then the pane's text with mergeOver, both as   *)
+(* edits of the ancestor, and forgets reopen. OpenPane and Unbind leave editors = 0, so    *)
 (* every bind here is a first pane's.                                                       *)
 BindTask ==
     /\ Next1("open")
     /\ queue' = Tail(queue)
     /\ opening' = FALSE
     /\ LET merge == disk /= base.text /\ disk /= Text                                   \* applyDisk
-           is1 == IF merge THEN MergedItems(disk) ELSE items
-           ds1 == IF merge THEN MergedDels(disk) ELSE dels
-           b1 == IF merge THEN MergedBase(disk) ELSE IF disk = Text THEN State ELSE base
+           is1 == IF merge THEN OverItems(Ancestor, disk, items) ELSE items
+           ds1 == IF merge THEN OverDels(Ancestor, disk, dels) ELSE dels
+           b1 == IF merge THEN OverBase(Ancestor, disk, items) ELSE IF disk = Text THEN State ELSE base
+           from == IF reopening /\ ~Contains(b1, reopen) THEN reopen ELSE b1
            t1 == TextOf([items |-> is1, dels |-> ds1])
-           over == loaded /= t1 /\ loaded /= b1.text                                     \* mergeOver(base, loaded)
-           is == IF over THEN is1 \cup {<<w, Cardinality({i \in is1 : i[1] = w}) + 1>> : w \in loaded \ b1.text} ELSE is1
-           ds == IF over THEN ds1 \cup {i \in b1.items \ b1.dels : i[1] \in b1.text \ loaded} ELSE ds1
+           over == loaded /= t1 /\ loaded /= from.text                                   \* mergeOver(ancestor, loaded)
+           is == IF over THEN OverItems(from, loaded, is1) ELSE is1
+           ds == IF over THEN OverDels(from, loaded, ds1) ELSE ds1
        IN /\ items' = is
           /\ dels' = ds
           /\ base' = b1
           /\ timer' = IF disk /= Text /\ (disk = base.text \/ t1 /= disk) THEN TRUE ELSE timer
           /\ Bind(is, ds)
+    /\ reopening' = FALSE
     /\ loadedDirty' = FALSE
-    /\ UNCHANGED <<binds, loaded, world, pc, held, savedInRead>>
+    /\ UNCHANGED <<binds, loaded, reopen, world, pc, held, savedInRead>>
 
 Reader ==
-    RemoteInsert \/ Type \/ TypeOpening \/ OpenPane \/ ClosePane \/ ExternalAdd \/ ExternalDelete
+    RemoteInsert \/ Type \/ TypeOpening \/ OpenPane \/ Unbind \/ ClosePane \/ ExternalAdd \/ ExternalDelete
 
 System ==
     \/ EditorSave \/ LoadedSave \/ WatcherFires \/ CheckFires \/ WriteTimerFires \/ WriteRuns
@@ -369,5 +421,5 @@ NothingLost == Settled => (disk = Text /\ Text = created \ intentDel)
 TypeOK ==
     /\ editors \in 0..1
     /\ pc \in {"idle", "reading"}
-    /\ timer \in BOOLEAN /\ dirty \in BOOLEAN /\ opening \in BOOLEAN /\ loadedDirty \in BOOLEAN
+    /\ timer \in BOOLEAN /\ dirty \in BOOLEAN /\ opening \in BOOLEAN /\ loadedDirty \in BOOLEAN /\ reopening \in BOOLEAN
 =============================================================================

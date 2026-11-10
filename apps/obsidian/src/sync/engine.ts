@@ -121,6 +121,20 @@ const SAVED_STATES = 64;
 
 const MIRROR_KEY = "on-disk";
 
+/** A state of a note's CRDT and its text. */
+export type TextState = { snapshot: Y.Snapshot; text: string };
+
+/** Whether state `a` holds everything state `b` does: each of its items and each of its deletions. */
+function contains(a: Y.Snapshot, b: Y.Snapshot): boolean {
+  for (const [client, clock] of b.sv) if ((a.sv.get(client) ?? 0) < clock) return false;
+  for (const [client, ranges] of b.ds.clients) {
+    for (const { clock, len } of ranges) {
+      for (let c = clock; c < clock + len; c++) if (!Y.isDeleted(a.ds, Y.createID(client, c))) return false;
+    }
+  }
+  return true;
+}
+
 /**
  * One markdown file's CRDT replica.
  *
@@ -142,6 +156,11 @@ export class MarkdownFile {
   readonly ready: Promise<void>;
   private base: { snapshot: Y.Snapshot; text: string } | null = null;
   private readonly editorStates: Array<{ snapshot: Y.Snapshot; text: string }> = [];
+  /**
+   * What an editor showed when it stopped syncing with the note still open, until it binds
+   * again. Its saves meanwhile, and its text then, are edits of this state.
+   */
+  private reopening: TextState | null = null;
   /** The text writeNow last replaced on disk. */
   private replaced: string | null = null;
   /** Tracked writes in flight, and a count bumped as each starts and lands, so a read that overlapped one reads again. */
@@ -193,6 +212,11 @@ export class MarkdownFile {
     this.provider = this.engine.connect(name, this.doc);
     if (!this.knownLocally && !this.createdHere && this.provider) await synced(this.provider);
     this.loaded = true;
+  }
+
+  /** The CRDT's state now, as an editor showing it could pass back to `bindEditor`. */
+  textState(): TextState {
+    return { snapshot: Y.snapshot(this.doc), text: this.ytext.toJSON() };
   }
 
   /** The text this device last had on disk for the file. */
@@ -249,15 +273,25 @@ export class MarkdownFile {
     if (disk === current) return this.setBase(Y.snapshot(this.doc), disk);
     const base = this.base ?? { snapshot: Y.snapshot(this.doc), text: current };
     if (disk !== base.text) {
-      this.engine.log("debug", `Merging a change made on disk into note ${short(this.id)} (${difference(base.text, disk)})`, this.path);
+      const from = this.ancestor() ?? base;
+      this.engine.log("debug", `Merging a change made on disk into note ${short(this.id)} (${difference(from.text, disk)})`, this.path);
       const by = this.engine.wasWrittenLocally(this.path, base.text, disk) ? this.human() : this.unknown();
-      this.setBase(this.mergeOver(base, disk, by), disk);
+      this.setBase(this.mergeOver(from, disk, by), disk);
     }
     if (this.ytext.toJSON() !== disk) this.scheduleWrite();
   }
 
+  /**
+   * What the file's and an editor's text are edits of: the base, or the state an editor
+   * showed when it stopped syncing with the note still open, while the base doesn't hold it.
+   */
+  private ancestor(): TextState | null {
+    const shown = this.reopening;
+    return shown && !(this.base && contains(this.base.snapshot, shown.snapshot)) ? shown : this.base;
+  }
+
   /** Merges `text` as `by`'s edit of `base`'s text, and returns the state that edit made of the base. */
-  private mergeOver(base: { snapshot: Y.Snapshot; text: string }, text: string, by: Provenance): Y.Snapshot {
+  private mergeOver(base: TextState, text: string, by: Provenance): Y.Snapshot {
     const fork = Y.createDocFromSnapshot(this.doc, base.snapshot);
     const before = Y.encodeStateVector(fork);
     fork.transact(() => setText(fork.getText(TEXT_KEY), text, by, "literal"));
@@ -349,21 +383,30 @@ export class MarkdownFile {
    * and the editor pushing its edits. A pane that read the file before
    * writeNow's last write and hasn't reloaded it still holds the replaced
    * text, which is not merged.
+   *
+   * `shown` is the state an editor showed when it stopped syncing with its
+   * note still open, as after an error or a restart of sync, which release
+   * also takes. Its text and its saves since are edits of that state, which
+   * already holds what it typed before, so they are merged against it.
    */
-  bindEditor(loaded: () => string | null = () => null): Promise<() => void> {
+  bindEditor(loaded: () => string | null = () => null, shown: TextState | null = null): Promise<(shown?: TextState) => void> {
     return this.engine.enqueue(async () => {
+      if (shown && this.editors === 0 && textAt(this.doc, shown.snapshot) === shown.text) this.reopening = shown;
       if (this.editors === 0 && this.base) await this.onDiskModified();
       const text = this.editors === 0 && this.base ? loaded() : null;
-      if (text !== null && text !== this.ytext.toJSON() && text !== this.base!.text && text !== this.replaced) {
-        this.engine.log("debug", `Merging the open editor's unsaved text into note ${short(this.id)} (${difference(this.base!.text, text)})`, this.path);
-        this.mergeOver(this.base!, text, this.human());
+      const from = this.ancestor();
+      if (text !== null && from && text !== this.ytext.toJSON() && text !== from.text && text !== this.replaced) {
+        this.engine.log("debug", `Merging the open editor's unsaved text into note ${short(this.id)} (${difference(from.text, text)})`, this.path);
+        this.mergeOver(from, text, this.human());
       }
+      this.reopening = null;
       this.editors++;
       this.recordEditorState();
       let released = false;
-      return () => {
+      return (shown?: TextState) => {
         if (released) return;
         released = true;
+        if (shown) this.reopening = shown;
         this.editors--;
         this.scheduleWrite();
       };
@@ -410,6 +453,7 @@ export class MarkdownFile {
       void this.engine.enqueue(() => this.onDiskModified());
       return;
     }
+    else this.engine.log("debug", "Wrote the synced text to the file", path);
     this.replaced = expected;
     this.setBase(snapshot, text);
   }

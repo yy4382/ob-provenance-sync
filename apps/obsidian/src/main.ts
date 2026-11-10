@@ -13,6 +13,7 @@ import { httpBlobs, indexedDbPersistence, indexedDbStored, isSyncedPath, Obsidia
 
 const CHECK_EVERY = 10 * 60_000;
 const OTHER_SYNC_CHECK_EVERY = 5_000;
+const LOG_SAVE_AFTER = 5_000;
 const AGENT_CALL_LIMIT = 15_000;
 const LEGACY_TOKEN_SECRET = "provenance-sync-device-token";
 
@@ -55,7 +56,8 @@ export default class ProvenancePlugin extends Plugin {
     }
     await this.saveSettings();
     this.addSettingTab(new ProvenanceSettingTab(this.app, this));
-    this.registerEditorExtension(provenanceExtension(() => this.engine));
+    this.registerEditorExtension(provenanceExtension(() => this.engine, (event) => this.log.add(event)));
+    void this.keepLog();
     this.applyColors();
     if (!Platform.isMobile) {
       this.statusEl = this.addStatusBarItem();
@@ -127,6 +129,31 @@ export default class ProvenancePlugin extends Plugin {
 
   onunload() {
     void this.restarting.then(() => this.stopSync());
+  }
+
+  /**
+   * Saves the event log in the plugin's folder a few seconds after it changes,
+   * and keeps the previous session's, so a report can come after a restart.
+   */
+  private async keepLog() {
+    const { adapter } = this.app.vault;
+    const file = `${this.manifest.dir}/sync-log.txt`;
+    try {
+      if (await adapter.exists(file)) await adapter.write(`${this.manifest.dir}/sync-log.previous.txt`, await adapter.read(file));
+    } catch (e) {
+      this.log.add({ level: "warn", message: `Could not keep the previous session's log: ${errorMessage(e)}` });
+    }
+    let timer: number | null = null;
+    const save = () => {
+      timer = null;
+      adapter.write(file, this.log.toText()).catch(() => undefined);
+    };
+    this.register(this.log.subscribe(() => void (timer ??= window.setTimeout(save, LOG_SAVE_AFTER))));
+    this.register(() => {
+      if (timer === null) return;
+      window.clearTimeout(timer);
+      save();
+    });
   }
 
   async openLog() {
@@ -259,6 +286,9 @@ export default class ProvenancePlugin extends Plugin {
     // ob-provenance stops waiting by then, and sync must be able to come back whatever a call is stuck on.
     await within(Promise.allSettled(this.agentCalls), AGENT_CALL_LIMIT, []);
     if (this.engine) {
+      // Each open note is saved while its editor still syncs, so the file is the base the next
+      // engine starts from, and what is typed until it binds again merges from the file once.
+      await Promise.allSettled(this.app.workspace.getLeavesOfType("markdown").map((leaf) => (leaf.view as MarkdownView).save()));
       await this.engine.settle();
       this.engine.destroy();
     }

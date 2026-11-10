@@ -78,6 +78,8 @@ Two commands change who text is attributed to without changing the text. Both wo
 
 Edits made to files outside Obsidian are never lost. When the plugin next sees them, they are recorded as `unknown` and merged with everyone else's changes. Don't run another sync tool (Obsidian Sync, remotely-save, iCloud) on the same vault. Their edits would show up as unknown, and they can fight with this plugin.
 
+If something looks wrong, open the sync event log from the ribbon (**Open sync event log**) and use **Copy log**. The plugin also saves the log to `sync-log.txt` in its folder (`.obsidian/plugins/provenance-sync/`) a few seconds after each event, and keeps the previous session's as `sync-log.previous.txt`, so you can still send it after restarting Obsidian.
+
 ### 3. Connect agents
 
 **On the computer running Obsidian,** do these in each vault agents should reach. A vault with **Agent CLI** off is invisible to them.

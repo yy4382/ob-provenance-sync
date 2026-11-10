@@ -5,7 +5,7 @@ import diff from "fast-diff";
 import type { TFile } from "obsidian";
 import type * as Y from "yjs";
 import { editKind, fileLoadedInto, fileNamedBy } from "../quirks";
-import type { MarkdownFile, SyncEngine } from "../sync/engine";
+import type { MarkdownFile, SyncEngine, SyncEvent, TextState } from "../sync/engine";
 
 const fromYjs = Annotation.define<boolean>();
 const refresh = StateEffect.define<null>();
@@ -49,6 +49,7 @@ function diffChanges(from: string, to: string): ChangeSpec[] {
 
 let currentEngine: () => SyncEngine | null = () => null;
 const engine = () => currentEngine();
+let log: (event: SyncEvent) => void = () => {};
 
 class ProvenanceView {
   decorations: DecorationSet = Decoration.none;
@@ -62,9 +63,11 @@ class ProvenanceView {
    * binding would merge as a deletion.
    */
   private readonly loaded: TFile | null;
-  release: (() => void) | null = null;
+  release: ((shown?: TextState) => void) | null = null;
   /** Identifies the current attachment, so a binding that resolves after the pane moved on is released. */
   private attached: object | null = null;
+  /** What this editor showed when it stopped syncing with its note still open, for binding again. */
+  private shown: { file: MarkdownFile["id"]; state: TextState } | null = null;
   private readonly observer = (event: Y.YTextEvent, tr: Y.Transaction) => this.onYjs(event, tr);
 
   constructor(readonly view: EditorView) {
@@ -89,7 +92,11 @@ class ProvenanceView {
     if (shown && this.file && engine()?.files.get(this.file.id) === this.file) return;
     const file = shown ? (engine()?.fileAt(shown.path) ?? null) : null;
     if (file === this.file) return;
-    this.detach();
+    if (this.file) {
+      const why = !shown ? "the pane no longer shows it" : !engine() ? "sync stopped" : "sync has another note at its path";
+      log({ level: "debug", message: `An editor stopped syncing this note: ${why}`, path: shown?.path ?? this.file.path });
+    }
+    this.detach(shown && !engine() ? this.keepShown() : undefined);
     if (!file) return;
     this.file = file;
     let set = panes.get(file);
@@ -98,11 +105,14 @@ class ProvenanceView {
     file.ytext.observe(this.observer);
     const attached = (this.attached = {});
     const current = () => (this.attached === attached ? this.view.state.doc.toString() : null);
+    const shownState = this.shown?.file === file.id ? this.shown.state : null;
+    this.shown = null;
     void file.ready
-      .then(() => file.bindEditor(current))
+      .then(() => file.bindEditor(current, shownState))
       .then((release) => {
         if (this.attached !== attached) return release();
         this.release = release;
+        log({ level: "debug", message: "An editor syncs this note", path: file.path });
         if (this.primary) this.loadFromCrdt();
         this.scheduleRefresh();
       });
@@ -114,14 +124,15 @@ class ProvenanceView {
     if (changes.length) this.view.dispatch({ changes, annotations: [fromYjs.of(true), Transaction.addToHistory.of(false)] });
   }
 
-  private detach() {
+  /** `shown` is what the editor showed, when it stops syncing with its note still open. */
+  private detach(shown?: TextState) {
     const file = this.file;
     if (!file) return;
     file.ytext.unobserve(this.observer);
     const wasPrimary = this.primary;
     const set = panes.get(file)!;
     set.delete(this);
-    this.release?.();
+    this.release?.(shown);
     this.release = null;
     this.attached = null;
     this.file = null;
@@ -150,12 +161,28 @@ class ProvenanceView {
   }
 
   update(u: ViewUpdate) {
-    this.attach();
-    const file = this.file;
-    if (!file) return;
-    const own = u.transactions.filter((tr) => tr.docChanged && !tr.annotation(fromYjs));
-    if (own.length && this.release) this.push(own, file);
-    if (u.docChanged || u.transactions.some((tr) => tr.effects.some((e) => e.is(refresh)))) this.computeDecorations();
+    try {
+      this.attach();
+      const file = this.file;
+      if (!file) return;
+      const own = u.transactions.filter((tr) => tr.docChanged && !tr.annotation(fromYjs));
+      if (own.length && this.release) this.push(own, file);
+      if (u.docChanged || u.transactions.some((tr) => tr.effects.some((e) => e.is(refresh)))) this.computeDecorations();
+    } catch (e) {
+      // Rethrowing would make CodeMirror drop this plugin for good, leaving the editor
+      // unsynced while the engine writes the file under it and Obsidian merges that into
+      // its unsaved typing. Binding again at once merges what the error kept from the CRDT.
+      log({ level: "error", message: `An editor's sync failed, so it binds again: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`, path: this.file?.path });
+      this.detach(this.keepShown());
+      this.attach();
+    }
+  }
+
+  /** Remembers what this editor shows, for binding again, as its note stays open. */
+  private keepShown(): TextState | undefined {
+    if (!this.file) return undefined;
+    this.shown = { file: this.file.id, state: this.file.textState() };
+    return this.shown.state;
   }
 
   private push(transactions: readonly Transaction[], file: MarkdownFile) {
@@ -212,6 +239,7 @@ class ProvenanceView {
   }
 
   destroy() {
+    if (this.file) log({ level: "debug", message: "An editor stopped syncing this note: the editor closed or reloaded", path: this.file.path });
     this.detach();
   }
 }
@@ -266,8 +294,9 @@ export function segmentAt(view: EditorView, pos: number): Segment | null {
   return view.plugin(plugin)?.segments.find((s) => s.from <= pos && pos <= s.to) ?? null;
 }
 
-export function provenanceExtension(getEngine: () => SyncEngine | null): Extension {
+export function provenanceExtension(getEngine: () => SyncEngine | null, onEvent: (event: SyncEvent) => void): Extension {
   currentEngine = getEngine;
+  log = onEvent;
   const hover = hoverTooltip((view, pos) => {
     const segment = segmentAt(view, pos);
     if (!segment) return null;

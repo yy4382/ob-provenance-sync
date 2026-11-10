@@ -11,7 +11,7 @@ function live(v) {
   return v.items.filter((i) => !dead.has(key(i)));
 }
 
-export const readerActions = ["RemoteInsert", "Type", "TypeOpening", "OpenPane", "ClosePane", "ExternalAdd", "ExternalDelete"];
+export const readerActions = ["RemoteInsert", "Type", "TypeOpening", "OpenPane", "Unbind", "ClosePane", "ExternalAdd", "ExternalDelete"];
 
 export function state(v) {
   const alive = live(v);
@@ -48,6 +48,7 @@ const STEPS = {
   RemoteInsert: "a remote edit arrives",
   Type: "the user types",
   TypeOpening: "the user types before the pane is bound",
+  Unbind: "the pane stops syncing with the note still open, and binds again",
   WatcherFires: "Obsidian reports the outside change",
   WriteRuns: "the engine writes the file if unchanged, or rereads it",
   WriteTimerFires: "the write debounce elapses",
