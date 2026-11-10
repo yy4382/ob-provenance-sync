@@ -151,7 +151,7 @@ class ProvenanceView {
     const doc = this.view.state.doc.toString();
     const target = this.loaded ? (engine()?.fileAt(this.loaded.path) ?? null) : null;
     proto.record("save", { path: this.loaded?.path, bound: !!this.release, matchesDoc: text === doc, pending: this.log ? !this.log.pending.empty : null, engineFile: !!target?.loaded });
-    if (this.release || !this.log) return;
+    if (this.release || !this.log || !proto.editLog) return;
     if (text !== doc) {
       proto.anomaly("save-differs-from-unbound-pane", { path: this.loaded?.path, text, doc });
       return;

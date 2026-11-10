@@ -96,7 +96,7 @@ const scenarios = {
     await sleep(200);
     await o.type("left");
     await o.setProto({ bindDelay: 0 });
-    const r = await o.converged(p, 15000);
+    const r = await o.converged(p, 15000, 2);
     await cdp.eval(`app.workspace.getLeavesOfType("markdown").filter((l) => l.view.file?.path === ${JSON.stringify(p)}).slice(1).forEach((l) => l.detach()); return true`);
     return { ...r, pass: r.ok && once(r.crdt, "right") && once(r.crdt, "left") };
   },

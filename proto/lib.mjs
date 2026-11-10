@@ -65,14 +65,16 @@ function helpers(cdp, vault) {
     pane: () => cdp.eval(`return app.workspace.activeEditor?.editor?.getValue() ?? null`),
     /** The text of every pane showing `path`. */
     panes: (path) => cdp.eval(`return app.workspace.getLeavesOfType("markdown").filter((l) => l.view.file?.path === ${JSON.stringify(path)}).map((l) => l.view.editor.getValue())`),
-    bound: (path) => cdp.eval(`return ${P}.events.some((e) => e.kind === "bind" && e.path === ${JSON.stringify(path)})`),
+    bound: (path, n = 1) => cdp.eval(`return ${P}.events.filter((e) => e.kind === "bind" && e.path === ${JSON.stringify(path)}).length >= ${n}`),
     crdt: (path) => cdp.eval(`return ${F(path)}?.ytext.toJSON() ?? null`),
     settle: () => cdp.eval(`await app.plugins.plugins["provenance-sync"].engine.settle(); return true`),
     proto: (expr) => cdp.eval(`const p = ${P}; return ${expr}`),
     setProto: (fields) => cdp.eval(`Object.assign(${P}, ${JSON.stringify(fields)}); return true`),
     /** Waits until the pane, the CRDT and the file agree, then returns all three. */
-    async converged(path, ms = 12000) {
+    async converged(path, ms = 12000, binds = 1) {
       let last;
+      // Agreement before every pane has bound says nothing about the bind.
+      if (!(await eventually(() => h.bound(path, binds), ms))) return { ok: false, unbound: true };
       const ok = await eventually(async () => {
         await sleep(300);
         last = { disk: h.disk(path), crdt: await h.crdt(path), panes: await h.panes(path) };
