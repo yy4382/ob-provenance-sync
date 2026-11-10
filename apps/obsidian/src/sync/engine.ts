@@ -36,6 +36,7 @@ import {
   type AgentWhy,
   type FileId,
   type HumanId,
+  type Provenance,
   type VaultDocs,
 } from "@provenance/core";
 import * as Y from "yjs";
@@ -249,16 +250,16 @@ export class MarkdownFile {
     const base = this.base ?? { snapshot: Y.snapshot(this.doc), text: current };
     if (disk !== base.text) {
       this.engine.log("debug", `Merging a change made on disk into note ${short(this.id)} (${difference(base.text, disk)})`, this.path);
-      this.setBase(this.mergeOver(base, disk), disk);
+      const by = this.engine.wasWrittenLocally(this.path, base.text, disk) ? this.human() : this.unknown();
+      this.setBase(this.mergeOver(base, disk, by), disk);
     }
     if (this.ytext.toJSON() !== disk) this.scheduleWrite();
   }
 
-  /** Merges `text` as an edit of `base`'s text, and returns the state that edit made of the base. */
-  private mergeOver(base: { snapshot: Y.Snapshot; text: string }, text: string): Y.Snapshot {
+  /** Merges `text` as `by`'s edit of `base`'s text, and returns the state that edit made of the base. */
+  private mergeOver(base: { snapshot: Y.Snapshot; text: string }, text: string, by: Provenance): Y.Snapshot {
     const fork = Y.createDocFromSnapshot(this.doc, base.snapshot);
     const before = Y.encodeStateVector(fork);
-    const by = this.engine.wasWrittenLocally(this.path, base.text, text) ? this.human() : this.unknown();
     fork.transact(() => setText(fork.getText(TEXT_KEY), text, by, "literal"));
     // Deletions carry no author, so the journal reads them from the transaction's actor.
     this.doc.transact(() => {
@@ -317,7 +318,12 @@ export class MarkdownFile {
   async trackWrite<T>(text: string, write: () => Promise<T>): Promise<T> {
     const state =
       text === this.ytext.toJSON() ? { snapshot: Y.snapshot(this.doc), text } : [...this.editorStates].reverse().find((s) => s.text === text);
-    if (!state) return write();
+    if (!state) {
+      // Text typed before the editor bound: merged from the file like another local write, so it is the human's.
+      const path = this.path;
+      if (path !== undefined) this.engine.wroteLocally(path, (await this.engine.opts.disk.read(path)) ?? "", text);
+      return write();
+    }
     const run = write();
     this.writes.add(run);
     this.writeEvents++;
@@ -350,7 +356,7 @@ export class MarkdownFile {
       const text = this.editors === 0 && this.base ? loaded() : null;
       if (text !== null && text !== this.ytext.toJSON() && text !== this.base!.text && text !== this.replaced) {
         this.engine.log("debug", `Merging the open editor's unsaved text into note ${short(this.id)} (${difference(this.base!.text, text)})`, this.path);
-        this.mergeOver(this.base!, text);
+        this.mergeOver(this.base!, text, this.human());
       }
       this.editors++;
       this.recordEditorState();

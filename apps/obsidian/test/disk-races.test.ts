@@ -217,6 +217,7 @@ it("keeps typing from before the pane bound when an untracked save is read after
   await binding;
   await engine.settle();
   expect(file.ytext.toJSON()).toBe("Base. One Two");
+  expect(authors(file).slice(1)).toEqual([[" One Two", "human:chris"]]);
 });
 
 // Obsidian picks a save's text, then waits on other file operations before it writes. A
@@ -239,6 +240,7 @@ it("keeps typing single when a save picked before the pane bound lands after", a
   await binding;
   await engine.settle();
   expect(file.ytext.toJSON()).toBe("Base. One Two");
+  expect(authors(file).slice(1)).toEqual([[" One Two", "human:chris"]]);
 });
 
 // A pane opened the note before the engine wrote a remote edit to the file, and binds
