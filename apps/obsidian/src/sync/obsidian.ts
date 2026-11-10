@@ -43,6 +43,9 @@ export function watchVault(plugin: Plugin, engine: () => SyncEngine | null) {
   );
   plugin.register(
     wrapVaultWrites(app, {
+      started: (file, done) => {
+        if (isSyncedPath(app, file.path)) engine()?.saveStarted(file.path, done);
+      },
       save: (file, data, write) => {
         const running = engine();
         return running && isSyncedPath(app, file.path) ? running.trackWrite(file.path, data, write) : write();

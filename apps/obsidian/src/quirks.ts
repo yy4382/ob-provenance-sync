@@ -72,8 +72,10 @@ export function codeMirrorOf(view: MarkdownView): EditorView | null {
 
 /**
  * Reports every note write through the Vault API except the engine's own
- * (`syncWriteOptions`). An editor's save goes to `save` with the exact text it
- * writes, which the engine needs to tell the save from other programs' edits.
+ * (`syncWriteOptions`). An editor's save goes to `started` as soon as it has
+ * picked its text, since it waits on other file operations before writing,
+ * and then to `save` with the exact text it writes, which the engine needs to
+ * tell the save from other programs' edits.
  * Any other write, from another plugin or a click on a task in reading view
  * (`clickingTask`), goes to `local` with the text it replaces and the text it
  * writes, before it lands. Returns the undo.
@@ -87,6 +89,7 @@ export function codeMirrorOf(view: MarkdownView): EditorView | null {
 export function wrapVaultWrites(
   app: App,
   track: {
+    started: (file: TFile, done: Promise<unknown>) => void;
     save: (file: TFile, data: string, write: () => Promise<void>) => Promise<void>;
     local: (path: string, before: string, after: string) => void;
   },
@@ -99,10 +102,12 @@ export function wrapVaultWrites(
     let pending = saves.get(file);
     if (!pending) saves.set(file, (pending = new Set()));
     pending.add(save);
-    return write().finally(() => {
+    const done = write().finally(() => {
       pending.delete(save);
       if (!pending.size && saves.get(file) === pending) saves.delete(file);
     });
+    track.started(file, done);
+    return done;
   };
   // 1.15 reads the view after waiting for a previous save, at writeData entry.
   const unwatchSaves = requireApiVersion("1.15.0")

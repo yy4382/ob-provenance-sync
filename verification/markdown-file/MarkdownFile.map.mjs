@@ -11,7 +11,7 @@ function live(v) {
   return v.items.filter((i) => !dead.has(key(i)));
 }
 
-export const readerActions = ["RemoteInsert", "Type", "OpenPane", "ClosePane", "ExternalAdd", "ExternalDelete"];
+export const readerActions = ["RemoteInsert", "Type", "TypeOpening", "OpenPane", "ClosePane", "ExternalAdd", "ExternalDelete"];
 
 export function state(v) {
   const alive = live(v);
@@ -35,9 +35,10 @@ export function state(v) {
 export const regionNames = ["Pane", "File vs CRDT"];
 
 const STEPS = {
-  BindTask: "the queued bind merges the file, then binds",
+  BindTask: "the queued bind merges the file, then the pane's text, then binds",
   ClosePane: "the user closes the note",
   EditorSave: "Obsidian saves the pane",
+  LoadedSave: "Obsidian saves the opening pane, which the CRDT doesn't hold",
   ExternalAdd: "another program adds text",
   ExternalDelete: "another program deletes text",
   OpenPane: "the user opens the note",
@@ -46,6 +47,7 @@ const STEPS = {
   ReadStarts: "the engine reads the file",
   RemoteInsert: "a remote edit arrives",
   Type: "the user types",
+  TypeOpening: "the user types before the pane is bound",
   WatcherFires: "Obsidian reports the outside change",
   WriteRuns: "the engine writes the file if unchanged, or rereads it",
   WriteTimerFires: "the write debounce elapses",

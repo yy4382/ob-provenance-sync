@@ -249,18 +249,23 @@ export class MarkdownFile {
     const base = this.base ?? { snapshot: Y.snapshot(this.doc), text: current };
     if (disk !== base.text) {
       this.engine.log("debug", `Merging a change made on disk into note ${short(this.id)} (${difference(base.text, disk)})`, this.path);
-      const fork = Y.createDocFromSnapshot(this.doc, base.snapshot);
-      const before = Y.encodeStateVector(fork);
-      const by = this.engine.wasWrittenLocally(this.path, base.text, disk) ? this.human() : this.unknown();
-      fork.transact(() => setText(fork.getText(TEXT_KEY), disk, by, "literal"));
-      // Deletions carry no author, so the journal reads them from the transaction's actor.
-      this.doc.transact(() => {
-        markActor(this.doc, by.author);
-        Y.applyUpdate(this.doc, Y.encodeStateAsUpdate(fork, before), FROM_DISK);
-      }, FROM_DISK);
-      this.setBase(Y.snapshot(fork), disk);
+      this.setBase(this.mergeOver(base, disk), disk);
     }
     if (this.ytext.toJSON() !== disk) this.scheduleWrite();
+  }
+
+  /** Merges `text` as an edit of `base`'s text, and returns the state that edit made of the base. */
+  private mergeOver(base: { snapshot: Y.Snapshot; text: string }, text: string): Y.Snapshot {
+    const fork = Y.createDocFromSnapshot(this.doc, base.snapshot);
+    const before = Y.encodeStateVector(fork);
+    const by = this.engine.wasWrittenLocally(this.path, base.text, text) ? this.human() : this.unknown();
+    fork.transact(() => setText(fork.getText(TEXT_KEY), text, by, "literal"));
+    // Deletions carry no author, so the journal reads them from the transaction's actor.
+    this.doc.transact(() => {
+      markActor(this.doc, by.author);
+      Y.applyUpdate(this.doc, Y.encodeStateAsUpdate(fork, before), FROM_DISK);
+    }, FROM_DISK);
+    return Y.snapshot(fork);
   }
 
   private recordEditorState() {
@@ -289,6 +294,22 @@ export class MarkdownFile {
   }
 
   /**
+   * An editor began a save. The host picks the save's text first and writes
+   * it, through trackWrite, only after other file operations finish, so reads
+   * of the file wait from here until `done`: the text may be one no CRDT state
+   * held, typed before the editor bound.
+   */
+  saveStarted(done: Promise<unknown>): void {
+    const landed = () => {
+      this.writes.delete(done);
+      this.writeEvents++;
+    };
+    this.writes.add(done);
+    this.writeEvents++;
+    done.then(landed, landed);
+  }
+
+  /**
    * An editor is about to save `text` to this file. If the CRDT held that
    * text, in its current state or one an editor showed, that state becomes the
    * base once the write lands.
@@ -312,20 +333,25 @@ export class MarkdownFile {
 
   /**
    * Binds an editor, as a queued task, and resolves to its release function.
-   * While any editor is bound, the editor saves the file. `loaded` is the text
-   * the host loaded into the first editor; it may hold another program's edit
-   * whose modify event is still pending, so it is merged like a disk change
-   * before the editor is made to show the CRDT's text. A pane that read the
-   * file before writeNow's last write and hasn't reloaded it still holds the
-   * replaced text, which is not merged. A tracked save may have landed without
-   * becoming the base yet, so it waits for those first.
+   * While any editor is bound, the editor saves the file. `loaded` is the
+   * first editor's text: what the host read from the file, plus anything
+   * typed before the editor bound, some of which the editor may already have
+   * saved without the CRDT holding it. So the file is merged first, with any
+   * other program's edit whose modify event is still pending, and then the
+   * editor's text as an edit of the file's, which stays the base. Nothing is
+   * awaited after reading `loaded`, so no keystroke falls between that read
+   * and the editor pushing its edits. A pane that read the file before
+   * writeNow's last write and hasn't reloaded it still holds the replaced
+   * text, which is not merged.
    */
   bindEditor(loaded: () => string | null = () => null): Promise<() => void> {
     return this.engine.enqueue(async () => {
-      while (this.writes.size) await Promise.allSettled(this.writes);
+      if (this.editors === 0 && this.base) await this.onDiskModified();
       const text = this.editors === 0 && this.base ? loaded() : null;
-      const stale = async () => text === this.replaced && this.path !== undefined && (await this.engine.opts.disk.read(this.path)) === this.base!.text;
-      if (text !== null && text !== this.base!.text && !(await stale())) this.applyDisk(text);
+      if (text !== null && text !== this.ytext.toJSON() && text !== this.base!.text && text !== this.replaced) {
+        this.engine.log("debug", `Merging the open editor's unsaved text into note ${short(this.id)} (${difference(this.base!.text, text)})`, this.path);
+        this.mergeOver(this.base!, text);
+      }
       this.editors++;
       this.recordEditorState();
       let released = false;
@@ -1234,6 +1260,11 @@ export class SyncEngine implements VaultDocs {
       // A reconcileDisk that found the old path empty left any change made while closed unmerged.
       await this.files.get(id)?.onDiskModified();
     });
+  }
+
+  /** An editor began a save of `path` that settles with `done`; see MarkdownFile.saveStarted. */
+  saveStarted(path: string, done: Promise<unknown>): void {
+    this.fileAt(path)?.saveStarted(done);
   }
 
   /** An editor is about to save `text` to `path`; see MarkdownFile.trackWrite. */
