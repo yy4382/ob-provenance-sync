@@ -2,6 +2,7 @@ import { normalizePath, requestUrl, TFile, type App, type Plugin, type TAbstract
 import { IndexeddbPersistence } from "y-indexeddb";
 import type * as Y from "yjs";
 import { communityPluginOn, corePluginOn, deviceVaultId, replaceIfHolds, syncWriteOptions, wrapVaultWrites } from "../quirks";
+import { paneSaving } from "../editor/binding";
 import type { Blobs, Disk, Persistence, SyncEngine } from "./engine";
 
 const isBinary = (file: TFile) => file.extension !== "md";
@@ -43,6 +44,9 @@ export function watchVault(plugin: Plugin, engine: () => SyncEngine | null) {
   );
   plugin.register(
     wrapVaultWrites(app, {
+      picked: (view, text) => {
+        if (isSyncedPath(app, view.file?.path ?? "")) paneSaving(view, text);
+      },
       started: (file, done) => {
         if (isSyncedPath(app, file.path)) engine()?.saveStarted(file.path, done);
       },

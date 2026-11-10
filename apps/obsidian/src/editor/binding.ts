@@ -1,11 +1,16 @@
-import { Annotation, EditorSelection, RangeSetBuilder, StateEffect, Transaction, type ChangeSpec, type Extension } from "@codemirror/state";
+import { Annotation, ChangeSet, EditorSelection, RangeSetBuilder, StateEffect, Text, Transaction, type ChangeSpec, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, hoverTooltip, layer, RectangleMarker, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { attribute, rewriteRange, type Segment } from "@provenance/core";
 import diff from "fast-diff";
-import type { TFile } from "obsidian";
+import type { MarkdownView, TFile } from "obsidian";
 import type * as Y from "yjs";
-import { editKind, fileLoadedInto, fileNamedBy } from "../quirks";
-import type { MarkdownFile, SyncEngine, SyncEvent, TextState } from "../sync/engine";
+import { proto } from "../proto";
+import { codeMirrorOf, editKind, fileLoadedInto, fileNamedBy } from "../quirks";
+import type { MarkdownFile, PaneLog, SyncEngine, SyncEvent, TextState } from "../sync/engine";
+
+/** PROTOTYPE. A pane's text while it isn't bound: `text` (and its CRDT state, if known) plus `pending`, its own edits since. */
+type Log = { text: string; state: TextState | null; pending: ChangeSet };
+const freshLog = (text: string, state: TextState | null = null): Log => ({ text, state, pending: ChangeSet.empty(text.length) });
 
 const fromYjs = Annotation.define<boolean>();
 const refresh = StateEffect.define<null>();
@@ -31,6 +36,8 @@ type Band = { from: number; to: number; kind: keyof typeof marks };
  * and converging it would insert that text a second time.
  */
 const panes = new Map<MarkdownFile, Set<ProvenanceView>>();
+/** PROTOTYPE. Every live pane, to find the unbound panes of one note. */
+const views = new Set<ProvenanceView>();
 
 /** Minimal CodeMirror changes that turn `from` into `to`. */
 function diffChanges(from: string, to: string): ChangeSpec[] {
@@ -69,10 +76,89 @@ class ProvenanceView {
   /** What this editor showed when it stopped syncing with its note still open, for binding again. */
   private shown: { file: MarkdownFile["id"]; state: TextState } | null = null;
   private readonly observer = (event: Y.YTextEvent, tr: Y.Transaction) => this.onYjs(event, tr);
+  /** PROTOTYPE. Kept whenever this state holds a file's text and isn't bound. */
+  private log: Log | null = null;
 
   constructor(readonly view: EditorView) {
     this.loaded = fileLoadedInto(view);
+    if (this.loaded) this.log = freshLog(view.state.doc.toString());
+    views.add(this);
+    proto.record("pane-created", { path: this.loaded?.path ?? null, length: view.state.doc.length });
     this.attach();
+  }
+
+  /** PROTOTYPE. Hands the bind this pane's log, and the logs of the note's other unbound panes, with nothing awaited after. */
+  private takeLogs(attached: object) {
+    if (this.attached !== attached || !this.log) return [];
+    const own = this.log;
+    this.log = null;
+    return [{ own: true, log: logOf(own), placed: () => {} }, ...this.unboundSiblings().map((v) => v.entry())];
+  }
+
+  /** PROTOTYPE. This note's other panes that hold a log. */
+  unboundSiblings(): ProvenanceView[] {
+    return [...views].filter((v) => v !== this && v.loaded !== null && v.loaded === this.loaded && v.log !== null && !v.release);
+  }
+
+  /** PROTOTYPE. This pane's log for applyLogs, which restarts it at the state its edits made. */
+  entry() {
+    const log = this.log!;
+    return {
+      own: false,
+      log: logOf(log),
+      placed: (state: TextState) => {
+        if (this.log === log) this.log = freshLog(this.view.state.doc.toString(), state);
+      },
+    };
+  }
+
+  /** PROTOTYPE. Adds this update's changes to the log: the pane's own edits, and foreign ones it rebases over. */
+  private logTransactions(u: ViewUpdate) {
+    if (!this.log) return;
+    for (const tr of u.transactions) {
+      if (!tr.docChanged) continue;
+      if (tr.annotation(fromYjs)) proto.anomaly("crdt-change-while-unbound", { path: this.loaded?.path });
+      if (tr.annotation(fromYjs) || editKind(tr) === "copy") this.rebase(tr);
+      else this.log.pending = this.log.pending.compose(tr.changes);
+    }
+    const doc = this.view.state.doc.toString();
+    const rebuilt = this.log.pending.apply(Text.of(this.log.text.split("\n"))).toString();
+    if (rebuilt !== doc) {
+      proto.anomaly("log-out-of-step", { path: this.loaded?.path, rebuilt, doc });
+      this.log = freshLog(doc);
+    }
+  }
+
+  /** A change the pane didn't make (a copy from another pane, or Obsidian reloading the file): it moves the log's text, and its edits over it. */
+  private rebase(tr: Transaction) {
+    const log = this.log!;
+    const anchor = Text.of(log.text.split("\n"));
+    const onAnchor = tr.changes.map(log.pending.invert(anchor));
+    const text = onAnchor.apply(anchor).toString();
+    const pending = log.pending.map(onAnchor);
+    const ok = pending.apply(Text.of(text.split("\n"))).toString() === tr.newDoc.toString();
+    proto.record("rebase", { path: this.loaded?.path, userEvent: tr.annotation(Transaction.userEvent) ?? null, pendingEdits: !log.pending.empty, ok });
+    if (!ok) {
+      proto.anomaly("rebase-mismatch", { path: this.loaded?.path, text, doc: tr.newDoc.toString() });
+      this.log = freshLog(tr.newDoc.toString());
+      return;
+    }
+    this.log = { text, state: null, pending };
+  }
+
+  /** PROTOTYPE. Obsidian is saving this pane's text. While unbound, the save carries the pending edits to disk, so they leave the log. */
+  saved(text: string) {
+    const doc = this.view.state.doc.toString();
+    const target = this.loaded ? (engine()?.fileAt(this.loaded.path) ?? null) : null;
+    proto.record("save", { path: this.loaded?.path, bound: !!this.release, matchesDoc: text === doc, pending: this.log ? !this.log.pending.empty : null, engineFile: !!target?.loaded });
+    if (this.release || !this.log) return;
+    if (text !== doc) {
+      proto.anomaly("save-differs-from-unbound-pane", { path: this.loaded?.path, text, doc });
+      return;
+    }
+    // The save carries this pane's edits, and those of the note's other panes it holds as copies:
+    // they are applied now, so the save's state is known when it lands and its read adds nothing.
+    if (target?.loaded) target.applyLogs([this.entry(), ...this.unboundSiblings().map((v) => v.entry())], "save");
   }
 
   get primary(): boolean {
@@ -86,7 +172,7 @@ class ProvenanceView {
   }
 
   /** The engine may start, or learn the file, after the pane opened it, so this runs on every update. */
-  private attach() {
+  private attach(u?: ViewUpdate) {
     const shown = this.shownFile();
     // A rename is not a load: the pane's text may hold unsaved edits the CRDT already has.
     if (shown && this.file && engine()?.files.get(this.file.id) === this.file) return;
@@ -96,7 +182,7 @@ class ProvenanceView {
       const why = !shown ? "the pane no longer shows it" : !engine() ? "sync stopped" : "sync has another note at its path";
       log({ level: "debug", message: `An editor stopped syncing this note: ${why}`, path: shown?.path ?? this.file.path });
     }
-    this.detach(shown && !engine() ? this.keepShown() : undefined);
+    this.detach(shown && !engine() ? this.keepShown() : undefined, u);
     if (!file) return;
     this.file = file;
     let set = panes.get(file);
@@ -107,8 +193,10 @@ class ProvenanceView {
     const current = () => (this.attached === attached ? this.view.state.doc.toString() : null);
     const shownState = this.shown?.file === file.id ? this.shown.state : null;
     this.shown = null;
+    const useLog = proto.editLog;
     void file.ready
-      .then(() => file.bindEditor(current, shownState))
+      .then(() => (proto.bindDelay ? new Promise((r) => setTimeout(r, proto.bindDelay)) : undefined))
+      .then(() => (useLog ? file.bindEdits(() => this.takeLogs(attached)) : file.bindEditor(current, shownState)))
       .then((release) => {
         if (this.attached !== attached) return release();
         this.release = release;
@@ -125,9 +213,15 @@ class ProvenanceView {
   }
 
   /** `shown` is what the editor showed, when it stops syncing with its note still open. */
-  private detach(shown?: TextState) {
+  private detach(shown?: TextState, u?: ViewUpdate) {
     const file = this.file;
     if (!file) return;
+    // PROTOTYPE: the log starts from the text before this update's changes, which weren't pushed.
+    if (this.loaded) {
+      const text = (u?.startState.doc ?? this.view.state.doc).toString();
+      this.log = freshLog(text, shown && shown.text === text ? shown : null);
+      proto.record("unbind", { path: this.loaded.path, stateKnown: !!this.log.state });
+    }
     file.ytext.unobserve(this.observer);
     const wasPrimary = this.primary;
     const set = panes.get(file)!;
@@ -162,10 +256,16 @@ class ProvenanceView {
 
   update(u: ViewUpdate) {
     try {
-      this.attach();
+      this.attach(u);
+      this.trace(u);
       const file = this.file;
+      if (!(file && this.release)) this.logTransactions(u);
       if (!file) return;
       const own = u.transactions.filter((tr) => tr.docChanged && !tr.annotation(fromYjs));
+      if (own.length && this.release && proto.throwOnce) {
+        proto.throwOnce = false;
+        throw new Error("simulated binding failure (prototype)");
+      }
       if (own.length && this.release) this.push(own, file);
       if (u.docChanged || u.transactions.some((tr) => tr.effects.some((e) => e.is(refresh)))) this.computeDecorations();
     } catch (e) {
@@ -173,8 +273,27 @@ class ProvenanceView {
       // unsynced while the engine writes the file under it and Obsidian merges that into
       // its unsaved typing. Binding again at once merges what the error kept from the CRDT.
       log({ level: "error", message: `An editor's sync failed, so it binds again: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`, path: this.file?.path });
-      this.detach(this.keepShown());
+      const wasBound = !!this.release;
+      this.detach(this.keepShown(), u);
+      if (wasBound) this.logTransactions(u);
       this.attach();
+    }
+  }
+
+  /** PROTOTYPE. Records every document change with its user event and how the binding classifies it. */
+  private trace(u: ViewUpdate) {
+    for (const tr of u.transactions) {
+      if (!tr.docChanged) continue;
+      proto.trace({
+        path: this.loaded?.path ?? null,
+        bound: !!this.release,
+        userEvent: tr.annotation(Transaction.userEvent) ?? null,
+        kind: tr.annotation(fromYjs) ? "crdt" : editKind(tr),
+        addToHistory: tr.annotation(Transaction.addToHistory) ?? null,
+        remote: tr.annotation(Transaction.remote) ?? null,
+        size: tr.changes.length,
+        newLength: tr.newDoc.length,
+      });
     }
   }
 
@@ -239,12 +358,30 @@ class ProvenanceView {
   }
 
   destroy() {
+    views.delete(this);
     if (this.file) log({ level: "debug", message: "An editor stopped syncing this note: the editor closed or reloaded", path: this.file.path });
     this.detach();
   }
 }
 
 const plugin = ViewPlugin.fromClass(ProvenanceView, { decorations: (v) => v.decorations });
+
+const logOf = (log: Log): PaneLog => ({ text: log.text, state: log.state, edits: editsOf(log.pending) });
+
+/** PROTOTYPE. A change set as ranges of the text it applies to, ascending. */
+function editsOf(changes: ChangeSet): PaneLog["edits"] {
+  const edits: PaneLog["edits"] = [];
+  changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => edits.push({ from: fromA, to: toA, text: inserted.sliceString(0, inserted.length, "\n") }));
+  return edits;
+}
+
+/** PROTOTYPE. Obsidian picked `text` to save from `view`. */
+export function paneSaving(view: MarkdownView, text: string) {
+  const cm = codeMirrorOf(view);
+  const pane = cm?.plugin(plugin);
+  if (!pane) proto.record("save", { path: view.file?.path ?? null, pane: false });
+  pane?.saved(text);
+}
 
 /**
  * Draws each band the way a selection is drawn: one rectangle per visual

@@ -90,11 +90,19 @@ jobs:
         run: |
           export OBSIDIAN_BIN="$RUNNER_TEMP/obsidian/squashfs-root/obsidian"
           xvfb-run -a -s "-screen 0 1280x900x24" node apps/obsidian/e2e/compat.mjs test "$VERSION"
+      # PROTOTYPE: the past bug orderings on today's bind and on the edit-log bind.
+      - name: Prototype compare
+        if: always()
+        env:
+          OBSIDIAN_ARGS: --no-sandbox --password-store=basic
+        run: |
+          export OBSIDIAN_BIN="$RUNNER_TEMP/obsidian/squashfs-root/obsidian"
+          OUT="reports/compare-$VERSION.json" xvfb-run -a -s "-screen 0 1280x900x24" node proto/compare.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: report-${{ matrix.version }}
-          path: reports/${{ matrix.version }}.json
+          path: reports/
           if-no-files-found: error
 
   record:

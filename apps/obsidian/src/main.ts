@@ -9,6 +9,7 @@ import { codeMirrorOf } from "./quirks";
 import { ReattributeModal, type Attribution, type Reattribution } from "./reattribute";
 import { defaultSettings, ProvenanceSettingTab, type ProvenanceSettings } from "./settings";
 import { SyncEngine, within, type SyncStatus } from "./sync/engine";
+import "./proto";
 import { httpBlobs, indexedDbPersistence, indexedDbStored, isSyncedPath, ObsidianDisk, otherSyncs, watchVault } from "./sync/obsidian";
 
 const CHECK_EVERY = 10 * 60_000;

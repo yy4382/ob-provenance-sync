@@ -90,6 +90,8 @@ export function wrapVaultWrites(
   app: App,
   track: {
     started: (file: TFile, done: Promise<unknown>) => void;
+    /** PROTOTYPE: which pane is saving, and the text it picked. */
+    picked: (view: MarkdownView, text: string) => void;
     save: (file: TFile, data: string, write: () => Promise<void>) => Promise<void>;
     local: (path: string, before: string, after: string) => void;
   },
@@ -98,6 +100,7 @@ export function wrapVaultWrites(
   const saves = new Map<TFile, Set<{ text: string }>>();
   const saving = (view: TextFileView, file: TFile | null, text: string, write: () => Promise<void>) => {
     if (view.app !== app || !file || !(view instanceof MarkdownView) || clickingTask()) return write();
+    track.picked(view, text);
     const save = { text };
     let pending = saves.get(file);
     if (!pending) saves.set(file, (pending = new Set()));

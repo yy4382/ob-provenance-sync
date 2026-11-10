@@ -24,6 +24,7 @@ import {
   parseEntries,
   Recorder,
   repairedConflictPath,
+  rewriteRange,
   setText,
   TEXT_KEY,
   textAt,
@@ -40,6 +41,7 @@ import {
   type VaultDocs,
 } from "@provenance/core";
 import * as Y from "yjs";
+import { proto } from "../proto";
 
 /** The vault's files as the engine sees them; the host's file API in the plugin, a Map in tests. */
 export interface Disk {
@@ -124,6 +126,13 @@ const MIRROR_KEY = "on-disk";
 /** A state of a note's CRDT and its text. */
 export type TextState = { snapshot: Y.Snapshot; text: string };
 
+/**
+ * PROTOTYPE. What a pane holds while it isn't bound: a text it was made from, the CRDT
+ * state with that text if the pane knows it, and the pane's own edits since, as
+ * non-overlapping ranges of that text in ascending order.
+ */
+export type PaneLog = { text: string; state: TextState | null; edits: Array<{ from: number; to: number; text: string }> };
+
 /** Whether state `a` holds everything state `b` does: each of its items and each of its deletions. */
 function contains(a: Y.Snapshot, b: Y.Snapshot): boolean {
   for (const [client, clock] of b.sv) if ((a.sv.get(client) ?? 0) < clock) return false;
@@ -163,6 +172,8 @@ export class MarkdownFile {
   private reopening: TextState | null = null;
   /** The text writeNow last replaced on disk. */
   private replaced: string | null = null;
+  /** PROTOTYPE. States the file on disk held, newest last, so a pane's loaded text can be placed. */
+  private readonly diskStates: TextState[] = [];
   /** Tracked writes in flight, and a count bumped as each starts and lands, so a read that overlapped one reads again. */
   private readonly writes = new Set<Promise<unknown>>();
   private writeEvents = 0;
@@ -227,6 +238,8 @@ export class MarkdownFile {
   private setBase(snapshot: Y.Snapshot, text: string) {
     if (this.destroyed) return;
     this.base = { snapshot, text };
+    this.diskStates.push(this.base);
+    if (this.diskStates.length > 16) this.diskStates.shift();
     void this.persistence?.set(BASE_KEY, Y.encodeSnapshot(snapshot));
   }
 
@@ -274,6 +287,7 @@ export class MarkdownFile {
     const base = this.base ?? { snapshot: Y.snapshot(this.doc), text: current };
     if (disk !== base.text) {
       const from = this.ancestor() ?? base;
+      proto.record("disk-merge", { path: this.path, from: from.text, disk });
       this.engine.log("debug", `Merging a change made on disk into note ${short(this.id)} (${difference(from.text, disk)})`, this.path);
       const by = this.engine.wasWrittenLocally(this.path, base.text, disk) ? this.human() : this.unknown();
       this.setBase(this.mergeOver(from, disk, by), disk);
@@ -352,6 +366,7 @@ export class MarkdownFile {
   async trackWrite<T>(text: string, write: () => Promise<T>): Promise<T> {
     const state =
       text === this.ytext.toJSON() ? { snapshot: Y.snapshot(this.doc), text } : [...this.editorStates].reverse().find((s) => s.text === text);
+    proto.record("track-write", { path: this.path, found: !!state, editors: this.editors });
     if (!state) {
       // Text typed before the editor bound: merged from the file like another local write, so it is the human's.
       const path = this.path;
@@ -395,7 +410,9 @@ export class MarkdownFile {
       if (this.editors === 0 && this.base) await this.onDiskModified();
       const text = this.editors === 0 && this.base ? loaded() : null;
       const from = this.ancestor();
-      if (text !== null && from && text !== this.ytext.toJSON() && text !== from.text && text !== this.replaced) {
+      const merges = text !== null && from && text !== this.ytext.toJSON() && text !== from.text && text !== this.replaced;
+      proto.record("bind", { path: this.path, mode: "text", merges, skippedAsReplaced: text !== null && text === this.replaced, editors: this.editors });
+      if (merges) {
         this.engine.log("debug", `Merging the open editor's unsaved text into note ${short(this.id)} (${difference(from.text, text)})`, this.path);
         this.mergeOver(from, text, this.human());
       }
@@ -411,6 +428,92 @@ export class MarkdownFile {
         this.scheduleWrite();
       };
     });
+  }
+
+  /**
+   * PROTOTYPE of the edit-log bind. The pane's own edits since its log's text are applied
+   * once, on a fork at the state that text names, along with those of the note's other
+   * unbound panes, whose copies may be in its text. The pane's text is never merged.
+   */
+  bindEdits(take: () => Array<{ log: PaneLog; placed: (state: TextState) => void; own: boolean }>): Promise<() => void> {
+    return this.engine.enqueue(async () => {
+      if (this.base) await this.onDiskModified();
+      const logs = take();
+      const left = this.applyLogs(logs, "bind");
+      const own = left.find((e) => e.own);
+      if (own) this.mergeUnplaced(own.log, "bind");
+      proto.record("bind", { path: this.path, mode: "edit-log", logs: logs.map((e) => ({ own: e.own, edits: e.log.edits.length })), unplaced: left.length, editors: this.editors });
+      this.editors++;
+      this.recordEditorState();
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        this.editors--;
+        this.scheduleWrite();
+      };
+    });
+  }
+
+  /**
+   * PROTOTYPE. Applies each log's edits on a fork at the state its text names, repeating while
+   * that places more (a pane's text may hold another pane's edits as a copy). Returns the logs
+   * no known state has the text of.
+   */
+  applyLogs<E extends { log: PaneLog; placed: (state: TextState) => void }>(entries: E[], why: string): E[] {
+    let left = entries.filter((e) => e.log.edits.length);
+    for (let progress = true; progress && left.length; ) {
+      progress = false;
+      for (const e of [...left]) {
+        const found = e.log.state ? { state: e.log.state, how: "kept from unbind" } : this.stateOfText(e.log.text);
+        if (!found) continue;
+        e.placed(this.applyEdits(found.state, e.log));
+        proto.record("apply-log", { path: this.path, why, how: found.how, edits: e.log.edits.length });
+        left = left.filter((x) => x !== e);
+        progress = true;
+      }
+    }
+    return left;
+  }
+
+  /** PROTOTYPE. Today's text merge, for a log no state can place; recorded as an anomaly. */
+  private mergeUnplaced(log: PaneLog, why: string) {
+    let after = log.text;
+    for (const e of [...log.edits].reverse()) after = after.slice(0, e.from) + e.text + after.slice(e.to);
+    proto.anomaly("unanchored-log", { path: this.path, why, logText: log.text, base: this.base?.text, crdt: this.ytext.toJSON(), after });
+    this.mergeOver(this.base ?? this.textState(), after, this.human());
+  }
+
+  private applyEdits(anchor: TextState, log: PaneLog): TextState {
+    const by = this.human();
+    const fork = Y.createDocFromSnapshot(this.doc, anchor.snapshot);
+    const before = Y.encodeStateVector(fork);
+    const text = fork.getText(TEXT_KEY);
+    fork.transact(() => {
+      let adj = 0;
+      for (const e of log.edits) {
+        rewriteRange(text, e.from + adj, log.text.slice(e.from, e.to), e.text, by, "literal");
+        adj += e.text.length - (e.to - e.from);
+      }
+    });
+    this.doc.transact(() => {
+      markActor(this.doc, by.author);
+      Y.applyUpdate(this.doc, Y.encodeStateAsUpdate(fork, before), FROM_DISK);
+    }, FROM_DISK);
+    const state = { snapshot: Y.snapshot(fork), text: text.toJSON() };
+    this.editorStates.push(state);
+    if (this.editorStates.length > SAVED_STATES) this.editorStates.shift();
+    return state;
+  }
+
+  /** PROTOTYPE. The newest state the CRDT knows whose text is `text`, and where it was found. */
+  private stateOfText(text: string): { state: TextState; how: string } | null {
+    if (this.base?.text === text) return { state: this.base, how: "base" };
+    if (this.ytext.toJSON() === text) return { state: this.textState(), how: "current" };
+    const disk = [...this.diskStates].reverse().find((s) => s.text === text);
+    if (disk) return { state: disk, how: "disk history" };
+    const shown = [...this.editorStates].reverse().find((s) => s.text === text);
+    return shown ? { state: shown, how: "editor state" } : null;
   }
 
   human() {

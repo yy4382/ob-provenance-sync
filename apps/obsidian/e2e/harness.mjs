@@ -130,6 +130,8 @@ export async function obsidian({ vault, profile }) {
         writeFileSync(join(process.env.SHOTS, `${name}.png`), Buffer.from(r.data, "base64"));
       },
       close: () => ws.close(),
+      /** PROTOTYPE: the raw CDP call, for key events and IME. */
+      send: call,
     };
   }
 
