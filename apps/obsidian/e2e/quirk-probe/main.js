@@ -1,6 +1,6 @@
 // Records what Obsidian does, and does nothing else, so a probe in e2e/quirks.mjs can only fail
 // because Obsidian changed. Plain CommonJS: it runs as is, without the plugin build.
-const { Platform, Plugin, TextFileView, apiVersion, editorInfoField, requireApiVersion } = require("obsidian");
+const { MarkdownView, Platform, Plugin, TextFileView, apiVersion, editorInfoField, requireApiVersion } = require("obsidian");
 const { Transaction } = require("@codemirror/state");
 const { EditorView, ViewPlugin } = require("@codemirror/view");
 
@@ -19,6 +19,8 @@ module.exports = class QuirkProbe extends Plugin {
         fileObject: info?.file ?? null,
         // binding.ts tells the blank state from a loaded note by this field.
         blank: info instanceof TextFileView && info.data === null,
+        // And an editor inside the pane's from the pane's own by this one.
+        own: info?.editor?.cm === view,
         doc: view.state.doc.toString(),
       };
     };
@@ -73,6 +75,20 @@ module.exports = class QuirkProbe extends Plugin {
     };
     this.register(() => {
       TextFileView.prototype[method] = save;
+    });
+
+    const saveFrontmatter = MarkdownView.prototype.saveFrontmatter;
+    MarkdownView.prototype.saveFrontmatter = function (...args) {
+      const id = ++calls;
+      log.push({ kind: "frontmatter:start", id, file: this.file?.path ?? null });
+      try {
+        return saveFrontmatter.apply(this, args);
+      } finally {
+        log.push({ kind: "frontmatter:end", id });
+      }
+    };
+    this.register(() => {
+      MarkdownView.prototype.saveFrontmatter = saveFrontmatter;
     });
 
     const vault = this.app.vault;
