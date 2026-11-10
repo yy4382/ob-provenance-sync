@@ -32,6 +32,8 @@ This plugin requires a server, so it may not be in the official plugin list, but
 
 It's practically impossible to force every change made to the vault to go through our CRDT process, so changes made directly to files should be marked as unknown, and their diffs should also be tracked by CRDT in some way (these changes shouldn't be lost).
 
+Typing into a note embedded in a Canvas can appear twice when you type before that note's editor starts syncing, as right after the Canvas opens or while sync restarts. A Canvas writes the note to its file directly instead of saving it through the editor, so the plugin can't tell that the write holds the typing it is about to sync.
+
 ## Getting started
 
 ### 1. Run the sync server
