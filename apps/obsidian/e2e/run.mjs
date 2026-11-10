@@ -971,6 +971,20 @@ try {
     agreed(template) && template.crdt.startsWith("---\nkind: tpl\n---\n") && ["kind: tpl", "Note. typed", " typed", "Body from template.", "after"].every((m) => times(template.crdt, m) === 1),
     JSON.stringify(template));
 
+  // The pane reloads the engine's write of a remote edit, and the user deletes that edit before the
+  // pane binds. Its text is then the one that write replaced, which binding took for a pane that
+  // never reloaded (L5), so the deletion was undone. A queued task holds the bind back.
+  writeFileSync(join(vault, "Undo.md"), "Base.\n");
+  await eventually(() => cdp.eval(`return !!${engineFile("Undo.md")}?.loaded`));
+  await cdp.eval(`await ${plugin}.engine.settle(); void ${plugin}.engine.enqueue(() => new Promise((r) => setTimeout(r, 2500))); return true`);
+  await openAndFocus(cdp, "Undo.md");
+  await cdp.eval(`const f = ${engineFile("Undo.md")}; f.ytext.insert(5, " Remote."); await f.flush(); return true`);
+  const reloaded = await eventually(() => cdp.eval(`return app.workspace.activeEditor.editor.getValue() === "Base. Remote.\\n"`), 2000);
+  await cdp.eval(`const e = app.workspace.activeEditor.editor; e.setSelection({ line: 0, ch: 5 }, { line: 0, ch: 13 }); return true`);
+  await cdp.press("Backspace", 8);
+  const undone = await settledText("Undo.md");
+  check("deleting a remote edit before the pane binds keeps it deleted", !!reloaded && agreed(undone) && undone.crdt === "Base.\n", JSON.stringify({ reloaded, ...undone }));
+
   await cdp.eval(`await app.plugins.plugins["provenance-sync"].engine.settle(); return true`);
   await sleep(1500);
   ob(["create", "--path", "Cli/late.md", "--content", "Base.\n", "--why", "agent", "--agent", "shell-agent"]);
@@ -1022,7 +1036,7 @@ try {
     const notes = r.result.files.filter(
       (f) => !localApiSaved.has(f),
     ).filter(
-      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !f.startsWith("Editors/") && !f.startsWith("LocalApi-") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Fails.md", "Linker.md", "DailyTemplate.md", "Tasks.md", "Blank daily.md", "Blank open.md"].includes(f),
+      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !f.startsWith("Editors/") && !f.startsWith("LocalApi-") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Fails.md", "Linker.md", "DailyTemplate.md", "Tasks.md", "Blank daily.md", "Blank open.md", "Undo.md"].includes(f),
     );
     return notes.join(",") === "Projects/Renamed.md" ? notes : undefined;
   }, 15000);

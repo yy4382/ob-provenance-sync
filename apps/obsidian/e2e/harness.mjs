@@ -116,6 +116,12 @@ export async function obsidian({ vault, profile }) {
       async type(text) {
         for (const ch of text) await call("Input.insertText", { text: ch });
       },
+      /** Presses and releases a key that types nothing, such as Backspace, with real key events. */
+      async press(key, keyCode) {
+        const event = { key, code: key, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode };
+        await call("Input.dispatchKeyEvent", { type: "rawKeyDown", ...event });
+        await call("Input.dispatchKeyEvent", { type: "keyUp", ...event });
+      },
       hover: (x, y) => call("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }),
       /** Clicks the middle of the active pane's `index`th `selector`, with real mouse events. */
       async click(selector, index = 0) {
