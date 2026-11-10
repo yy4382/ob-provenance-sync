@@ -24,6 +24,7 @@ import {
   parseEntries,
   Recorder,
   repairedConflictPath,
+  rewriteRange,
   setText,
   TEXT_KEY,
   textAt,
@@ -118,21 +119,28 @@ export async function sha256(data: ArrayBuffer): Promise<string> {
 const BASE_KEY = "disk-base";
 const UNSENT_WEEKS_KEY = "unsent-weeks";
 const SAVED_STATES = 64;
+/** Texts the file on disk held, so an editor that read an older one can still be placed. */
+const DISK_STATES = 16;
 
 const MIRROR_KEY = "on-disk";
 
 /** A state of a note's CRDT and its text. */
 export type TextState = { snapshot: Y.Snapshot; text: string };
 
-/** Whether state `a` holds everything state `b` does: each of its items and each of its deletions. */
-function contains(a: Y.Snapshot, b: Y.Snapshot): boolean {
-  for (const [client, clock] of b.sv) if ((a.sv.get(client) ?? 0) < clock) return false;
-  for (const [client, ranges] of b.ds.clients) {
-    for (const { clock, len } of ranges) {
-      for (let c = clock; c < clock + len; c++) if (!Y.isDeleted(a.ds, Y.createID(client, c))) return false;
-    }
-  }
-  return true;
+/** The range `from`-`to` of a text, replaced by `insert`. */
+export type Edit = { from: number; to: number; insert: string };
+
+/**
+ * An editor's own edits while it isn't bound, as the host's editor keeps them:
+ * edits of `text`, which the CRDT holds at `state` if the editor knows that state.
+ */
+export interface PaneLog {
+  readonly text: string;
+  readonly state: TextState | null;
+  /** The edits as ranges of `text`, ascending and apart; with `onto`, the same edits moved onto that text. */
+  edits(onto?: string): Edit[];
+  /** The edits are in the CRDT now, which holds this editor's text at `state`. */
+  placed(state: TextState): void;
 }
 
 /**
@@ -144,8 +152,9 @@ function contains(a: Y.Snapshot, b: Y.Snapshot): boolean {
  * remote changes that haven't reached the disk yet are kept rather than
  * reverted. Disk writes are debounced and skipped while an editor is bound,
  * because then the editor owns saving. When it saves, `trackWrite`
- * learns the exact text it writes and finds in `editorStates` the state the
- * editor showed with that text; once the save lands, that state is the base.
+ * learns the exact text it writes and the state the editor showed with that
+ * text; once the save lands, that state is the base. An editor that isn't
+ * bound sends only its own edits, never its text (`placeEdits`).
  * Telling saves apart by comparing the text read back later is not enough:
  * the read may also hold another program's edit, or an outside revert to an
  * older editor text.
@@ -154,15 +163,9 @@ export class MarkdownFile {
   readonly doc = new Y.Doc({ gc: false });
   readonly ytext = this.doc.getText(TEXT_KEY);
   readonly ready: Promise<void>;
-  private base: { snapshot: Y.Snapshot; text: string } | null = null;
-  private readonly editorStates: Array<{ snapshot: Y.Snapshot; text: string }> = [];
-  /**
-   * What an editor showed when it stopped syncing with the note still open, until it binds
-   * again. Its saves meanwhile, and its text then, are edits of this state.
-   */
-  private reopening: TextState | null = null;
-  /** The text writeNow last replaced on disk. */
-  private replaced: string | null = null;
+  /** States the file on disk held, newest last. The newest is the base. */
+  private readonly diskStates: TextState[] = [];
+  private readonly editorStates: TextState[] = [];
   /** Tracked writes in flight, and a count bumped as each starts and lands, so a read that overlapped one reads again. */
   private readonly writes = new Set<Promise<unknown>>();
   private writeEvents = 0;
@@ -205,7 +208,7 @@ export class MarkdownFile {
       // crash the base may name updates that were never stored.
       const snapshot = Y.decodeSnapshot(saved);
       const text = textAt(this.doc, snapshot);
-      if (text !== null) this.base = { snapshot, text };
+      if (text !== null) this.diskStates.push({ snapshot, text });
     }
     this.knownLocally = Y.encodeStateVector(this.doc).length > 1;
     if (this.destroyed) return;
@@ -219,6 +222,10 @@ export class MarkdownFile {
     return { snapshot: Y.snapshot(this.doc), text: this.ytext.toJSON() };
   }
 
+  private get base(): TextState | null {
+    return this.diskStates[this.diskStates.length - 1] ?? null;
+  }
+
   /** The text this device last had on disk for the file. */
   get diskText(): string {
     return this.base?.text ?? this.ytext.toJSON();
@@ -226,7 +233,10 @@ export class MarkdownFile {
 
   private setBase(snapshot: Y.Snapshot, text: string) {
     if (this.destroyed) return;
-    this.base = { snapshot, text };
+    // The newest state with a text is the one an editor that read it is placed at.
+    if (this.base?.text === text) this.diskStates.pop();
+    this.diskStates.push({ snapshot, text });
+    if (this.diskStates.length > DISK_STATES) this.diskStates.shift();
     void this.persistence?.set(BASE_KEY, Y.encodeSnapshot(snapshot));
   }
 
@@ -273,38 +283,29 @@ export class MarkdownFile {
     if (disk === current) return this.setBase(Y.snapshot(this.doc), disk);
     const base = this.base ?? { snapshot: Y.snapshot(this.doc), text: current };
     if (disk !== base.text) {
-      const from = this.ancestor() ?? base;
-      this.engine.log("debug", `Merging a change made on disk into note ${short(this.id)} (${difference(from.text, disk)})`, this.path);
+      this.engine.log("debug", `Merging a change made on disk into note ${short(this.id)} (${difference(base.text, disk)})`, this.path);
       const by = this.engine.wasWrittenLocally(this.path, base.text, disk) ? this.human() : this.unknown();
-      this.setBase(this.mergeOver(from, disk, by), disk);
+      this.setBase(this.editAt(base, by, (text) => setText(text, disk, by, "literal")).snapshot, disk);
     }
     if (this.ytext.toJSON() !== disk) this.scheduleWrite();
   }
 
-  /**
-   * What the file's and an editor's text are edits of: the base, or the state an editor
-   * showed when it stopped syncing with the note still open, while the base doesn't hold it.
-   */
-  private ancestor(): TextState | null {
-    const shown = this.reopening;
-    return shown && !(this.base && contains(this.base.snapshot, shown.snapshot)) ? shown : this.base;
-  }
-
-  /** Merges `text` as `by`'s edit of `base`'s text, and returns the state that edit made of the base. */
-  private mergeOver(base: TextState, text: string, by: Provenance): Y.Snapshot {
-    const fork = Y.createDocFromSnapshot(this.doc, base.snapshot);
+  /** Makes `by`'s edit of `at`'s text on a fork at that state, merges the fork in, and returns the state the edit made. */
+  private editAt(at: TextState, by: Provenance, edit: (text: Y.Text) => void): TextState {
+    const fork = Y.createDocFromSnapshot(this.doc, at.snapshot);
     const before = Y.encodeStateVector(fork);
-    fork.transact(() => setText(fork.getText(TEXT_KEY), text, by, "literal"));
+    const text = fork.getText(TEXT_KEY);
+    fork.transact(() => edit(text));
     // Deletions carry no author, so the journal reads them from the transaction's actor.
     this.doc.transact(() => {
       markActor(this.doc, by.author);
       Y.applyUpdate(this.doc, Y.encodeStateAsUpdate(fork, before), FROM_DISK);
     }, FROM_DISK);
-    return Y.snapshot(fork);
+    return { snapshot: Y.snapshot(fork), text: text.toJSON() };
   }
 
-  private recordEditorState() {
-    this.editorStates.push({ snapshot: Y.snapshot(this.doc), text: this.ytext.toJSON() });
+  private recordEditorState(state = this.textState()) {
+    this.editorStates.push(state);
     if (this.editorStates.length > SAVED_STATES) this.editorStates.shift();
   }
 
@@ -346,12 +347,12 @@ export class MarkdownFile {
 
   /**
    * An editor is about to save `text` to this file. If the CRDT held that
-   * text, in its current state or one an editor showed, that state becomes the
-   * base once the write lands.
+   * text, in `saved` (the state the editor knew it showed), its current state
+   * or one an editor showed, that state becomes the base once the write lands.
    */
-  async trackWrite<T>(text: string, write: () => Promise<T>): Promise<T> {
+  async trackWrite<T>(text: string, write: () => Promise<T>, saved?: TextState): Promise<T> {
     const state =
-      text === this.ytext.toJSON() ? { snapshot: Y.snapshot(this.doc), text } : [...this.editorStates].reverse().find((s) => s.text === text);
+      saved?.text === text ? saved : text === this.ytext.toJSON() ? this.textState() : [...this.editorStates].reverse().find((s) => s.text === text);
     if (!state) {
       // Text typed before the editor bound: merged from the file like another local write, so it is the human's.
       const path = this.path;
@@ -373,44 +374,88 @@ export class MarkdownFile {
 
   /**
    * Binds an editor, as a queued task, and resolves to its release function.
-   * While any editor is bound, the editor saves the file. `loaded` is the
-   * first editor's text: what the host read from the file, plus anything
-   * typed before the editor bound, some of which the editor may already have
-   * saved without the CRDT holding it. So the file is merged first, with any
-   * other program's edit whose modify event is still pending, and then the
-   * editor's text as an edit of the file's, which stays the base. Nothing is
-   * awaited after reading `loaded`, so no keystroke falls between that read
-   * and the editor pushing its edits. A pane that read the file before
-   * writeNow's last write and hasn't reloaded it still holds the replaced
-   * text, which is not merged.
-   *
-   * `shown` is the state an editor showed when it stopped syncing with its
-   * note still open, as after an error or a restart of sync, which release
-   * also takes. Its text and its saves since are edits of that state, which
-   * already holds what it typed before, so they are merged against it.
+   * While any editor is bound, the editor saves the file. The file is merged
+   * first, with any other program's edit whose modify event is still pending.
+   * Then `take` hands over the editor's own edits from before it bound, with
+   * those of the note's other unbound editors, and they are applied
+   * (`placeEdits`). The editor's text itself is never merged. Its own edits
+   * that no known state places are moved onto the current text. Nothing is
+   * awaited after `take`, so no keystroke falls between it and the editor
+   * pushing its edits.
    */
-  bindEditor(loaded: () => string | null = () => null, shown: TextState | null = null): Promise<(shown?: TextState) => void> {
+  bindEditor(take: () => { own: readonly PaneLog[]; others: readonly PaneLog[] } = () => ({ own: [], others: [] })): Promise<() => void> {
     return this.engine.enqueue(async () => {
-      if (shown && this.editors === 0 && textAt(this.doc, shown.snapshot) === shown.text) this.reopening = shown;
       if (this.editors === 0 && this.base) await this.onDiskModified();
-      const text = this.editors === 0 && this.base ? loaded() : null;
-      const from = this.ancestor();
-      if (text !== null && from && text !== this.ytext.toJSON() && text !== from.text && text !== this.replaced) {
-        this.engine.log("debug", `Merging the open editor's unsaved text into note ${short(this.id)} (${difference(from.text, text)})`, this.path);
-        this.mergeOver(from, text, this.human());
+      const { own, others } = take();
+      for (const log of this.placeEdits([...own, ...others], "bind")) {
+        if (!own.includes(log)) continue;
+        const at = this.textState();
+        this.apply(log, at, log.edits(at.text), "bind", "the synced text by a diff, as no state had the editor's text");
       }
-      this.reopening = null;
       this.editors++;
       this.recordEditorState();
       let released = false;
-      return (shown?: TextState) => {
+      return () => {
         if (released) return;
         released = true;
-        if (shown) this.reopening = shown;
         this.editors--;
         this.scheduleWrite();
       };
     });
+  }
+
+  /**
+   * Applies editors' own edits made while they weren't bound, each log's on a
+   * fork at the state whose text is the log's, so only those edits enter the
+   * CRDT. Repeats while that places more, as one editor's text can hold
+   * another's edits as a copy. Returns the logs no known state has the text of.
+   *
+   * An editor's save comes before the engine reads the file, which may hold
+   * another program's edit back to an earlier text, so a "save" looks for the
+   * log's text only in the base and the current state. A "bind" merges the
+   * file first, and also looks in earlier texts of the file and of editors.
+   */
+  placeEdits(logs: readonly PaneLog[], when: "bind" | "save"): PaneLog[] {
+    let left = [...logs];
+    for (let placed = true; placed; ) {
+      placed = false;
+      for (const log of left) {
+        const found = this.stateOf(log, when === "bind");
+        if (!found) continue;
+        this.apply(log, found.state, log.edits(), when, found.how);
+        left = left.filter((l) => l !== log);
+        placed = true;
+      }
+    }
+    return left;
+  }
+
+  /** The state a log's edits apply to, and where it was found. */
+  private stateOf(log: PaneLog, earlier: boolean): { state: TextState; how: string } | null {
+    if (log.state && textAt(this.doc, log.state.snapshot) === log.state.text) return { state: log.state, how: "the state it showed" };
+    if (this.base?.text === log.text) return { state: this.base, how: "the file's text" };
+    if (this.ytext.toJSON() === log.text) return { state: this.textState(), how: "the synced text" };
+    if (!earlier) return null;
+    const newest = (states: TextState[]) => [...states].reverse().find((s) => s.text === log.text);
+    const disk = newest(this.diskStates);
+    if (disk) return { state: disk, how: "an earlier text of the file" };
+    const shown = newest(this.editorStates);
+    return shown ? { state: shown, how: "a text an editor showed" } : null;
+  }
+
+  private apply(log: PaneLog, at: TextState, edits: Edit[], when: "bind" | "save", how: string) {
+    if (!edits.length) return log.placed(at);
+    const by = this.human();
+    const state = this.editAt(at, by, (text) => {
+      let shift = 0;
+      for (const e of edits) {
+        rewriteRange(text, e.from + shift, at.text.slice(e.from, e.to), e.insert, by, "literal");
+        shift += e.insert.length - (e.to - e.from);
+      }
+    });
+    this.engine.log("debug", `Applied ${edits.length} edits an editor made before it synced, at its ${when}, onto ${how}`, this.path);
+    this.recordEditorState(state);
+    log.placed(state);
   }
 
   human() {
@@ -454,7 +499,6 @@ export class MarkdownFile {
       return;
     }
     else this.engine.log("debug", "Wrote the synced text to the file", path);
-    this.replaced = expected;
     this.setBase(snapshot, text);
   }
 
@@ -1318,9 +1362,9 @@ export class SyncEngine implements VaultDocs {
   }
 
   /** An editor is about to save `text` to `path`; see MarkdownFile.trackWrite. */
-  trackWrite<T>(path: string, text: string, write: () => Promise<T>): Promise<T> {
+  trackWrite<T>(path: string, text: string, write: () => Promise<T>, saved?: TextState): Promise<T> {
     const file = this.fileAt(path);
-    return file ? file.trackWrite(text, write) : write();
+    return file ? file.trackWrite(text, write, saved) : write();
   }
 
   /**

@@ -4,7 +4,9 @@ import { join } from "node:path";
 import * as Y from "yjs";
 import { createApp } from "../../server/src/app";
 import { parseConfig } from "../../server/src/config";
-import { SyncEngine, type Blobs, type Disk, type Persistence } from "../src/sync/engine";
+import { ChangeSet, Text } from "@codemirror/state";
+import { diffChanges, EditLog } from "../src/editor/edit-log";
+import { SyncEngine, type Blobs, type Disk, type MarkdownFile, type PaneLog, type Persistence, type TextState } from "../src/sync/engine";
 
 export const TOKEN = "device-token-0123456789";
 
@@ -59,14 +61,17 @@ export class MemoryDisk implements Disk {
     await this.write(path, text);
     return true;
   }
-  /** An editor's save, or with `local` another plugin's or a task click's write, as wrapVaultWrites reports them. */
-  save(path: string, text: string, local = false) {
+  /**
+   * An editor's save, or with `local` another plugin's or a task click's write, as wrapVaultWrites
+   * reports them. `state` is the state the saving editor knows it shows (ProvenanceView.saving).
+   */
+  save(path: string, text: string, local = false, state?: TextState) {
     if (local) {
       const before = this.files.get(path);
       this.engine?.wroteLocally(path, typeof before === "string" ? before : "", text);
       return this.write(path, text);
     }
-    return this.engine!.trackWrite(path, text, () => this.write(path, text));
+    return this.engine!.trackWrite(path, text, () => this.write(path, text), state);
   }
   async writeBinary(path: string, data: ArrayBuffer) {
     const existed = this.files.has(path);
@@ -123,5 +128,64 @@ export async function eventually(check: () => void | Promise<void>, ms = 4000) {
       if (Date.now() > end) throw e;
       await new Promise((r) => setTimeout(r, 30));
     }
+  }
+}
+
+/**
+ * An editor that isn't bound to its note, keeping its own edits the way binding.ts does:
+ * `doc` is what it shows, and its log holds its edits since a text it was made from.
+ */
+export class Pane {
+  private log: EditLog;
+
+  constructor(
+    public doc: string,
+    state: TextState | null = null,
+  ) {
+    this.log = new EditLog(doc, state);
+  }
+
+  private change(changes: ChangeSet, own: boolean) {
+    const after = changes.apply(Text.of(this.doc.split("\n"))).toString();
+    const log = own ? this.log.add(changes) : this.log.rebase(changes, after);
+    if (!log) throw new Error("the edits over the changed text don't make the editor's text");
+    this.log = log;
+    this.doc = after;
+  }
+
+  /** The user types `text` at `at`, the end by default. */
+  type(text: string, at = this.doc.length) {
+    this.change(ChangeSet.of({ from: at, insert: text }, this.doc.length), true);
+  }
+
+  /** The user deletes `from`-`to`. */
+  delete(from: number, to: number) {
+    this.change(ChangeSet.of({ from, to }, this.doc.length), true);
+  }
+
+  /** Obsidian puts `text` in the editor, keeping the user's edits: a reload, or a copy from another pane. */
+  reload(text: string) {
+    this.change(ChangeSet.of(diffChanges(this.doc, text), this.doc.length), false);
+  }
+
+  /** What bindEditor takes from this editor. */
+  take = () => ({ own: [this.paneLog()], others: [] });
+
+  private paneLog(): PaneLog {
+    const log = this.log;
+    return {
+      text: log.text,
+      state: log.state,
+      edits: (onto) => log.edits(onto),
+      placed: (state) => {
+        if (this.log === log) this.log = new EditLog(this.doc, state.text === this.doc ? state : null);
+      },
+    };
+  }
+
+  /** Obsidian picks this editor's text to save: its edits are applied, and the state it shows comes back, as in ProvenanceView.saving. */
+  saving(file: MarkdownFile): TextState | undefined {
+    if (file.placeEdits([this.paneLog()], "save").length) this.log = new EditLog(this.doc);
+    return this.log.state?.text === this.doc ? this.log.state : undefined;
   }
 }

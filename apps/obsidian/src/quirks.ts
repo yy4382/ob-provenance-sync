@@ -27,7 +27,9 @@ export type EditKind = "local" | "copy";
  * another program changed, is "set". Every other edit is local: typing,
  * Obsidian's commands, a click on a task, and other plugins through the
  * Editor API, which carry no user event. A frontmatter edit is "set" too,
- * but it is the pane's own: see `wrapFrontmatterSaves`.
+ * but it is the pane's own: see `wrapFrontmatterSaves`. A reload of a pane
+ * with unsaved typing changes only what the file changed, so the binding's
+ * edit log can tell the typing apart from it.
  *
  * quirk: typing-has-user-event
  * quirk: commands-have-user-event
@@ -107,10 +109,11 @@ export function codeMirrorOf(view: MarkdownView): EditorView | null {
 
 /**
  * Reports every note write through the Vault API except the engine's own
- * (`syncWriteOptions`). An editor's save goes to `started` as soon as it has
- * picked its text, since it waits on other file operations before writing,
- * and then to `save` with the exact text it writes, which the engine needs to
- * tell the save from other programs' edits.
+ * (`syncWriteOptions`). An editor's save goes to `picked` and `started` as
+ * soon as it has picked its text, since it waits on other file operations
+ * before writing, and then to `save` with the exact text it writes, which the
+ * engine needs to tell the save from other programs' edits, and with what
+ * `picked` returned.
  * Any other write, from another plugin or a click on a task in reading view
  * (`clickingTask`), goes to `local` with the text it replaces and the text it
  * writes, before it lands. Returns the undo.
@@ -121,19 +124,20 @@ export function codeMirrorOf(view: MarkdownView): EditorView | null {
  * quirk: editor-save-marker-is-consumed-once
  * quirk: vault-text-writes-do-not-nest
  */
-export function wrapVaultWrites(
+export function wrapVaultWrites<Picked>(
   app: App,
   track: {
+    picked: (view: MarkdownView, text: string) => Picked;
     started: (file: TFile, done: Promise<unknown>) => void;
-    save: (file: TFile, data: string, write: () => Promise<void>) => Promise<void>;
+    save: (file: TFile, data: string, write: () => Promise<void>, picked: Picked) => Promise<void>;
     local: (path: string, before: string, after: string) => void;
   },
 ): () => void {
   const vault = app.vault;
-  const saves = new Map<TFile, Set<{ text: string }>>();
+  const saves = new Map<TFile, Set<{ text: string; picked: Picked }>>();
   const saving = (view: TextFileView, file: TFile | null, text: string, write: () => Promise<void>) => {
     if (view.app !== app || !file || !(view instanceof MarkdownView) || clickingTask()) return write();
-    const save = { text };
+    const save = { text, picked: track.picked(view, text) };
     let pending = saves.get(file);
     if (!pending) saves.set(file, (pending = new Set()));
     pending.add(save);
@@ -173,7 +177,7 @@ export function wrapVaultWrites(
       const save = [...(pending ?? [])].find((s) => s.text === data);
       if (save) {
         pending!.delete(save);
-        return track.save(file, data, write);
+        return track.save(file, data, write, save.picked);
       }
       track.local(file.path, await before(file), data);
       return write();

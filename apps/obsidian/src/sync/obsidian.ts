@@ -1,7 +1,8 @@
 import { normalizePath, requestUrl, TFile, type App, type Plugin, type TAbstractFile } from "obsidian";
 import { IndexeddbPersistence } from "y-indexeddb";
 import type * as Y from "yjs";
-import { communityPluginOn, corePluginOn, deviceVaultId, replaceIfHolds, syncWriteOptions, wrapVaultWrites } from "../quirks";
+import { editorSaving } from "../editor/binding";
+import { codeMirrorOf, communityPluginOn, corePluginOn, deviceVaultId, replaceIfHolds, syncWriteOptions, wrapVaultWrites } from "../quirks";
 import type { Blobs, Disk, Persistence, SyncEngine } from "./engine";
 
 const isBinary = (file: TFile) => file.extension !== "md";
@@ -43,12 +44,16 @@ export function watchVault(plugin: Plugin, engine: () => SyncEngine | null) {
   );
   plugin.register(
     wrapVaultWrites(app, {
+      picked: (view, text) => {
+        const cm = codeMirrorOf(view);
+        return cm && view.file && isSyncedPath(app, view.file.path) ? editorSaving(cm, text) : undefined;
+      },
       started: (file, done) => {
         if (isSyncedPath(app, file.path)) engine()?.saveStarted(file.path, done);
       },
-      save: (file, data, write) => {
+      save: (file, data, write, state) => {
         const running = engine();
-        return running && isSyncedPath(app, file.path) ? running.trackWrite(file.path, data, write) : write();
+        return running && isSyncedPath(app, file.path) ? running.trackWrite(file.path, data, write, state) : write();
       },
       local: (path, before, after) => {
         if (isSyncedPath(app, path)) engine()?.wroteLocally(path, before, after);

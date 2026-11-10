@@ -1,11 +1,11 @@
-import { Annotation, EditorSelection, RangeSetBuilder, StateEffect, Transaction, type ChangeSpec, type Extension } from "@codemirror/state";
+import { Annotation, EditorSelection, RangeSetBuilder, StateEffect, Transaction, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, hoverTooltip, layer, RectangleMarker, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { attribute, rewriteRange, type Segment } from "@provenance/core";
-import diff from "fast-diff";
 import type { TFile } from "obsidian";
 import type * as Y from "yjs";
 import { editKind, fileLoadedInto, fileNamedBy } from "../quirks";
-import type { MarkdownFile, SyncEngine, SyncEvent, TextState } from "../sync/engine";
+import type { MarkdownFile, PaneLog, SyncEngine, SyncEvent, TextState } from "../sync/engine";
+import { diffChanges, EditLog } from "./edit-log";
 
 const fromYjs = Annotation.define<boolean>();
 const refresh = StateEffect.define<null>();
@@ -31,21 +31,8 @@ type Band = { from: number; to: number; kind: keyof typeof marks };
  * and converging it would insert that text a second time.
  */
 const panes = new Map<MarkdownFile, Set<ProvenanceView>>();
-
-/** Minimal CodeMirror changes that turn `from` into `to`. */
-function diffChanges(from: string, to: string): ChangeSpec[] {
-  const changes: ChangeSpec[] = [];
-  let pos = 0;
-  for (const [op, chunk] of diff(from, to)) {
-    if (op === diff.EQUAL) pos += chunk.length;
-    else if (op === diff.INSERT) changes.push({ from: pos, insert: chunk });
-    else {
-      changes.push({ from: pos, to: pos + chunk.length });
-      pos += chunk.length;
-    }
-  }
-  return changes;
-}
+/** Every editor, bound or not, to find a note's unbound editors. */
+const views = new Set<ProvenanceView>();
 
 let currentEngine: () => SyncEngine | null = () => null;
 const engine = () => currentEngine();
@@ -59,19 +46,24 @@ class ProvenanceView {
   file: MarkdownFile | null = null;
   /**
    * The file whose text this editor state holds, fixed for this view since each
-   * state gets its own. Null for a state that holds no file's text, which
-   * binding would merge as a deletion.
+   * state gets its own. Null for a state that holds no file's text.
    */
   private readonly loaded: TFile | null;
-  release: ((shown?: TextState) => void) | null = null;
+  release: (() => void) | null = null;
   /** Identifies the current attachment, so a binding that resolves after the pane moved on is released. */
   private attached: object | null = null;
-  /** What this editor showed when it stopped syncing with its note still open, for binding again. */
-  private shown: { file: MarkdownFile["id"]; state: TextState } | null = null;
+  /**
+   * This editor's own edits while it isn't bound, which its bind applies. The
+   * last log is the live one. An earlier one holds edits Obsidian dropped from
+   * the editor's text. Empty while bound, and for a state that holds no file's text.
+   */
+  private logs: EditLog[] = [];
   private readonly observer = (event: Y.YTextEvent, tr: Y.Transaction) => this.onYjs(event, tr);
 
   constructor(readonly view: EditorView) {
     this.loaded = fileLoadedInto(view);
+    if (this.loaded) this.logs = [new EditLog(view.state.doc.toString())];
+    views.add(this);
     this.attach();
   }
 
@@ -86,7 +78,7 @@ class ProvenanceView {
   }
 
   /** The engine may start, or learn the file, after the pane opened it, so this runs on every update. */
-  private attach() {
+  private attach(u?: ViewUpdate) {
     const shown = this.shownFile();
     // A rename is not a load: the pane's text may hold unsaved edits the CRDT already has.
     if (shown && this.file && engine()?.files.get(this.file.id) === this.file) return;
@@ -96,7 +88,7 @@ class ProvenanceView {
       const why = !shown ? "the pane no longer shows it" : !engine() ? "sync stopped" : "sync has another note at its path";
       log({ level: "debug", message: `An editor stopped syncing this note: ${why}`, path: shown?.path ?? this.file.path });
     }
-    this.detach(shown && !engine() ? this.keepShown() : undefined);
+    this.detach(u);
     if (!file) return;
     this.file = file;
     let set = panes.get(file);
@@ -104,18 +96,72 @@ class ProvenanceView {
     set.add(this);
     file.ytext.observe(this.observer);
     const attached = (this.attached = {});
-    const current = () => (this.attached === attached ? this.view.state.doc.toString() : null);
-    const shownState = this.shown?.file === file.id ? this.shown.state : null;
-    this.shown = null;
+    const take = () =>
+      this.attached === attached ? { own: this.paneLogs(), others: this.unboundSiblings().flatMap((v) => v.paneLogs()) } : { own: [], others: [] };
     void file.ready
-      .then(() => file.bindEditor(current, shownState))
-      .then((release) => {
-        if (this.attached !== attached) return release();
-        this.release = release;
-        log({ level: "debug", message: "An editor syncs this note", path: file.path });
-        if (this.primary) this.loadFromCrdt();
-        this.scheduleRefresh();
-      });
+      .then(() => file.bindEditor(take))
+      .then(
+        (release) => {
+          if (this.attached !== attached) return release();
+          this.release = release;
+          this.logs = [];
+          log({ level: "debug", message: "An editor syncs this note", path: file.path });
+          if (this.primary) this.loadFromCrdt();
+          this.scheduleRefresh();
+        },
+        (e: unknown) => {
+          // The logs the bind didn't apply stay, for the next update to bind again.
+          log({ level: "error", message: `An editor couldn't sync this note, so it tries again: ${errorText(e)}`, path: file.path });
+          if (this.attached === attached) this.detach();
+        },
+      );
+  }
+
+  /** The note's other editors that aren't bound. */
+  private unboundSiblings(): ProvenanceView[] {
+    return [...views].filter((v) => v !== this && v.loaded === this.loaded && !v.release && v.logs.length);
+  }
+
+  /** This editor's logs, for the engine to apply. Each applied log leaves, and the live one starts again from the text the editor shows. */
+  private paneLogs(): PaneLog[] {
+    return this.logs.map((log) => ({
+      text: log.text,
+      state: log.state,
+      edits: (onto) => log.edits(onto),
+      placed: (state) => {
+        const i = this.logs.indexOf(log);
+        if (i < 0) return;
+        if (i < this.logs.length - 1) return void this.logs.splice(i, 1);
+        const text = this.view.state.doc.toString();
+        this.logs[i] = new EditLog(text, state.text === text ? state : null);
+      },
+    }));
+  }
+
+  /**
+   * Obsidian picked `text` to save from this editor. While it isn't bound, the
+   * save carries its edits to disk, so they leave the logs now: applied, with
+   * those of the note's other unbound editors, whose edits its text may hold
+   * as copies, so the state the save writes is known. Returns that state.
+   * Edits the engine can't place stay out of the CRDT, and the save brings
+   * them in as a change on disk.
+   */
+  saving(text: string): TextState | undefined {
+    if (this.release || !this.loaded || text !== this.view.state.doc.toString()) return undefined;
+    const editors = [this, ...this.unboundSiblings()];
+    const live = editors.map((v) => v.logs[v.logs.length - 1]);
+    const file = engine()?.fileAt(this.loaded.path);
+    try {
+      if (file?.loaded) file.placeEdits(editors.flatMap((v) => v.paneLogs()), "save");
+    } catch (e) {
+      // Throwing would fail Obsidian's save. What wasn't applied reaches the CRDT through the file.
+      log({ level: "error", message: `Couldn't apply an editor's edits as it was saved: ${errorText(e)}`, path: this.loaded.path });
+    }
+    editors.forEach((v, i) => {
+      if (v.logs[v.logs.length - 1] === live[i] && v.view.state.doc.toString() === text) v.logs[v.logs.length - 1] = new EditLog(text);
+    });
+    const state = this.logs[this.logs.length - 1]?.state;
+    return state?.text === text ? state : undefined;
   }
 
   /** Makes the editor show the CRDT's text. Converging by diff makes repeats harmless. */
@@ -124,15 +170,19 @@ class ProvenanceView {
     if (changes.length) this.view.dispatch({ changes, annotations: [fromYjs.of(true), Transaction.addToHistory.of(false)] });
   }
 
-  /** `shown` is what the editor showed, when it stops syncing with its note still open. */
-  private detach(shown?: TextState) {
+  /** `u` is the update that unbinds it, whose changes weren't pushed, so its log starts before them. */
+  private detach(u?: ViewUpdate) {
     const file = this.file;
     if (!file) return;
+    if (this.release) {
+      const text = (u?.startState.doc ?? this.view.state.doc).toString();
+      this.logs = [new EditLog(text, text === file.ytext.toJSON() ? file.textState() : null)];
+    }
     file.ytext.unobserve(this.observer);
     const wasPrimary = this.primary;
     const set = panes.get(file)!;
     set.delete(this);
-    this.release?.(shown);
+    this.release?.();
     this.release = null;
     this.attached = null;
     this.file = null;
@@ -162,7 +212,8 @@ class ProvenanceView {
 
   update(u: ViewUpdate) {
     try {
-      this.attach();
+      this.attach(u);
+      if (!this.release) this.logChanges(u);
       const file = this.file;
       if (!file) return;
       const own = u.transactions.filter((tr) => tr.docChanged && !tr.annotation(fromYjs));
@@ -171,18 +222,36 @@ class ProvenanceView {
     } catch (e) {
       // Rethrowing would make CodeMirror drop this plugin for good, leaving the editor
       // unsynced while the engine writes the file under it and Obsidian merges that into
-      // its unsaved typing. Binding again at once merges what the error kept from the CRDT.
-      log({ level: "error", message: `An editor's sync failed, so it binds again: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`, path: this.file?.path });
-      this.detach(this.keepShown());
+      // its unsaved typing. Binding again at once applies the edits the error kept from the CRDT.
+      log({ level: "error", message: `An editor's sync failed, so it binds again: ${errorText(e)}`, path: this.file?.path });
+      const bound = !!this.release;
+      this.detach(u);
+      if (bound) this.logChanges(u);
       this.attach();
     }
   }
 
-  /** Remembers what this editor shows, for binding again, as its note stays open. */
-  private keepShown(): TextState | undefined {
-    if (!this.file) return undefined;
-    this.shown = { file: this.file.id, state: this.file.textState() };
-    return this.shown.state;
+  /** Adds an update's changes to the live log: the editor's own edits, and the changes under them that it didn't make. */
+  private logChanges(u: ViewUpdate) {
+    for (const tr of u.transactions) {
+      const last = this.logs.length - 1;
+      const live = this.logs[last];
+      if (!live || !tr.docChanged) continue;
+      if (!tr.annotation(fromYjs) && editKind(tr) === "local") {
+        this.logs[last] = live.add(tr.changes);
+        continue;
+      }
+      const after = tr.newDoc.toString();
+      const moved = live.rebase(tr.changes, after);
+      if (moved || live.empty) {
+        this.logs[last] = moved ?? new EditLog(after);
+        continue;
+      }
+      // Obsidian replaced the text without the edits, as when it reloads a note that was
+      // empty on disk. Its own save would lose them; the bind brings them back instead.
+      log({ level: "warn", message: "Obsidian replaced an editor's text without its unsaved edits before it synced. They are kept, and come back when it syncs", path: this.loaded?.path });
+      this.logs.push(new EditLog(after));
+    }
   }
 
   private push(transactions: readonly Transaction[], file: MarkdownFile) {
@@ -239,12 +308,20 @@ class ProvenanceView {
   }
 
   destroy() {
+    views.delete(this);
     if (this.file) log({ level: "debug", message: "An editor stopped syncing this note: the editor closed or reloaded", path: this.file.path });
     this.detach();
   }
 }
 
 const plugin = ViewPlugin.fromClass(ProvenanceView, { decorations: (v) => v.decorations });
+
+const errorText = (e: unknown) => (e instanceof Error ? (e.stack ?? e.message) : String(e));
+
+/** Obsidian picked `text` to save from the editor `view`; see ProvenanceView.saving. Returns the state the save writes, if known. */
+export function editorSaving(view: EditorView, text: string): TextState | undefined {
+  return view.plugin(plugin)?.saving(text);
+}
 
 /**
  * Draws each band the way a selection is drawn: one rectangle per visual

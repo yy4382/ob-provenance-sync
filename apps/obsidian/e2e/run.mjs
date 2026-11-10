@@ -985,6 +985,20 @@ try {
   const undone = await settledText("Undo.md");
   check("deleting a remote edit before the pane binds keeps it deleted", !!reloaded && agreed(undone) && undone.crdt === "Base.\n", JSON.stringify({ reloaded, ...undone }));
 
+  // A bind that fails keeps the typing it was handed, and the next bind applies it once.
+  writeFileSync(join(vault, "Retry.md"), "Start.\n");
+  await eventually(() => cdp.eval(`return !!${engineFile("Retry.md")}?.loaded`));
+  await cdp.eval(`await ${plugin}.engine.settle(); const f = ${engineFile("Retry.md")}; const place = f.placeEdits;
+    f.placeEdits = function () { f.placeEdits = place; throw new Error("simulated bind failure"); };
+    void ${plugin}.engine.enqueue(() => new Promise((r) => setTimeout(r, 1000))); return true`);
+  await openAndFocus(cdp, "Retry.md");
+  await cdp.type("One ");
+  await sleep(600);
+  await cdp.type("Two ");
+  const retried = await settledText("Retry.md");
+  check("a bind that fails keeps the typing for the next one", agreed(retried) && retried.crdt === "One Two Start.\n", JSON.stringify(retried));
+  check("a bind that fails is in the event log", await cdp.eval(`return ${plugin}.log.entries.some((e) => e.message.includes("simulated bind failure"))`));
+
   await cdp.eval(`await app.plugins.plugins["provenance-sync"].engine.settle(); return true`);
   await sleep(1500);
   ob(["create", "--path", "Cli/late.md", "--content", "Base.\n", "--why", "agent", "--agent", "shell-agent"]);
@@ -1036,7 +1050,7 @@ try {
     const notes = r.result.files.filter(
       (f) => !localApiSaved.has(f),
     ).filter(
-      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !f.startsWith("Editors/") && !f.startsWith("LocalApi-") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Fails.md", "Linker.md", "DailyTemplate.md", "Tasks.md", "Blank daily.md", "Blank open.md", "Undo.md"].includes(f),
+      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !f.startsWith("Editors/") && !f.startsWith("LocalApi-") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Fails.md", "Linker.md", "DailyTemplate.md", "Tasks.md", "Blank daily.md", "Blank open.md", "Undo.md", "Retry.md"].includes(f),
     );
     return notes.join(",") === "Projects/Renamed.md" ? notes : undefined;
   }, 15000);
