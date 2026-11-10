@@ -575,11 +575,14 @@ try {
     return true`);
   check("Vault.modify reconciles an external edit before its watcher finishes", !!(await agrees(concurrentPath)));
   const afterConcurrent = await snapshotOf(cdp, concurrentPath);
-  // The plugin's write doesn't start from the text the engine last saw, so the engine can't
-  // tell its change from the outside edit's: both keep their text and stay unknown.
-  check("Vault.modify over an unseen outside edit keeps both additions, as unknown",
-    ["External addition.\n", "Local addition.\n"].every((added) =>
-      attributesOf(afterConcurrent, added).length === added.length && attributesOf(afterConcurrent, added).every((a) => a.pa === "unknown")) &&
+  // The outside edit stays unknown. The plugin's addition is the human's if the engine merged
+  // the outside edit before the plugin's write landed; if it read both at once it can't tell
+  // them apart, and both stay unknown. Which happens depends on when Obsidian's watcher fires.
+  const localAddition = attributesOf(afterConcurrent, "Local addition.\n");
+  check("Vault.modify over an unseen outside edit keeps both additions, the outside one unknown",
+    afterConcurrent.text === beforeConcurrent.text + "External addition.\nLocal addition.\n" &&
+    attributesOf(afterConcurrent, "External addition.\n").every((a) => a.pa === "unknown") &&
+    (localAddition.every((a) => a.pa === "unknown") || isHuman(localAddition)) &&
     isDeepStrictEqual(afterConcurrent.attrs.slice(0, beforeConcurrent.text.length), beforeConcurrent.attrs), JSON.stringify(afterConcurrent));
   localApiSaved.set(concurrentPath, afterConcurrent);
 
