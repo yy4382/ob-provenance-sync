@@ -23,7 +23,7 @@ for (const dir of [vault, secondVault]) {
   mkdirSync(join(dir, ".obsidian/plugins"), { recursive: true });
   cpSync(join(here, "quirk-probe"), join(dir, ".obsidian/plugins/quirk-probe"), { recursive: true });
   writeFileSync(join(dir, ".obsidian/community-plugins.json"), JSON.stringify(["quirk-probe"]));
-  writeFileSync(join(dir, ".obsidian/core-plugins.json"), JSON.stringify({ "daily-notes": true, sync: false }));
+  writeFileSync(join(dir, ".obsidian/core-plugins.json"), JSON.stringify({ "daily-notes": true, templates: true, sync: false }));
 }
 
 const instance = await obsidian({ vault, profile: join(work, "profile") });
@@ -148,6 +148,45 @@ const QUIRKS = [
       await openExisting(second);
       const states = (await logOf(["state"])).filter((e) => e.file === second);
       expect(before === 0 && states.some((e) => e.doc === "Second note.\n"), "opening a file builds a new editor state that holds its text and names it", { first, states });
+    },
+  },
+  {
+    id: "table-cell-editor-names-its-note",
+    async probe() {
+      const path = await openNote("| a | b |\n| - | - |\n| 1 | 2 |\n\nAfter.\n");
+      await cdp.eval(`const l = app.workspace.activeLeaf; await l.setViewState({ type: "markdown", state: { file: ${JSON.stringify(path)}, mode: "source", source: false } });
+        await new Promise((r) => setTimeout(r, 500)); return true`);
+      await clearLog();
+      await cdp.click(".markdown-source-view .cm-table-widget td");
+      await sleep(300);
+      await cdp.type("Z");
+      await sleep(300);
+      const seen = await logOf(["state", "edit"]);
+      const cell = seen.find((e) => e.kind === "edit" && e.doc.includes("Z") && !e.doc.includes("After."));
+      expect(cell?.file === path && cell.own === false && seen.filter((e) => e.kind === "edit" && e.doc.includes("After.")).every((e) => e.own),
+        "a Live Preview table cell is edited in an editor of its own, which names the note but isn't the editor the note's view holds", seen);
+      await cdp.eval(`document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27, bubbles: true })); return true`);
+    },
+  },
+  {
+    id: "frontmatter-edit-is-set-inside-save-frontmatter",
+    async probe() {
+      await cdp.eval(`await app.vault.createFolder("Templates").catch(() => {}); await app.vault.create("Templates/Front.md", "---\\nkind: tpl\\n---\\nFrom template.\\n");
+        app.internalPlugins.getPluginById("templates").instance.options.folder = "Templates"; return true`);
+      for (const [how, call, added] of [
+        ["insertProperties", `app.workspace.activeLeaf.view.metadataEditor.insertProperties({ extra: "added" })`, "extra: added"],
+        ["a template", `await app.internalPlugins.getPluginById("templates").instance.insertTemplate(app.vault.getFileByPath("Templates/Front.md"))`, "kind: tpl"],
+      ]) {
+        const path = await openNote("---\nstatus: draft\n---\nBody.\n");
+        await cdp.eval(`${call}; return true`);
+        await sleep(300);
+        const seen = (await logOf(["frontmatter:start", "frontmatter:end", "edit"])).filter((e) => e.kind !== "edit" || e.file === path);
+        const start = seen.findIndex((e) => e.kind === "frontmatter:start" && e.file === path);
+        const end = seen.findIndex((e) => e.kind === "frontmatter:end" && e.id === seen[start]?.id);
+        const edit = seen.findIndex((e) => e.kind === "edit" && e.doc.includes(added));
+        expect(start >= 0 && start < edit && edit < end && seen[edit].event === "set" && seen[edit].own,
+          `${how} changes the frontmatter through MarkdownView.saveFrontmatter, which puts it in the pane's editor as a set transaction before it returns`, seen);
+      }
     },
   },
   {

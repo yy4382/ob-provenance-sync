@@ -46,7 +46,7 @@ writeFileSync(join(vault, "pixel (conflict 5a5b5c5d).png"), pixel);
 // Obsidian turns its own Sync on by default, and the plugin stays off while another sync is on.
 const corePlugins = join(vault, ".obsidian/core-plugins.json");
 mkdirSync(dirname(corePlugins), { recursive: true });
-writeFileSync(corePlugins, JSON.stringify({ ...(existsSync(corePlugins) ? JSON.parse(readFileSync(corePlugins, "utf8")) : {}), sync: false }));
+writeFileSync(corePlugins, JSON.stringify({ ...(existsSync(corePlugins) ? JSON.parse(readFileSync(corePlugins, "utf8")) : {}), sync: false, templates: true }));
 const pluginDir = join(vault, ".obsidian/plugins/provenance-sync");
 mkdirSync(pluginDir, { recursive: true });
 for (const f of ["main.js", "manifest.json", "styles.css"]) cpSync(join(repo, "apps/obsidian", f), join(pluginDir, f));
@@ -922,6 +922,55 @@ try {
   check("an error in an editor's sync keeps its typing single", failed.disk === "Before.\nSaved One Two Three " && failed.crdt === failed.disk, JSON.stringify(failed));
   check("an error in an editor's sync is in the event log", await cdp.eval(`return ${plugin}.log.entries.some((e) => e.message.includes("simulated push failure"))`));
 
+  // Obsidian edits in places other than the pane's own editor. Each of these corrupted the note.
+  mkdirSync(join(vault, "Editors/Templates"), { recursive: true });
+  writeFileSync(join(vault, "Editors/Templates/Front.md"), "---\nkind: tpl\n---\nBody from template.\n");
+  const cursorAtEnd = (line) => cdp.eval(`const e = app.workspace.activeLeaf.view.editor; e.setCursor({ line: ${line}, ch: e.getLine(${line}).length }); e.cm.focus(); return true`);
+  const openInLivePreview = async (path, text, line) => {
+    writeFileSync(join(vault, path), text);
+    await eventually(() => cdp.eval(`return !!${engineFile(path)}`));
+    await openInMode(cdp, "app.workspace.getLeaf(false)", path, "source");
+    await cursorAtEnd(line);
+  };
+  const settledText = async (path) => {
+    await sleep(3000);
+    return { disk: readFileSync(join(vault, path), "utf8"), crdt: await cdp.eval(`return ${engineFile(path)}.ytext.toJSON()`), pane: await cdp.eval(`return app.workspace.activeLeaf.view.editor.getValue()`) };
+  };
+  const agreed = (s) => s.disk === s.crdt && s.crdt === s.pane;
+  const times = (text, marker) => text.split(marker).length - 1;
+
+  // A Live Preview table cell is an editor of its own, inside the note's.
+  await openInLivePreview("Editors/Table.md", "| a | b |\n| - | - |\n| 1 | 2 |\n\nAfter.\n", 4);
+  await cdp.click(".markdown-source-view .cm-table-widget td", 0);
+  await sleep(300);
+  await cdp.type("Z");
+  await sleep(200);
+  await cdp.eval(`document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27, bubbles: true })); return true`);
+  const table = await settledText("Editors/Table.md");
+  check("typing in a Live Preview table cell edits that cell once", agreed(table) && /^\| *a *\| *b *\|\n\| *-+ *\| *-+ *\|\n\| *(Z1|1Z) *\| *2 *\|\n\nAfter\.\n$/.test(table.crdt), JSON.stringify(table));
+
+  await openInLivePreview("Editors/Property.md", "---\nstatus: draft\n---\nBody.\n", 3);
+  await cdp.type(" typed");
+  await sleep(100);
+  await cdp.eval(`app.workspace.activeLeaf.view.metadataEditor.insertProperties({ extra: "added" }); return true`);
+  await sleep(300);
+  await cursorAtEnd(4);
+  await cdp.type(" after");
+  const property = await settledText("Editors/Property.md");
+  check("adding a property after typing keeps the typing single", agreed(property) && property.crdt === "---\nstatus: draft\nextra: added\n---\nBody. typed after\n", JSON.stringify(property));
+
+  await cdp.eval(`app.internalPlugins.getPluginById("templates").instance.options.folder = "Editors/Templates"; return true`);
+  await openInLivePreview("Editors/Template.md", "Note.\n\n", 0);
+  await cdp.type(" typed");
+  await cursorAtEnd(1);
+  await cdp.eval(`await app.internalPlugins.getPluginById("templates").instance.insertTemplate(app.vault.getFileByPath("Editors/Templates/Front.md")); return true`);
+  await sleep(500);
+  await cdp.type("after");
+  const template = await settledText("Editors/Template.md");
+  check("inserting a template with frontmatter after typing adds each text once",
+    agreed(template) && template.crdt.startsWith("---\nkind: tpl\n---\n") && ["kind: tpl", "Note. typed", " typed", "Body from template.", "after"].every((m) => times(template.crdt, m) === 1),
+    JSON.stringify(template));
+
   await cdp.eval(`await app.plugins.plugins["provenance-sync"].engine.settle(); return true`);
   await sleep(1500);
   ob(["create", "--path", "Cli/late.md", "--content", "Base.\n", "--why", "agent", "--agent", "shell-agent"]);
@@ -973,7 +1022,7 @@ try {
     const notes = r.result.files.filter(
       (f) => !localApiSaved.has(f),
     ).filter(
-      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !f.startsWith("LocalApi-") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Fails.md", "Linker.md", "DailyTemplate.md", "Tasks.md", "Blank daily.md", "Blank open.md"].includes(f),
+      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !f.startsWith("Editors/") && !f.startsWith("LocalApi-") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Fails.md", "Linker.md", "DailyTemplate.md", "Tasks.md", "Blank daily.md", "Blank open.md"].includes(f),
     );
     return notes.join(",") === "Projects/Renamed.md" ? notes : undefined;
   }, 15000);

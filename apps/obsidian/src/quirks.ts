@@ -1,7 +1,7 @@
 import { Transaction } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import { around } from "monkey-around";
-import { editorInfoField, MarkdownView, moment, normalizePath, requireApiVersion, TextFileView, type App, type DataWriteOptions, type TFile } from "obsidian";
+import { editorInfoField, MarkdownView, moment, normalizePath, requireApiVersion, TextFileView, type App, type DataWriteOptions, type MarkdownFileInfo, type TFile } from "obsidian";
 
 /**
  * What this plugin relies on that Obsidian doesn't promise. Each `quirk:` line
@@ -26,7 +26,8 @@ export type EditKind = "local" | "copy";
  * Obsidian copying an edit into the file's other panes, or reloading a file
  * another program changed, is "set". Every other edit is local: typing,
  * Obsidian's commands, a click on a task, and other plugins through the
- * Editor API, which carry no user event.
+ * Editor API, which carry no user event. A frontmatter edit is "set" too,
+ * but it is the pane's own: see `wrapFrontmatterSaves`.
  *
  * quirk: typing-has-user-event
  * quirk: commands-have-user-event
@@ -36,21 +37,55 @@ export type EditKind = "local" | "copy";
  * quirk: outside-reload-is-set
  */
 export function editKind(tr: Transaction): EditKind {
-  return tr.annotation(Transaction.userEvent) === "set" ? "copy" : "local";
+  if (tr.annotation(Transaction.userEvent) !== "set") return "local";
+  const info = tr.startState.field(editorInfoField, false);
+  return info && savingFrontmatter.has(info) ? "local" : "copy";
+}
+
+const savingFrontmatter = new Set<MarkdownFileInfo>();
+
+/**
+ * Lets `editKind` tell a pane's frontmatter edit from a copy. The Properties
+ * view, `metadataEditor.insertProperties` and Templates change frontmatter
+ * through `MarkdownView.saveFrontmatter`, which puts the new text in the
+ * pane's editor as a "set" transaction before it returns. Returns the undo.
+ *
+ * quirk: frontmatter-edit-is-set-inside-save-frontmatter
+ */
+export function wrapFrontmatterSaves(): () => void {
+  return around(MarkdownView.prototype as FrontmatterSaver, {
+    saveFrontmatter: (next) =>
+      function (this: FrontmatterSaver, frontmatter) {
+        savingFrontmatter.add(this);
+        try {
+          return next.call(this, frontmatter);
+        } finally {
+          savingFrontmatter.delete(this);
+        }
+      },
+  });
+}
+
+interface FrontmatterSaver extends MarkdownView {
+  saveFrontmatter(frontmatter: Record<string, unknown>): void;
 }
 
 /**
  * The file whose text a new editor state holds. Obsidian loads each file into
  * a new state, so the pane's file on arrival is the file. It is null for the
  * blank state Obsidian installs when leaving a file with unsaved edits, while
- * the pane still names that file: the state holds no file's text.
+ * the pane still names that file: the state holds no file's text. It is null
+ * for an editor inside the pane's, such as a Live Preview table cell's, which
+ * names the pane's file but holds one cell.
  *
  * quirk: each-file-gets-a-new-state
  * quirk: leaving-unsaved-note-blanks-editor
+ * quirk: table-cell-editor-names-its-note
  */
 export function fileLoadedInto(view: EditorView): TFile | null {
   const info = view.state.field(editorInfoField, false);
-  return info instanceof TextFileView && info.data === null ? null : (info?.file ?? null);
+  if (!info || (info.editor as unknown as { cm?: EditorView } | undefined)?.cm !== view) return null;
+  return info instanceof TextFileView && info.data === null ? null : info.file;
 }
 
 /**

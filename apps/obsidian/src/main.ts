@@ -5,7 +5,7 @@ import { registerAgentCli } from "./agent-ops";
 import { ConflictsModal } from "./conflicts";
 import { EVENT_LOG_VIEW, EventLog, EventLogView } from "./event-log";
 import { provenanceExtension, renderProvenance, segmentAt } from "./editor/binding";
-import { codeMirrorOf } from "./quirks";
+import { codeMirrorOf, wrapFrontmatterSaves } from "./quirks";
 import { ReattributeModal, type Attribution, type Reattribution } from "./reattribute";
 import { defaultSettings, ProvenanceSettingTab, type ProvenanceSettings } from "./settings";
 import { SyncEngine, within, type SyncStatus } from "./sync/engine";
@@ -57,6 +57,7 @@ export default class ProvenancePlugin extends Plugin {
     await this.saveSettings();
     this.addSettingTab(new ProvenanceSettingTab(this.app, this));
     this.registerEditorExtension(provenanceExtension(() => this.engine, (event) => this.log.add(event)));
+    this.register(wrapFrontmatterSaves());
     void this.keepLog();
     this.applyColors();
     if (!Platform.isMobile) {
