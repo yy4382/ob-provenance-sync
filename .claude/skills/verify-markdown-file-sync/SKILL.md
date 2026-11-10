@@ -28,7 +28,7 @@ VaultTree.tla:
 
 ## Does my change touch this?
 
-Both models were last confirmed to describe the code at **85c9eda** (sync commit).
+Both models were last confirmed to describe the code at **c7e9ec3** (sync commit).
 
 | Code | MarkdownFile.tla |
 | --- | --- |
