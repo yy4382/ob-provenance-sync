@@ -139,6 +139,25 @@ const QUIRKS = [
     },
   },
   {
+    id: "outside-reload-keeps-unsaved-typing",
+    async probe() {
+      const path = await openNote("Top.\n\nBottom.\n");
+      await cdp.type("Typed");
+      await clearLog();
+      writeFileSync(join(vault, path), "Top. Outside.\n\nBottom.\n");
+      const edits = await eventually(async () => {
+        const seen = await logOf(["edit"]);
+        return seen.length ? seen : undefined;
+      });
+      const text = await cdp.eval(`return app.workspace.activeEditor.editor.getValue()`);
+      expect(
+        text === "Top. Outside.\n\nBottom.\nTyped" && JSON.stringify(edits?.map((e) => e.changes)) === JSON.stringify([[[4, 4, " Outside."]]]),
+        "reloading a pane with unsaved typing changes only what the file changed, and keeps the typing",
+        { text, edits },
+      );
+    },
+  },
+  {
     id: "each-file-gets-a-new-state",
     async probe() {
       const first = await openNote("First note.\n");

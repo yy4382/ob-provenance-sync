@@ -38,7 +38,10 @@ module.exports = class QuirkProbe extends Plugin {
           update(u) {
             const now = describe(u.view);
             for (const tr of u.transactions) {
-              if (tr.docChanged) record({ kind: "edit", state: this.state, event: tr.annotation(Transaction.userEvent) ?? null, ...now });
+              if (!tr.docChanged) continue;
+              const changes = [];
+              tr.changes.iterChanges((from, to, _fromB, _toB, inserted) => changes.push([from, to, inserted.toString()]));
+              record({ kind: "edit", state: this.state, event: tr.annotation(Transaction.userEvent) ?? null, changes, ...now });
             }
             record({ kind: "update", state: this.state, sameFileObject: now.fileObject === this.first.fileObject, ...now });
           }

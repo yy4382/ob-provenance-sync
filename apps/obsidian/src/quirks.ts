@@ -37,6 +37,7 @@ export type EditKind = "local" | "copy";
  * quirk: pane-copies-are-set
  * quirk: typed-edit-precedes-its-copy
  * quirk: outside-reload-is-set
+ * quirk: outside-reload-keeps-unsaved-typing
  */
 export function editKind(tr: Transaction): EditKind {
   if (tr.annotation(Transaction.userEvent) !== "set") return "local";
