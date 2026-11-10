@@ -901,6 +901,24 @@ try {
   const movedText = readFileSync(join(vault, "Moved.md"), "utf8");
   check("renaming a note with unsaved text keeps it single", movedText === "Before.\nTyped More ", JSON.stringify(movedText));
 
+  // An error in the editor binding made CodeMirror drop it for good: the pane stopped syncing, the engine wrote
+  // the file under its unsaved typing, and later merges typed recent words in a second time.
+  writeFileSync(join(vault, "Fails.md"), "Before.\n");
+  await eventually(() => cdp.eval(`return !!${engineFile("Fails.md")}`));
+  await openAndFocus(cdp, "Fails.md", 1);
+  await cdp.type("Saved ");
+  await sleep(2500);
+  await cdp.type("One ");
+  await cdp.eval(`const t = ${engineFile("Fails.md")}.ytext; const insert = t.insert;
+    t.insert = function () { t.insert = insert; throw new Error("simulated push failure"); }; return true`);
+  await cdp.type("Two ");
+  await sleep(500);
+  await cdp.type("Three ");
+  await sleep(3000);
+  const failed = { disk: readFileSync(join(vault, "Fails.md"), "utf8"), crdt: await cdp.eval(`return ${engineFile("Fails.md")}.ytext.toJSON()`) };
+  check("an error in an editor's sync keeps its typing single", failed.disk === "Before.\nSaved One Two Three " && failed.crdt === failed.disk, JSON.stringify(failed));
+  check("an error in an editor's sync is in the event log", await cdp.eval(`return ${plugin}.log.entries.some((e) => e.message.includes("simulated push failure"))`));
+
   await cdp.eval(`await app.plugins.plugins["provenance-sync"].engine.settle(); return true`);
   await sleep(1500);
   ob(["create", "--path", "Cli/late.md", "--content", "Base.\n", "--why", "agent", "--agent", "shell-agent"]);
@@ -952,7 +970,7 @@ try {
     const notes = r.result.files.filter(
       (f) => !localApiSaved.has(f),
     ).filter(
-      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !f.startsWith("LocalApi-") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Linker.md", "DailyTemplate.md", "Tasks.md", "Blank daily.md", "Blank open.md"].includes(f),
+      (f) => !f.startsWith("Bulk/") && !f.startsWith("McpMoved/") && !f.startsWith("Cli/") && !f.startsWith("LocalApi-") && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f) && !["Lost.md", "pixel.png", "Left.md", "Next.md", "Moved.md", "Fails.md", "Linker.md", "DailyTemplate.md", "Tasks.md", "Blank daily.md", "Blank open.md"].includes(f),
     );
     return notes.join(",") === "Projects/Renamed.md" ? notes : undefined;
   }, 15000);

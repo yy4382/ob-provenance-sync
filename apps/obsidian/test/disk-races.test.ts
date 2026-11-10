@@ -243,6 +243,36 @@ it("keeps typing single when a save picked before the pane bound lands after", a
   expect(authors(file).slice(1)).toEqual([[" One Two", "human:chris"]]);
 });
 
+// An editor can stop syncing while its note stays open, as after an error or a restart of
+// sync, and the user keeps typing. Its text is then an edit of the state it last showed,
+// so merging it over the file's older base typed again everything since that base.
+const human = humanProvenance("human:chris", "mac");
+
+it("keeps typing single when an editor that showed the note binds again", async () => {
+  const { engine, file } = await offline("Base.");
+  const release = await file.bindEditor(() => "Base.");
+  insertText(file.ytext, 5, " One", human);
+  const shown = file.textState();
+  release();
+  await file.bindEditor(() => "Base. One Two", shown);
+  await engine.settle();
+  expect(file.ytext.toJSON()).toBe("Base. One Two");
+  expect(authors(file).slice(1)).toEqual([[" One Two", "human:chris"]]);
+});
+
+it("keeps typing single when Obsidian saves an editor before it binds again", async () => {
+  const { engine, disk, file } = await offline("Base.");
+  const release = await file.bindEditor(() => "Base.");
+  insertText(file.ytext, 5, " One", human);
+  release(file.textState());
+  await disk.save("a.md", "Base. One Two");
+  await engine.settle();
+  await file.bindEditor(() => "Base. One Two Three");
+  await engine.settle();
+  expect(file.ytext.toJSON()).toBe("Base. One Two Three");
+  expect(authors(file).slice(1)).toEqual([[" One Two Three", "human:chris"]]);
+});
+
 // A pane opened the note before the engine wrote a remote edit to the file, and binds
 // before Obsidian reloads it. Its text is then the one that write replaced, so merging
 // it would undo the remote edit, and the reload would bring the text back as unknown.
