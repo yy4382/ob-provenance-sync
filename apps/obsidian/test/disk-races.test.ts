@@ -199,6 +199,48 @@ it("attributes a note a plugin creates to the human", async () => {
   expect(authors(engine.fileAt("b.md")!)).toEqual([["Template line.\n", "human:chris"]]);
 });
 
+// The user types into a note right after opening it, while its bind waits in the queue.
+// Obsidian saves part of that typing, and the CRDT holds none of it, so the save isn't
+// tracked. Binding made the pane's later text the base, and the save's queued event then
+// read as an outside edit that deleted what was typed after the save.
+it("keeps typing from before the pane bound when an untracked save is read after", async () => {
+  const { engine, disk, file } = await offline("Base.");
+  let pane = "Base.";
+  let busy!: () => void;
+  const held = new Promise<void>((r) => (busy = r));
+  void engine.enqueue(() => held);
+  const binding = file.bindEditor(() => pane);
+  pane = "Base. One";
+  await disk.save("a.md", pane);
+  pane = "Base. One Two";
+  busy();
+  await binding;
+  await engine.settle();
+  expect(file.ytext.toJSON()).toBe("Base. One Two");
+});
+
+// Obsidian picks a save's text, then waits on other file operations before it writes. A
+// save picked before the pane bound lands after, as text no CRDT state held, and was
+// merged as an outside edit over a base that lacked it, so its words came in twice.
+it("keeps typing single when a save picked before the pane bound lands after", async () => {
+  const { engine, disk, file } = await offline("Base.");
+  let pane = "Base. One";
+  let busy!: () => void, adapter!: () => void;
+  const held = new Promise<void>((r) => (busy = r));
+  void engine.enqueue(() => held);
+  const binding = file.bindEditor(() => pane);
+  const waiting = new Promise<void>((r) => (adapter = r));
+  const saving = waiting.then(() => disk.save("a.md", "Base. One"));
+  engine.saveStarted("a.md", saving);
+  pane = "Base. One Two";
+  busy();
+  await sleep(0);
+  adapter();
+  await binding;
+  await engine.settle();
+  expect(file.ytext.toJSON()).toBe("Base. One Two");
+});
+
 // A pane opened the note before the engine wrote a remote edit to the file, and binds
 // before Obsidian reloads it. Its text is then the one that write replaced, so merging
 // it would undo the remote edit, and the reload would bring the text back as unknown.
